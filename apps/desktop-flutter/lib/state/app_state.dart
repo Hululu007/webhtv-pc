@@ -33,6 +33,7 @@ import '../core/tmdb_playback.dart';
 import '../core/tmdb_season.dart';
 import '../services/app_paths.dart';
 import '../services/android_bridge_service.dart';
+import '../services/android_playback_bridge.dart';
 import '../services/cat_bundle.dart';
 import '../services/cat_runtime.dart';
 import '../services/epg_service.dart';
@@ -131,6 +132,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     LiveService? liveService,
     EpgService? epgService,
     AndroidBridgeService? androidBridgeService,
+    AndroidPlaybackBridge? androidPlaybackBridge,
     SyncClient? syncClient,
     SyncServer Function(SyncServerHost host)? syncServerFactory,
     /// 测试注入的站点 HTTP 客户端（widget/单测不可做真实 socket I/O）。
@@ -157,6 +159,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     // 与 manifest 注册表同根，但独立子目录：两种站源形态的入口解析规则不同。
     _cspBinding = CspJvmBinding(root: p.join(this.paths.configDir, 'spiders', 'csp'));
     _proxy = LocalProxyServer(log: this.log);
+    _androidPlaybackBridge = androidPlaybackBridge ?? AndroidPlaybackBridge(log: this.log);
     // 安卓接入与同步（Phase 5）：只装配，不自动启动服务端（P3 默认关闭）。
     syncState = SyncState(
       log: this.log,
@@ -220,6 +223,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   late HttpApiClient _httpClient = HttpApiClient();
   final CatHttpClient _catHttpClient = CatHttpClient();
   late final SpiderRouter _router;
+  late final AndroidPlaybackBridge _androidPlaybackBridge;
 
   /// 测试注入的直播服务（用于避免 UI 测试在 fake-async 区做真实 socket I/O）。
   final LiveService? _injectedLiveService;
@@ -944,6 +948,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     }
     _siteService = SiteService(
       appConfig: config,
+      playbackBridge: _androidPlaybackBridge,
       router: SpiderRouter(
         client: _httpClient,
         globalHeaders: config.headers,
@@ -1826,6 +1831,45 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     notifyListeners();
   }
 
+  /// 展开分享资源的分集；作品身份仍使用目录条目，供 TMDB 与播放历史关联。
+  Future<Vod?> loadFolderResource(Vod parent, Vod entry) async {
+    final service = _siteService;
+    final site = _selectedSite;
+    if (service == null || site == null) return null;
+    final runId = ++_detailRunId;
+    try {
+      final outcome = await service.detail(site, entry.vodId);
+      if (runId != _detailRunId) return null;
+      final playable = outcome.value.list.where(
+        (item) => playLinesOf(item).isNotEmpty,
+      ).firstOrNull;
+      if (playable == null) {
+        throw AppError(
+          AppErrorKind.playbackUrlMissing,
+          '该资源没有返回可播放的分集，请重试或选择其他资源',
+        );
+      }
+      // 网关可以把分享链换成 atvp_resume 句柄。句柄不是分集目标，
+      // 播放时必须使用 vod_play_url 中每集的原始值。
+      final vod = Vod.fromJson({
+        ...parent.toJson(),
+        'vod_tag': 'file',
+        'vod_play_from': playable.vodPlayFrom,
+        'vod_play_url': playable.vodPlayUrl,
+      })!;
+      _selectedVod = vod;
+      unawaited(reloadTmdb());
+      log.info(
+        '资源分集加载成功 site=${site.key} lines=${playLinesOf(vod).length}',
+        scope: 'site',
+      );
+      return vod;
+    } catch (error) {
+      if (runId != _detailRunId) return null;
+      rethrow;
+    }
+  }
+
   /// 清空详情错误（详情页「重试」后的提示关闭）。
   void clearDetailError() {
     if (_detailError == null) return;
@@ -2389,6 +2433,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
 
   @override
   void dispose() {
+    _detailRunId++;
     _router.dispose();
     _importService.close();
     _liveService?.close();
@@ -2396,6 +2441,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     _tmdbService.close();
     // §22.2:退出后 sidecar 与代理端口全部释放。
     unawaited(_supervisor.shutdownAll());
+    unawaited(_androidPlaybackBridge.close());
     unawaited(_proxy.stop());
     // 猫源 Node 进程树与 bundle 句柄同样必须随退出释放（§9.8）。
     _catPipeline?.close();

@@ -13,6 +13,7 @@ import '../core/http_api.dart';
 import '../core/parse_runtime.dart';
 import '../core/playback.dart';
 import '../core/protocol.dart';
+import 'android_playback_bridge.dart';
 import 'parse_service.dart';
 import 'spider_router.dart';
 import 'storage.dart';
@@ -36,11 +37,13 @@ class SiteService {
     required this.appConfig,
     required this.router,
     this.database,
+    this.playbackBridge,
     this.userAgent = HttpApiRequestBuilder.defaultUserAgent,
   });
 
   final AppConfig appConfig;
   final SpiderRouter router;
+  final AndroidPlaybackBridge? playbackBridge;
 
   /// 本地数据库（可为空：存储不可用时降级运行）。
   final AppDatabase? database;
@@ -308,6 +311,9 @@ class SiteService {
           parseService: parseService,
           stopwatch: stopwatch,
         );
+      }
+      if (playbackBridge != null) {
+        decision = await playbackBridge!.resolveDecision(site, decision);
       }
       _record(site.key, HealthAction.play, true, stopwatch.elapsed, null);
       return SiteCallResult(value: decision, latency: stopwatch.elapsed);

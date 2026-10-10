@@ -890,6 +890,13 @@ class _DetailPageState extends State<DetailPage> {
   /// 剧集是否网格模式（对齐上游 `@id/episodeViewMode`）。
   bool _episodeGridMode = false;
 
+  Vod? _folderVod;
+  String? _selectedFolderEntry;
+  String? _loadingFolderEntry;
+  AppError? _folderError;
+  SiteResult? _folderResult;
+  int _folderRequest = 0;
+
   @override
   void initState() {
     super.initState();
@@ -913,7 +920,17 @@ class _DetailPageState extends State<DetailPage> {
   }
 
   void _onStateChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    // 刷新、返回或换站点时，旧资源请求和选集都随详情结果一起失效。
+    if (!identical(_folderResult, widget.state.detailResult)) {
+      _folderResult = widget.state.detailResult;
+      _folderRequest++;
+      _folderVod = null;
+      _selectedFolderEntry = null;
+      _loadingFolderEntry = null;
+      _folderError = null;
+    }
+    setState(() {});
   }
 
   void _closeDetail() {
@@ -969,6 +986,7 @@ class _DetailPageState extends State<DetailPage> {
   }
 
   Vod? get _currentVod {
+    if (_folderVod != null) return _folderVod;
     final result = widget.state.detailResult;
     if (result != null &&
         result.list.isNotEmpty &&
@@ -1074,7 +1092,7 @@ class _DetailPageState extends State<DetailPage> {
     final belongs = result != null &&
         result.list.isNotEmpty &&
         result.list.first.vodId == widget.vod.vodId;
-    final vod = belongs ? result.list.first : widget.vod;
+    final vod = _folderVod ?? (belongs ? result.list.first : widget.vod);
     final lines = state.playLinesOf(vod);
     final loading = state.detailPhase == LoadPhase.loading;
     final tmdb = state.tmdb;
@@ -1236,17 +1254,23 @@ class _DetailPageState extends State<DetailPage> {
                       padding: EdgeInsets.symmetric(vertical: 24),
                       child: Center(child: CircularProgressIndicator()),
                     )
-                  // `folder` 展开结果：不是单部作品的线路，而是一串**资源条目**
-                  // （百度/夸克/阿里分享链…），点一条即播。
-                  //
-                  // 为什么单独一个分支：网盘聚合站（实测 170 站点里 93 个共用
-                  // `spring.jar`）的详情只能这样打开——把 `folder` 当普通条目
-                  // 调 `ids=` 只会拿到空壳（`vod_name`/`vod_play_url` 均空）。
-                  else if (_isFolderExpansion(result))
-                    _buildFolderEntries(context, vod, result!.list)
+                  // 分享资源先展开分集，再复用普通线路选择与播放器换集。
+                  else if (_isFolderExpansion(result)) ...[
+                    _buildFolderEntries(context, vod, result!.list),
+                    if (_loadingFolderEntry != null)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 12),
+                        child: LinearProgressIndicator(),
+                      ),
+                    if (_folderError != null)
+                      ErrorBanner(
+                        error: _folderError!,
+                        onDismiss: () => setState(() => _folderError = null),
+                      ),
+                  ]
                   else if (lines.isEmpty)
-                    const Text('该影片没有可播放的剧集（vod_play_url 为空）。')
-                  else ...[
+                    const Text('该影片没有可播放的剧集（vod_play_url 为空）。'),
+                  if (lines.isNotEmpty) ...[
                     // 线路选择（`04` §3.1 ④）：点击即切换，剧集卡片随之切换。
                     // 对齐上游 `@id/flag` —— 上游也只渲染**当前线路**的选集区。
                     TmdbLineSelector(
@@ -1286,7 +1310,7 @@ class _DetailPageState extends State<DetailPage> {
     );
   }
 
-  /// 渲染 `folder` 展开后的资源条目（点一条即播）。
+  /// 渲染分享资源选择，分集就绪后仍可切换其他资源。
   Widget _buildFolderEntries(
     BuildContext context,
     Vod vod,
@@ -1301,7 +1325,7 @@ class _DetailPageState extends State<DetailPage> {
         ),
         const SizedBox(height: 4),
         Text(
-          '该站点是网盘聚合源：每个条目是一条分享链，点一条即开始播放。',
+          '选择一条分享资源，加载分集后点选播放。',
           style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 8),
@@ -1314,70 +1338,46 @@ class _DetailPageState extends State<DetailPage> {
               subtitle: entry.vodRemarks == null || entry.vodRemarks!.isEmpty
                   ? null
                   : Text(entry.vodRemarks!),
-              trailing: const Icon(Icons.play_arrow),
-              onTap: () => _playFolderEntry(vod, entry),
+              selected: _selectedFolderEntry == entry.vodId,
+              trailing: _loadingFolderEntry == entry.vodId
+                  ? const SizedBox(
+                      width: 20, height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(_selectedFolderEntry == entry.vodId
+                      ? Icons.check_circle_outline : Icons.chevron_right),
+              onTap: () => _expandFolderEntry(vod, entry),
             ),
           ),
       ],
     );
   }
 
-  /// 播放一条 folder 展开出来的资源条目。
-  ///
-  /// `flag` 取条目标题（实测插件接受任意非空 flag；它靠 `play=` 里的分享链
-  /// 自行判定网盘类型）。**不能留空**：空 flag 会被网关拒绝（实测返回
-  /// `缺少 flag 或 id 参数`）。
-  Future<void> _playFolderEntry(Vod vod, Vod entry) async {
-    final state = widget.state;
+  Future<void> _expandFolderEntry(Vod vod, Vod entry) async {
+    final request = ++_folderRequest;
+    setState(() {
+      _loadingFolderEntry = entry.vodId;
+      _selectedFolderEntry = null;
+      _folderVod = null;
+      _folderError = null;
+    });
     try {
-      final decision = await state.resolvePlayback(
-        episodeTarget: entry.vodId,
-        flag: entry.vodName.isEmpty ? '网盘' : entry.vodName,
-        vodId: vod.vodId,
-      );
-      if (decision == null || decision.url == null) {
-        throw AppError(
-          AppErrorKind.playbackUrlMissing,
-          '播放决策没有返回可用地址',
-          detail: 'entry=${entry.vodName}',
-        );
-      }
-      if (!mounted) return;
-      final resume = state.resumePositionFor(
-        siteKey: state.selectedSite?.key ?? '',
-        vodId: vod.vodId,
-        flag: entry.vodName,
-        episodeId: entry.vodId,
-      );
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => PlayerPage(
-            state: state,
-            request: PlaybackRequest(
-              url: decision.url!,
-              // folder 条目的入口目标是分享链本身（`entry.vodId`），不是解析后的
-              // 代理/网盘直链；历史续播必须用它回传站点重解析。
-              episodeTarget: entry.vodId,
-              headers: decision.headers?.asRequestHeaders ?? const {},
-              title: vod.vodName,
-              siteKey: state.selectedSite?.key ?? '',
-              vodId: vod.vodId,
-              vodName: vod.vodName,
-              episodeName: entry.vodName,
-              flag: entry.vodName,
-              startPosition: resume,
-            ),
-          ),
-        ),
-      );
+      final expanded = await widget.state.loadFolderResource(vod, entry);
+      if (!mounted || request != _folderRequest) return;
+      setState(() {
+        _folderVod = expanded;
+        _selectedFolderEntry = expanded == null ? null : entry.vodId;
+        _selectedLineFlag = '';
+      });
     } catch (error) {
-      if (!mounted) return;
-      final failure = error is AppError
+      if (!mounted || request != _folderRequest) return;
+      setState(() => _folderError = error is AppError
           ? error
-          : AppError(AppErrorKind.unknown, '$error', cause: error);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(failure.userMessage)),
-      );
+          : AppError(AppErrorKind.unknown, '$error', cause: error));
+    } finally {
+      if (mounted && request == _folderRequest) {
+        setState(() => _loadingFolderEntry = null);
+      }
     }
   }
 
