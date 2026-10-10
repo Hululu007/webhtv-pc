@@ -100,7 +100,8 @@ class HeaderMap {
 
   String? operator [](String key) => _byLowerCase[key.trim().toLowerCase()];
 
-  bool containsKey(String key) => _byLowerCase.containsKey(key.trim().toLowerCase());
+  bool containsKey(String key) =>
+      _byLowerCase.containsKey(key.trim().toLowerCase());
 
   bool get isEmpty => _byLowerCase.isEmpty;
 
@@ -256,8 +257,15 @@ class LiveSource {
       userAgent: asNonEmptyString(map['userAgent']),
       extra: {
         for (final entry in map.entries)
-          if (!{'name', 'type', 'url', 'epg', 'proxy', 'referer', 'userAgent'}
-              .contains(entry.key))
+          if (!{
+            'name',
+            'type',
+            'url',
+            'epg',
+            'proxy',
+            'referer',
+            'userAgent',
+          }.contains(entry.key))
             entry.key: entry.value,
       },
     );
@@ -331,8 +339,15 @@ class LiveChannel {
       header: HeaderMap(asMap(map['header'])),
       extra: {
         for (final entry in map.entries)
-          if (!{'name', 'number', 'logo', 'epgId', 'urls', 'group', 'header'}
-              .contains(entry.key))
+          if (!{
+            'name',
+            'number',
+            'logo',
+            'epgId',
+            'urls',
+            'group',
+            'header',
+          }.contains(entry.key))
             entry.key: entry.value,
       },
     );
@@ -390,12 +405,12 @@ class LivePlaylist {
   /// 清单内申明的 EPG 地址（`#EXTM3U url-tvg`，§13.1 EPG）。
   final String? epg;
 
-  int get channelCount => groups.fold(0, (sum, group) => sum + group.channels.length);
+  int get channelCount =>
+      groups.fold(0, (sum, group) => sum + group.channels.length);
 
   /// 全部频道（展平），按分组顺序。
-  List<LiveChannel> get allChannels => groups
-      .expand((group) => group.channels)
-      .toList();
+  List<LiveChannel> get allChannels =>
+      groups.expand((group) => group.channels).toList();
 
   /// 按频道名分区查找（忽略大小写）。
   LiveChannel? channelById(String id) {
@@ -709,7 +724,8 @@ class VodClass {
 
   static VodClass? fromJson(Object? value) {
     final map = asMap(value);
-    final id = asNonEmptyString(map['type_id']) ?? asNonEmptyString(map['typeId']);
+    final id =
+        asNonEmptyString(map['type_id']) ?? asNonEmptyString(map['typeId']);
     final name =
         asNonEmptyString(map['type_name']) ?? asNonEmptyString(map['typeName']);
     if (id == null || name == null) return null;
@@ -808,7 +824,8 @@ class Vod {
 
   static Vod? fromJson(Object? value) {
     final map = asMap(value);
-    final id = asNonEmptyString(map['vod_id']) ?? asNonEmptyString(map['vodId']);
+    final id =
+        asNonEmptyString(map['vod_id']) ?? asNonEmptyString(map['vodId']);
     final name =
         asNonEmptyString(map['vod_name']) ?? asNonEmptyString(map['vodName']);
     if (id == null || name == null) return null;
@@ -845,7 +862,8 @@ class Vod {
       vodActor: asNonEmptyString(map['vod_actor']),
       vodPlayFrom: asNonEmptyString(map['vod_play_from']),
       vodPlayUrl: asNonEmptyString(map['vod_play_url']),
-      vodTag: asNonEmptyString(map['vod_tag']) ?? asNonEmptyString(map['vodTag']),
+      vodTag:
+          asNonEmptyString(map['vod_tag']) ?? asNonEmptyString(map['vodTag']),
       extra: extra,
     );
   }
@@ -868,15 +886,31 @@ class Vod {
 
 /// 一条线路及其剧集。
 class VodPlayLine {
-  const VodPlayLine({required this.flag, required this.episodes});
+  const VodPlayLine({
+    required this.flag,
+    required this.episodes,
+    this.sourceFlag,
+  });
 
+  /// 页面内唯一的线路标识；桥接资源合并时可使用资源名称。
   final String flag;
   final List<VodEpisode> episodes;
 
+  /// 站源播放接口要求的原始 flag，与合并后的展示标识分离。
+  final String? sourceFlag;
+  String get playbackFlag => sourceFlag ?? flag;
+
   String get displayName => flag.isEmpty ? '线路' : flag;
+
+  VodPlayLine copyWith({List<VodEpisode>? episodes}) => VodPlayLine(
+    flag: flag,
+    episodes: episodes ?? this.episodes,
+    sourceFlag: sourceFlag,
+  );
 
   Map<String, Object?> toJson() => {
     'flag': flag,
+    if (sourceFlag != null) 'source_flag': sourceFlag,
     'episodes': episodes.map((episode) => episode.toJson()).toList(),
   };
 }
@@ -897,18 +931,17 @@ class VodEpisode {
   /// 原始终源字段不受影响。
   final Map<String, Object?> extra;
 
-  VodEpisode copyWith({String? name, String? url, Map<String, Object?>? extra}) =>
-      VodEpisode(
-        name: name ?? this.name,
-        url: url ?? this.url,
-        extra: extra ?? this.extra,
-      );
+  VodEpisode copyWith({
+    String? name,
+    String? url,
+    Map<String, Object?>? extra,
+  }) => VodEpisode(
+    name: name ?? this.name,
+    url: url ?? this.url,
+    extra: extra ?? this.extra,
+  );
 
-  Map<String, Object?> toJson() => {
-    ...extra,
-    'name': name,
-    'url': url,
-  };
+  Map<String, Object?> toJson() => {...extra, 'name': name, 'url': url};
 }
 
 /// 外挂字幕（§10.3「外挂字幕」「字幕轨选择」）。
@@ -978,10 +1011,11 @@ class SubtitleInfo {
   };
 
   /// 解析 `subs` 数组：缺 `url` 的条目丢弃（与 `Vod` 缺 id 同语义，§8.4）。
-  static List<SubtitleInfo> listFromJson(Object? value) => asList(value)
-      .map(SubtitleInfo.fromJson)
-      .whereType<SubtitleInfo>()
-      .toList();
+  static List<SubtitleInfo> listFromJson(Object? value) =>
+      asList(value)
+          .map(SubtitleInfo.fromJson)
+          .whereType<SubtitleInfo>()
+          .toList();
 
   @override
   bool operator ==(Object other) =>
@@ -1294,7 +1328,9 @@ bool isSensitiveHeaderKey(String key) =>
 String redactHeadersForLog(Map<String, String> headers) {
   final parts = <String>[];
   for (final entry in headers.entries) {
-    parts.add('${entry.key}=${isSensitiveHeaderKey(entry.key) ? "<redacted>" : entry.value}');
+    parts.add(
+      '${entry.key}=${isSensitiveHeaderKey(entry.key) ? "<redacted>" : entry.value}',
+    );
   }
   parts.sort();
   return parts.join(', ');

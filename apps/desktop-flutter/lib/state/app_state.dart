@@ -112,10 +112,7 @@ enum LoadPhase { idle, loading, ready, failed }
 
 /// 站点列表项的运行时可用性展示（§8.1）。
 class SiteListItem {
-  const SiteListItem({
-    required this.site,
-    required this.availability,
-  });
+  const SiteListItem({required this.site, required this.availability});
 
   final Site site;
   final SiteAvailability availability;
@@ -135,6 +132,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     AndroidPlaybackBridge? androidPlaybackBridge,
     SyncClient? syncClient,
     SyncServer Function(SyncServerHost host)? syncServerFactory,
+
     /// 测试注入的站点 HTTP 客户端（widget/单测不可做真实 socket I/O）。
     /// 与 [liveService]/[epgService] 同一模式：只为可测性开一个口子。
     http.Client? httpClient,
@@ -157,9 +155,12 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     );
     // `csp_*` 站点的桌面 jar 缓存：`<config>/spiders/csp/<siteKey>/`（§9.3、ADR-0002）。
     // 与 manifest 注册表同根，但独立子目录：两种站源形态的入口解析规则不同。
-    _cspBinding = CspJvmBinding(root: p.join(this.paths.configDir, 'spiders', 'csp'));
+    _cspBinding = CspJvmBinding(
+      root: p.join(this.paths.configDir, 'spiders', 'csp'),
+    );
     _proxy = LocalProxyServer(log: this.log);
-    _androidPlaybackBridge = androidPlaybackBridge ?? AndroidPlaybackBridge(log: this.log);
+    _androidPlaybackBridge =
+        androidPlaybackBridge ?? AndroidPlaybackBridge(log: this.log);
     // 安卓接入与同步（Phase 5）：只装配，不自动启动服务端（P3 默认关闭）。
     syncState = SyncState(
       log: this.log,
@@ -189,9 +190,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         runtime: _catRuntime!,
         log: this.log,
       );
-      _importService = ConfigImportService(
-        catResolver: _catPipeline!.resolve,
-      );
+      _importService = ConfigImportService(catResolver: _catPipeline!.resolve);
     }
     _router = SpiderRouter(
       client: _httpClient,
@@ -379,12 +378,12 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   List<LiveSource> get liveSources => _config?.lives ?? const [];
 
   /// 直播服务（§13.1）。首次访问时构造，复用同一个 HttpClient 与缓存。
-  LiveService get liveService => _liveService ??= _injectedLiveService ?? LiveService();
+  LiveService get liveService =>
+      _liveService ??= _injectedLiveService ?? LiveService();
 
   /// EPG 服务（§13.1）。缓存落在 `paths.cacheDir/epg/`，与直播服务同域。
-  EpgService get epgService =>
-      _epgService ??=
-          _injectedEpgService ?? EpgService(cacheDir: paths.cacheDir);
+  EpgService get epgService => _epgService ??=
+      _injectedEpgService ?? EpgService(cacheDir: paths.cacheDir);
   AppDatabase? get database => _database;
   ConfigRecord? get activeRecord => _activeRecord;
   List<ConfigRecord> get configs => _configs;
@@ -534,7 +533,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       startupLatency: stopwatch.elapsed,
     );
     log.info(_startupInfo!.oneLine, scope: 'startup');
-    log.info(_startupInfo!.detailLines.replaceAll('\n', ' | '), scope: 'startup');
+    log.info(
+      _startupInfo!.detailLines.replaceAll('\n', ' | '),
+      scope: 'startup',
+    );
 
     _configPhase = hasConfig ? LoadPhase.ready : LoadPhase.idle;
     notifyListeners();
@@ -557,15 +559,14 @@ class AppState extends ChangeNotifier implements SyncStateHost {
 
   /// TMDB 状态（`04` §2.2）。首次访问时构造；未配置时构造出的实例
   /// 会进入 `disabled` 阶段，不发起任何请求。
-  TmdbState get tmdb =>
-      _tmdbState ??= TmdbState(
-        config: () => _tmdbConfigStore.config,
-        service: _tmdbService,
-        identityService: _ensureTmdbIdentityService(),
-        seasonService: _ensureTmdbSeasonService(),
-        enrichmentService: _ensureTmdbEnrichmentService(),
-        isCurrentRun: () => _tmdbRunId == _detailRunId,
-      );
+  TmdbState get tmdb => _tmdbState ??= TmdbState(
+    config: () => _tmdbConfigStore.config,
+    service: _tmdbService,
+    identityService: _ensureTmdbIdentityService(),
+    seasonService: _ensureTmdbSeasonService(),
+    enrichmentService: _ensureTmdbEnrichmentService(),
+    isCurrentRun: () => _tmdbRunId == _detailRunId,
+  );
 
   /// 当前 TMDB 加载归属的详情运行号（`loadDetail` 每次自增）。
   int _tmdbRunId = 0;
@@ -598,10 +599,8 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         ),
       );
 
-  TmdbSeasonService _ensureTmdbSeasonService() =>
-      _tmdbSeasonService ??= TmdbSeasonService(
-        store: DatabaseTmdbSeasonStore(database: _database!),
-      );
+  TmdbSeasonService _ensureTmdbSeasonService() => _tmdbSeasonService ??=
+      TmdbSeasonService(store: DatabaseTmdbSeasonStore(database: _database!));
 
   TmdbEnrichmentService _ensureTmdbEnrichmentService() =>
       _tmdbEnrichmentService ??= TmdbEnrichmentService(
@@ -754,7 +753,9 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   Future<bool> openExternalUrl(String url) async {
     if (!Platform.isWindows) return false;
     try {
-      await Process.start('explorer.exe', [url], mode: ProcessStartMode.detached);
+      await Process.start('explorer.exe', [
+        url,
+      ], mode: ProcessStartMode.detached);
       return true;
     } catch (error) {
       log.warning('打开外部链接失败：$error', scope: 'tmdb');
@@ -1025,10 +1026,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       final document = parseConfigDocument(resolved.configJson);
       return document.config;
     } catch (error) {
-      log.warning(
-        '猫源重启失败，回退到已保存配置：$error',
-        scope: 'cat',
-      );
+      log.warning('猫源重启失败，回退到已保存配置：$error', scope: 'cat');
       return null;
     }
   }
@@ -1145,8 +1143,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         _resetCategoryPaging();
       }
 
-      final name =
-          displayName ?? config.name ?? source.displayName;
+      final name = displayName ?? config.name ?? source.displayName;
       final recordId = _database?.saveConfig(
         name: name,
         origin: imported.origin,
@@ -1164,8 +1161,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         _activeRecord = _database!.activeConfig();
       }
 
-      _notice = config.notice ??
-          '配置导入成功：${config.sites.length} 个站点';
+      _notice = config.notice ?? '配置导入成功：${config.sites.length} 个站点';
       _configPhase = LoadPhase.ready;
       log.info(
         '配置导入成功 name=$name sites=${config.sites.length} '
@@ -1283,9 +1279,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     // 写盘失败不影响当前会话（内存已生效），因此不 await 结果。
     // `_uiPreferences` 为 null（未 bootstrap）时安静跳过，不让选站点失败。
     unawaited(
-      _uiPreferences?.rememberSite(
-            site.key.isEmpty ? site.name : site.key,
-          ) ??
+      _uiPreferences?.rememberSite(site.key.isEmpty ? site.name : site.key) ??
           Future<void>.value(),
     );
     _categoryResult = null;
@@ -1621,8 +1615,9 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       runId: runId,
       keyword: keyword,
       results: const [],
-      skippedUnsupported:
-          allItems.where((item) => !item.availability.available).length,
+      skippedUnsupported: allItems
+          .where((item) => !item.availability.available)
+          .length,
       skippedNotSearchable: allItems
           .where((item) => item.availability.available && !item.site.searchable)
           .length,
@@ -1689,8 +1684,9 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       }
     }
 
-    final workerCount =
-        sites.length < maxConcurrency ? sites.length : maxConcurrency;
+    final workerCount = sites.length < maxConcurrency
+        ? sites.length
+        : maxConcurrency;
     await Future.wait(List.generate(workerCount, (_) => worker()));
 
     if (outcome.cancelled) {
@@ -1702,10 +1698,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     }
 
     if (!identical(_activeSearch, outcome)) {
-      log.info(
-        '搜索批次 run=$runId 已被取代，结果不再投递 keyword=$keyword',
-        scope: 'search',
-      );
+      log.info('搜索批次 run=$runId 已被取代，结果不再投递 keyword=$keyword', scope: 'search');
       return outcome;
     }
 
@@ -1763,17 +1756,14 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     _detailPhase = LoadPhase.loading;
     notifyListeners();
     try {
-      // `folder` 条目必须用 `t=<vod_id>` **展开**，不能走 `ids=` 详情接口。
-      //
-      // 实测（5559 真机，同一站点同一 id）：
-      // - `ids=atvp_detail:131925` → 空壳（`vod_name` 与 `vod_play_url` 均为空）；
-      // - `t=atvp_detail:131925`   → 返回 3 条真实资源（百度/夸克分享链）。
-      //
-      // 原因：`vod_id` 的 `atvp_detail:` 前缀是插件**分类阶段**自己加的
-      // （`_encode_category_id`），只有 `categoryContent` 会把它剥回去
-      // （插件第 1646 行）；详情接口没有这个语义。安卓 App 正是用 `t=` 展开的。
+      // folder 先取 t=<vod_id> 的资源，再逐个取 ids=<分享链> 的分集。
+      // 在服务层合并成普通详情后，一次交给标准线路 UI 和 TMDB。
       final outcome = vod.isFolder
-          ? await service.category(site, typeId: vod.vodId, page: 1)
+          ? await service.folderDetail(
+              site,
+              vod,
+              isCurrent: () => runId == _detailRunId,
+            )
           : await service.detail(site, vod.vodId);
       if (runId != _detailRunId) {
         // 已被更新的请求（或已离开详情页）取代：结果直接丢弃，不写回状态。
@@ -1785,21 +1775,23 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       }
       _detailResult = outcome.value;
       _detailPhase = LoadPhase.ready;
-      final first = outcome.value.list.isEmpty ? null : outcome.value.list.first;
-      // folder 展开的子条目是分享链（无 `vod_play_url`），而**作品信息在被点的
-      // folder 条目自身**（`vod_name`/`vod_pic`/`vod_remarks`，如「山花烂漫时 /
-      // 全23集」）。因此只有「子条目确实可播」时才把选中条目切到子条目，
-      // 否则保持 folder 条目——否则手动匹配会拿「百度#木偶」这种分享链名去搜 TMDB。
-      final childPlayable = first != null && playLinesOf(first).isNotEmpty;
-      final effective = vod.isFolder && !childPlayable ? vod : (first ?? vod);
+      _detailError = outcome.warnings.isEmpty
+          ? null
+          : AppError(
+              AppErrorKind.siteNetwork,
+              '${outcome.warnings.length} 条线路加载失败，可刷新详情重试',
+              detail: outcome.warnings.map((e) => e.message).join('；'),
+              retryable: true,
+            );
+      for (final warning in outcome.warnings) {
+        log.warning(
+          '分集加载失败 site=${site.key} ${warning.logLine}',
+          scope: 'site',
+        );
+      }
+      final effective = outcome.value.list.firstOrNull ?? vod;
       _selectedVod = effective;
-      // TMDB 增强：详情就绪后异步加载。失败**不影响**线路与选集（§27 原则 3），
-      // 因此不 await，也不把异常传播到详情加载。
-      //
-      // folder 展开也做 TMDB 匹配（用户反馈「桥接站点还是没有 tmdb 详情页」）：
-      // 此时没有线路，`loadForVod` 会跳过季度解析与剧集元数据，只加载作品维度的
-      // 背景/海报墙/演职人员/推荐。信息表缺失字段留空（folder 条目只有
-      // 名称/海报/备注，没有年份/地区/演员/简介）。
+      // TMDB 与标准站点共用完整线路；元数据失败不阻塞选集和播放。
       _tmdbRunId = runId;
       unawaited(
         tmdb.loadForVod(
@@ -1825,49 +1817,12 @@ class AppState extends ChangeNotifier implements SyncStateHost {
           : AppError(AppErrorKind.unknown, '$error', cause: error);
       _detailError = failure;
       _detailPhase = LoadPhase.failed;
-      log.error('详情加载失败 site=${site.key} vod=${vod.vodId} ${failure.logLine}',
-          scope: 'site');
-    }
-    notifyListeners();
-  }
-
-  /// 展开分享资源的分集；作品身份仍使用目录条目，供 TMDB 与播放历史关联。
-  Future<Vod?> loadFolderResource(Vod parent, Vod entry) async {
-    final service = _siteService;
-    final site = _selectedSite;
-    if (service == null || site == null) return null;
-    final runId = ++_detailRunId;
-    try {
-      final outcome = await service.detail(site, entry.vodId);
-      if (runId != _detailRunId) return null;
-      final playable = outcome.value.list.where(
-        (item) => playLinesOf(item).isNotEmpty,
-      ).firstOrNull;
-      if (playable == null) {
-        throw AppError(
-          AppErrorKind.playbackUrlMissing,
-          '该资源没有返回可播放的分集，请重试或选择其他资源',
-        );
-      }
-      // 网关可以把分享链换成 atvp_resume 句柄。句柄不是分集目标，
-      // 播放时必须使用 vod_play_url 中每集的原始值。
-      final vod = Vod.fromJson({
-        ...parent.toJson(),
-        'vod_tag': 'file',
-        'vod_play_from': playable.vodPlayFrom,
-        'vod_play_url': playable.vodPlayUrl,
-      })!;
-      _selectedVod = vod;
-      unawaited(reloadTmdb());
-      log.info(
-        '资源分集加载成功 site=${site.key} lines=${playLinesOf(vod).length}',
+      log.error(
+        '详情加载失败 site=${site.key} vod=${vod.vodId} ${failure.logLine}',
         scope: 'site',
       );
-      return vod;
-    } catch (error) {
-      if (runId != _detailRunId) return null;
-      rethrow;
     }
+    notifyListeners();
   }
 
   /// 清空详情错误（详情页「重试」后的提示关闭）。
@@ -1877,8 +1832,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     notifyListeners();
   }
 
-  List<VodPlayLine> playLinesOf(Vod vod) =>
-      parsePlayLines(vod.vodPlayFrom, vod.vodPlayUrl);
+  List<VodPlayLine> playLinesOf(Vod vod) => parseVodPlayLines(vod);
 
   /// 解析播放请求（§10.2）。
   Future<PlaybackDecision?> resolvePlayback({
@@ -1994,8 +1948,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     );
     if (record == null || record.completed) return null;
     if (record.positionMs < resumeThreshold.inMilliseconds) return null;
-    if (record.durationMs > 0 &&
-        record.positionMs > record.durationMs - 5000) {
+    if (record.durationMs > 0 && record.positionMs > record.durationMs - 5000) {
       // 距离结尾不足 5 秒视为已看完。
       return null;
     }
@@ -2277,8 +2230,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   List<LocalSpider> get localSpiders => _spiderRegistry.sortedSpiders;
 
   /// 运行时状态列表（含崩溃、退避、隔离等级）。
-  List<SpiderRuntimeStatus> spiderRuntimeStatuses() =>
-      _supervisor.statuses();
+  List<SpiderRuntimeStatus> spiderRuntimeStatuses() => _supervisor.statuses();
 
   /// 强制停止某站点的 Spider（§18.2「每个站点运行时可随时强制停止」）。
   Future<void> stopSpider(String siteKey) async {
@@ -2364,12 +2316,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       return decision;
     }
 
-    const credentialKeys = {
-      'user-agent',
-      'referer',
-      'cookie',
-      'authorization',
-    };
+    const credentialKeys = {'user-agent', 'referer', 'cookie', 'authorization'};
     final session = _proxy.sessions.create(
       siteKey: siteKey,
       allowedHosts: {target.host},
@@ -2422,11 +2369,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       log.info('缓存目录已重建：${paths.cacheDir}', scope: 'storage');
       _notice = '缓存已清理';
     } catch (error) {
-      _lastError = AppError(
-        AppErrorKind.storage,
-        '清理缓存失败',
-        detail: '$error',
-      );
+      _lastError = AppError(AppErrorKind.storage, '清理缓存失败', detail: '$error');
     }
     notifyListeners();
   }

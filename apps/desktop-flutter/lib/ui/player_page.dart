@@ -35,6 +35,7 @@ class PlaybackRequest {
     required this.vodName,
     required this.episodeName,
     required this.flag,
+    String? playbackFlag,
     String? episodeTarget,
     this.headers = const {},
     this.startPosition,
@@ -46,7 +47,8 @@ class PlaybackRequest {
     this.subtitleHeaders = const {},
     this.danmaku = const [],
     this.tmdb,
-  }) : episodeTarget = episodeTarget ?? url;
+  }) : episodeTarget = episodeTarget ?? url,
+       playbackFlag = playbackFlag ?? flag;
 
   final String url;
   final String title;
@@ -55,6 +57,7 @@ class PlaybackRequest {
   final String vodName;
   final String episodeName;
   final String flag;
+  final String playbackFlag;
   final Map<String, String> headers;
   final Duration? startPosition;
 
@@ -104,6 +107,7 @@ class PlaybackRequest {
     String? episodeTarget,
     String? episodeName,
     String? flag,
+    String? playbackFlag,
     Map<String, String>? headers,
     int? episodeIndex,
     Duration? startPosition,
@@ -123,8 +127,11 @@ class PlaybackRequest {
       vodName: vodName,
       episodeName: episodeName ?? this.episodeName,
       flag: flag ?? this.flag,
+      playbackFlag: playbackFlag ?? this.playbackFlag,
       headers: headers ?? this.headers,
-      startPosition: clearStartPosition ? null : (startPosition ?? this.startPosition),
+      startPosition: clearStartPosition
+          ? null
+          : (startPosition ?? this.startPosition),
       playLines: playLines,
       episodeIndex: episodeIndex ?? this.episodeIndex,
       vodPic: vodPic,
@@ -221,7 +228,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _request.url,
       headers: _request.headers,
       siteKey: _request.siteKey,
-      flag: _request.flag,
+      flag: _request.playbackFlag,
       episodeName: _request.episodeName,
     );
     widget.state.log.info('播放结果 ${outcome.summary}', scope: 'player');
@@ -252,7 +259,9 @@ class _PlayerPageState extends State<PlayerPage> {
     await _configureDanmaku();
     // 进度恢复：仅对同一剧集且位置有效时执行（§10.3 播放恢复）。
     final start = _request.startPosition;
-    if (start != null && start > Duration.zero && start < _controller.duration) {
+    if (start != null &&
+        start > Duration.zero &&
+        start < _controller.duration) {
       await _controller.seek(start);
       widget.state.log.info(
         '恢复播放进度 episode=${_request.episodeName} '
@@ -340,10 +349,7 @@ class _PlayerPageState extends State<PlayerPage> {
       SnackBar(
         content: Text(message),
         duration: const Duration(seconds: 6),
-        action: SnackBarAction(
-          label: '字幕设置',
-          onPressed: _showSubtitleMenu,
-        ),
+        action: SnackBarAction(label: '字幕设置', onPressed: _showSubtitleMenu),
       ),
     );
   }
@@ -523,18 +529,13 @@ class _PlayerPageState extends State<PlayerPage> {
     if (_lastShownDanmakuError == message) return;
     _lastShownDanmakuError = message;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 6),
-      ),
+      SnackBar(content: Text(message), duration: const Duration(seconds: 6)),
     );
   }
 
   /// 弹幕总开关（§13.3「弹幕可开启和关闭」）。
   void _toggleDanmaku() {
-    _danmakuStyle = _danmakuStyle.copyWith(
-      enabled: !_danmakuStyle.enabled,
-    );
+    _danmakuStyle = _danmakuStyle.copyWith(enabled: !_danmakuStyle.enabled);
     widget.state.log.info(
       '弹幕 ${_danmakuStyle.enabled ? "开启" : "关闭"} '
       'items=${_danmakuItems.length}',
@@ -565,13 +566,13 @@ class _PlayerPageState extends State<PlayerPage> {
               },
             ),
             _settingTile(
-              '透明度 ${( _danmakuStyle.opacity * 100).round()}%',
+              '透明度 ${(_danmakuStyle.opacity * 100).round()}%',
               onTap: () async {
                 Navigator.of(context).pop('opacity');
               },
             ),
             _settingTile(
-              '字号 ${( _danmakuStyle.textScale * 100).round()}%',
+              '字号 ${(_danmakuStyle.textScale * 100).round()}%',
               onTap: () async {
                 Navigator.of(context).pop('scale');
               },
@@ -631,9 +632,7 @@ class _PlayerPageState extends State<PlayerPage> {
         );
         if (mounted) setState(() {});
       case 'top':
-        _danmakuStyle = _danmakuStyle.copyWith(
-          showTop: !_danmakuStyle.showTop,
-        );
+        _danmakuStyle = _danmakuStyle.copyWith(showTop: !_danmakuStyle.showTop);
         if (mounted) setState(() {});
       case 'bottom':
         _danmakuStyle = _danmakuStyle.copyWith(
@@ -677,9 +676,8 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _showSubtitleMenu() async {
     final options = _controller.subtitleOptions;
     if (options.length <= 1) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('当前视频没有可用字幕轨')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('当前视频没有可用字幕轨')));
       return;
     }
     final selected = await showModalBottomSheet<SubtitleOption>(
@@ -750,7 +748,7 @@ class _PlayerPageState extends State<PlayerPage> {
     final duration = _controller.duration;
     widget.state.recordProgress(
       vod: Vod(vodId: _request.vodId, vodName: _request.vodName),
-      flag: _request.flag,
+      flag: _request.playbackFlag,
       episodeName: _request.episodeName,
       // 存**站点入口目标**而不是解析后的播放地址：历史续播要把这个值回传给站点
       // 重新解析（§15.2）。存播放地址会得到「站点返回业务错误」，因为那是带时效
@@ -771,7 +769,7 @@ class _PlayerPageState extends State<PlayerPage> {
             : const UnknownSeason(),
         siteKey: _request.siteKey,
         vodId: _request.vodId,
-        sourceFlag: _request.flag,
+        sourceFlag: _request.playbackFlag,
         sourceEpisodeName: _request.episodeName,
         // 同样必须存**站点入口目标**：`TmdbEpisodeLocator` 拿它与 `VodEpisode.url`
         // （详情里的入口目标）精确比对来定位集号，存解析后的可播地址（T4 站点是
@@ -815,6 +813,13 @@ class _PlayerPageState extends State<PlayerPage> {
     return const [];
   }
 
+  String _playbackFlagFor(String displayFlag) {
+    for (final line in _request.playLines) {
+      if (line.flag == displayFlag) return line.playbackFlag;
+    }
+    return displayFlag == _request.flag ? _request.playbackFlag : displayFlag;
+  }
+
   Future<void> _playEpisode(int index, {String? overrideFlag}) async {
     final flag = overrideFlag ?? _request.flag;
     List<VodPlayLine> lines = _request.playLines;
@@ -828,11 +833,7 @@ class _PlayerPageState extends State<PlayerPage> {
           .episodes;
       if (index < 0 || index >= target.length) return;
       _episodesCache = target;
-      await _openTarget(
-        target[index],
-        flag: overrideFlag,
-        episodeIndex: index,
-      );
+      await _openTarget(target[index], flag: overrideFlag, episodeIndex: index);
       return;
     }
     final episodes = _episodesCache.isNotEmpty ? _episodesCache : _episodes;
@@ -860,7 +861,7 @@ class _PlayerPageState extends State<PlayerPage> {
       } else {
         final decision = await state.resolvePlayback(
           episodeTarget: episode.url,
-          flag: flag,
+          flag: _playbackFlagFor(flag),
           vodId: _request.vodId,
         );
         if (decision == null || decision.url == null) {
@@ -884,9 +885,8 @@ class _PlayerPageState extends State<PlayerPage> {
           episodeTarget: episode.url,
           episodeName: episode.name,
           flag: flag,
-          headers: _request.directUrl
-              ? _request.headers
-              : null,
+          playbackFlag: _playbackFlagFor(flag),
+          headers: _request.directUrl ? _request.headers : null,
           episodeIndex: episodeIndex,
           clearStartPosition: true,
           subtitles: subtitles,
@@ -1051,7 +1051,8 @@ class _PlayerPageState extends State<PlayerPage> {
                               url: _request.url,
                               onRetry: _load,
                               onNext: _playNext,
-                              canGoNext: (_episodesCache.isNotEmpty
+                              canGoNext:
+                                  (_episodesCache.isNotEmpty
                                       ? _episodesCache.length
                                       : _episodes.length) >
                                   _request.episodeIndex + 1,
@@ -1262,7 +1263,9 @@ class _ControlBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final duration = controller.duration;
-    final maxMs = duration.inMilliseconds <= 0 ? 1.0 : duration.inMilliseconds.toDouble();
+    final maxMs = duration.inMilliseconds <= 0
+        ? 1.0
+        : duration.inMilliseconds.toDouble();
     final value = controller.position.inMilliseconds
         .clamp(0, maxMs.toInt())
         .toDouble();
@@ -1288,8 +1291,9 @@ class _ControlBar extends StatelessWidget {
                   max: maxMs,
                   onChanged: duration.inMilliseconds <= 0
                       ? null
-                      : (next) => controller
-                          .seek(Duration(milliseconds: next.round())),
+                      : (next) => controller.seek(
+                          Duration(milliseconds: next.round()),
+                        ),
                 ),
               ),
               Text(_formatDuration(duration)),
@@ -1308,7 +1312,9 @@ class _ControlBar extends StatelessWidget {
               IconButton(
                 tooltip: controller.isPlaying ? '暂停（空格）' : '播放（空格）',
                 onPressed: controller.playOrPause,
-                icon: Icon(controller.isPlaying ? Icons.pause : Icons.play_arrow),
+                icon: Icon(
+                  controller.isPlaying ? Icons.pause : Icons.play_arrow,
+                ),
               ),
               IconButton(
                 tooltip: '下一集（]）',
@@ -1316,7 +1322,9 @@ class _ControlBar extends StatelessWidget {
                 icon: const Icon(Icons.skip_next),
               ),
               IconButton(
-                tooltip: controller.muted || controller.volume == 0 ? '取消静音（M）' : '静音（M）',
+                tooltip: controller.muted || controller.volume == 0
+                    ? '取消静音（M）'
+                    : '静音（M）',
                 onPressed: controller.toggleMute,
                 icon: Icon(
                   controller.muted || controller.volume == 0
@@ -1335,14 +1343,7 @@ class _ControlBar extends StatelessWidget {
               const Text('倍速'),
               DropdownButton<double>(
                 value: _nearestRate(controller.rate),
-                items: const [
-                  0.5,
-                  0.75,
-                  1.0,
-                  1.25,
-                  1.5,
-                  2.0,
-                ]
+                items: const [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
                     .map(
                       (rate) => DropdownMenuItem(
                         value: rate,
@@ -1383,7 +1384,8 @@ class _ControlBar extends StatelessWidget {
                 onPressed: onSelectSubtitle,
                 icon: Icon(
                   controller.selectedSubtitle == null ||
-                          controller.selectedSubtitle?.id == SubtitleOption.offId
+                          controller.selectedSubtitle?.id ==
+                              SubtitleOption.offId
                       ? Icons.subtitles_off_outlined
                       : Icons.subtitles_outlined,
                 ),
@@ -1457,10 +1459,7 @@ class _ControlBar extends StatelessWidget {
               Navigator.of(context).pop();
               onSelectEpisode(index);
             },
-            child: Text(
-              episodes[index].name,
-              overflow: TextOverflow.ellipsis,
-            ),
+            child: Text(episodes[index].name, overflow: TextOverflow.ellipsis),
           ),
         ),
       ),

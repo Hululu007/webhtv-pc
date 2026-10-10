@@ -62,6 +62,22 @@ List<VodPlayLine> parsePlayLines(String? vodPlayFrom, String? vodPlayUrl) {
   return lines;
 }
 
+/// 合并目录资源时记录「显示线路 → 原始播放 flag」，随 Vod.extra 保留。
+const bridgePlaybackFlagsKey = 'bridge_playback_flags';
+
+/// 普通站点和桥接站点共用的线路模型。
+List<VodPlayLine> parseVodPlayLines(Vod vod) {
+  final originals = asMap(vod.extra[bridgePlaybackFlagsKey]);
+  return [
+    for (final line in parsePlayLines(vod.vodPlayFrom, vod.vodPlayUrl))
+      VodPlayLine(
+        flag: line.flag,
+        episodes: line.episodes,
+        sourceFlag: asNonEmptyString(originals[line.flag]),
+      ),
+  ];
+}
+
 const _mediaSchemes = {'http', 'https', 'rtsp', 'rtmp', 'rtmps', 'file'};
 
 /// 目标是否是可以直接交给播放器的绝对地址。
@@ -184,9 +200,11 @@ abstract final class PlaybackResolver {
       );
     }
 
-    final playUrl = asNonEmptyString(input.site.extra['playUrl']) ??
+    final playUrl =
+        asNonEmptyString(input.site.extra['playUrl']) ??
         asNonEmptyString(input.site.extra['playurl']);
-    if (playUrl != null && (playUrl.endsWith('=') || playUrl.contains('{id}'))) {
+    if (playUrl != null &&
+        (playUrl.endsWith('=') || playUrl.contains('{id}'))) {
       final joined = joinPlayUrlPrefix(playUrl, target);
       if (looksLikeMediaUrl(joined)) {
         return PlaybackDecision(
@@ -195,7 +213,7 @@ abstract final class PlaybackResolver {
           headers: headers,
           flag: input.flag,
           subs: input.subs,
-        danmaku: input.danmaku,
+          danmaku: input.danmaku,
         );
       }
       throw AppError(
@@ -215,7 +233,9 @@ abstract final class PlaybackResolver {
   /// 媒体请求 Header：全局 headers 规则（按目标 host 匹配）+ 站点 header，
   /// 最后是播放结果 header（最高优先级，§7.4.6 步骤 4）。
   static HeaderMap _mediaHeaders(PlaybackResolutionInput input) {
-    final MediaRequestTarget target = MediaRequestTarget.of(input.episodeTarget);
+    final MediaRequestTarget target = MediaRequestTarget.of(
+      input.episodeTarget,
+    );
     return HeaderMap.merge([
       target.host.isEmpty
           ? HeaderMap()
@@ -235,9 +255,6 @@ class MediaRequestTarget {
 
   static MediaRequestTarget of(String url) {
     final uri = Uri.tryParse(url.trim());
-    return MediaRequestTarget(
-      host: uri?.host ?? '',
-      scheme: uri?.scheme ?? '',
-    );
+    return MediaRequestTarget(host: uri?.host ?? '', scheme: uri?.scheme ?? '');
   }
 }

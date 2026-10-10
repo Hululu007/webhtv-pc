@@ -133,7 +133,9 @@ class TmdbEnrichmentService {
 
     // 2. 简介：仅当 TMDB 翻译简介**更长**时替换
     var vodContent = vod.vodContent;
-    final overview = detail == null ? null : _service.translatedOverview(detail);
+    final overview = detail == null
+        ? null
+        : _service.translatedOverview(detail);
     if (overview != null && overview.trim().isNotEmpty) {
       final current = vodContent ?? '';
       if (overview.length > current.length) {
@@ -357,7 +359,11 @@ class TmdbEnrichmentService {
       }
     }
     return TmdbEpisodeEnrichmentResult(
-      line: VodPlayLine(flag: line.flag, episodes: episodes),
+      line: VodPlayLine(
+        flag: line.flag,
+        episodes: episodes,
+        sourceFlag: line.sourceFlag,
+      ),
       changed: changed,
       appliedCount: applied,
     );
@@ -412,7 +418,11 @@ class TmdbEnrichmentService {
       }
     }
     return TmdbEpisodeEnrichmentResult(
-      line: VodPlayLine(flag: line.flag, episodes: episodes),
+      line: VodPlayLine(
+        flag: line.flag,
+        episodes: episodes,
+        sourceFlag: line.sourceFlag,
+      ),
       changed: changed,
       appliedCount: applied,
     );
@@ -421,13 +431,9 @@ class TmdbEnrichmentService {
   /// 清除线路上的 TMDB 元数据（保留原始剧集名）。
   static VodPlayLine clearEpisodeMetadata(VodPlayLine line) => VodPlayLine(
     flag: line.flag,
+    sourceFlag: line.sourceFlag,
     episodes: line.episodes
-        .map(
-          (episode) => VodEpisode(
-            name: episode.name,
-            url: episode.url,
-          ),
-        )
+        .map((episode) => VodEpisode(name: episode.name, url: episode.url))
         .toList(),
   );
 

@@ -24,11 +24,15 @@ class SiteCallResult<T> {
     required this.value,
     required this.latency,
     this.fromCache = false,
+    this.warnings = const [],
   });
 
   final T value;
   final Duration latency;
   final bool fromCache;
+
+  /// 部分资源失败时保留可用结果，同时让详情页显示失败线路及重试入口。
+  final List<AppError> warnings;
 }
 
 /// 站点服务。
@@ -93,11 +97,9 @@ class SiteService {
       _record(siteKey, action, true, stopwatch.elapsed, null);
       return SiteCallResult(value: value, latency: stopwatch.elapsed);
     } catch (error) {
-      final failure = error is AppError ? error : AppError(
-        AppErrorKind.unknown,
-        '$error',
-        cause: error,
-      );
+      final failure = error is AppError
+          ? error
+          : AppError(AppErrorKind.unknown, '$error', cause: error);
       _record(siteKey, action, false, stopwatch.elapsed, failure.logLine);
       throw failure;
     }
@@ -120,19 +122,122 @@ class SiteService {
     return _call(
       site.key,
       HealthAction.category,
-      () => runtime.category(
-        site,
-        typeId: typeId,
-        page: page,
-        filters: filters,
-      ),
+      () =>
+          runtime.category(site, typeId: typeId, page: page, filters: filters),
     );
   }
 
   /// 详情（§8.3）。
   Future<SiteCallResult<SiteResult>> detail(Site site, String vodId) async {
     final runtime = router.runtimeFor(site);
-    return _call(site.key, HealthAction.detail, () => runtime.detail(site, vodId));
+    return _call(
+      site.key,
+      HealthAction.detail,
+      () => runtime.detail(site, vodId),
+    );
+  }
+
+  /// 目录资源自动展开为普通影片的多线路详情，UI 不需要处理分享链。
+  Future<SiteCallResult<SiteResult>> folderDetail(
+    Site site,
+    Vod parent, {
+    bool Function()? isCurrent,
+  }) async {
+    final warnings = <AppError>[];
+    final outcome = await _call(site.key, HealthAction.detail, () async {
+      void checkCurrent() {
+        if (isCurrent != null && !isCurrent()) {
+          throw AppError(AppErrorKind.siteCancelled, '详情请求已取消');
+        }
+      }
+
+      checkCurrent();
+      final entries = (await category(site, typeId: parent.vodId)).value.list;
+      final names = <String>[];
+      final urls = <String>[];
+      final sourceFlags = <String, String>{};
+      // 顺序读取，兼容使用共享 Spider 上下文的网关；离开页面后不再发后续请求。
+      for (final entry in entries) {
+        checkCurrent();
+        try {
+          final items = playLinesOf(entry).isNotEmpty
+              ? [entry]
+              : (await detail(site, entry.vodId)).value.list;
+          checkCurrent();
+          final lines = items.expand(playLinesOf).toList();
+          if (lines.isEmpty) {
+            throw AppError(AppErrorKind.playbackUrlMissing, '未返回可播放的分集');
+          }
+          for (final line in lines) {
+            final providerName = _bridgeProviderName(entry.vodName);
+            final label =
+                (lines.length == 1
+                        ? providerName
+                        : '$providerName · ${line.displayName}')
+                    .replaceAll(r'$$$', ' ');
+            var name = label;
+            for (
+              var duplicate = 2;
+              sourceFlags.containsKey(name);
+              duplicate++
+            ) {
+              name = '$label ($duplicate)';
+            }
+            names.add(name);
+            sourceFlags[name] = line.playbackFlag;
+            urls.add(line.episodes.map((e) => '${e.name}\$${e.url}').join('#'));
+          }
+        } catch (error) {
+          checkCurrent();
+          final failure = error is AppError
+              ? error
+              : AppError(AppErrorKind.unknown, '资源详情加载失败', cause: error);
+          warnings.add(
+            AppError(
+              failure.kind,
+              '线路「${entry.vodName}」加载失败，可刷新详情重试',
+              detail: failure.message,
+              retryable: true,
+              cause: failure,
+            ),
+          );
+        }
+      }
+      checkCurrent();
+      if (names.isEmpty) {
+        throw AppError(
+          AppErrorKind.playbackUrlMissing,
+          '该影片的线路均未返回分集，请刷新重试或换源',
+          detail: warnings.map((e) => e.message).join('；'),
+          retryable: true,
+        );
+      }
+      final vod = Vod.fromJson({
+        ...parent.toJson(),
+        'vod_tag': 'file',
+        'vod_play_from': names.join(r'$$$'),
+        'vod_play_url': urls.join(r'$$$'),
+        bridgePlaybackFlagsKey: sourceFlags,
+      })!;
+      return SiteResult(list: [vod]);
+    });
+    return SiteCallResult(
+      value: outcome.value,
+      latency: outcome.latency,
+      warnings: warnings,
+    );
+  }
+
+  static String _bridgeProviderName(String raw) {
+    final name = raw.split('#').first.trim();
+    return switch (name.toLowerCase()) {
+      '百度' || 'baidu' => 'baidu',
+      '夸克' || 'quark' => 'quark',
+      'uc' => 'uc',
+      '阿里' || '阿里云' || 'ali' => 'ali',
+      '115' => '115',
+      _ => name.isEmpty ? raw.trim() : name,
+    };
   }
 
   /// 搜索（§14.1）。
@@ -225,8 +330,7 @@ class SiteService {
     // 注意：SpiderNull / Unsupported 站点的 runtime 会在播放入口如实报错，
     // 不会伪装成直链成功。
     final mustCallPlay =
-        site.type == SiteType.spider ||
-        site.type == SiteType.jsonApiBase64Ext;
+        site.type == SiteType.spider || site.type == SiteType.jsonApiBase64Ext;
 
     PlaybackDecision? preliminary;
     if (!mustCallPlay) {
@@ -281,7 +385,8 @@ class SiteService {
         throw AppError(
           AppErrorKind.playbackUrlMissing,
           '播放入口未返回播放地址',
-          detail: '站点=${site.key} 线路=${flag ?? ""} 目标=${redactUrl(episodeTarget)}',
+          detail:
+              '站点=${site.key} 线路=${flag ?? ""} 目标=${redactUrl(episodeTarget)}',
         );
       }
       // 播放入口给了地址但该地址仍不可播（如 `tvb_yunbao` 的「剧情简介」线路回
@@ -321,7 +426,13 @@ class SiteService {
       final failure = error is AppError
           ? error
           : AppError(AppErrorKind.unknown, '$error', cause: error);
-      _record(site.key, HealthAction.play, false, stopwatch.elapsed, failure.logLine);
+      _record(
+        site.key,
+        HealthAction.play,
+        false,
+        stopwatch.elapsed,
+        failure.logLine,
+      );
       throw failure;
     }
   }
@@ -397,10 +508,7 @@ class SiteService {
     required Stopwatch stopwatch,
   }) async {
     final service = parseService ?? (parseService = ParseService());
-    final selection = ParseRuntime.select(
-      appConfig.parses,
-      flag: flag,
-    );
+    final selection = ParseRuntime.select(appConfig.parses, flag: flag);
     final outcome = await service.run(
       selection: selection,
       entries: appConfig.parses,
@@ -431,8 +539,7 @@ class SiteService {
   }
 
   /// 解析详情里的多线路/多剧集（§8.3、§8.4）。
-  static List<VodPlayLine> playLinesOf(Vod vod) =>
-      parsePlayLines(vod.vodPlayFrom, vod.vodPlayUrl);
+  static List<VodPlayLine> playLinesOf(Vod vod) => parseVodPlayLines(vod);
 
   static String _toJsonText(Map<Object?, Object?> value) {
     final buffer = StringBuffer('{');

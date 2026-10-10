@@ -14,7 +14,8 @@ import '../core/tmdb_identity.dart';
 import '../core/tmdb_media.dart';
 import '../core/tmdb_playback.dart';
 import '../core/tmdb_title.dart';
-import '../services/spider_router.dart';import '../state/app_state.dart';
+import '../services/spider_router.dart';
+import '../state/app_state.dart';
 import '../state/tmdb_state.dart';
 import 'app.dart';
 import 'config_pages.dart';
@@ -39,20 +40,14 @@ class BrowsePage extends StatelessWidget {
     }
     final site = state.selectedSite;
     if (site == null) {
-      return const _EmptyHint(
-        title: '请选择站点',
-        message: '点击顶栏「选择站点」挑选一个可运行的站点。',
-      );
+      return const _EmptyHint(title: '请选择站点', message: '点击顶栏「选择站点」挑选一个可运行的站点。');
     }
     final availability = state.siteItems
         .where((item) => item.site.key == site.key)
         .map((item) => item.availability)
         .firstWhereOrNull();
     if (availability != null && !availability.available) {
-      return _UnsupportedSiteHint(
-        site: site,
-        availability: availability,
-      );
+      return _UnsupportedSiteHint(site: site, availability: availability);
     }
 
     return Column(
@@ -174,8 +169,8 @@ class _BrowseTabBarState extends State<_BrowseTabBar> {
             onPressed: loading
                 ? null
                 : () => selected == null
-                    ? state.loadHome(widget.site)
-                    : state.loadCategory(selected),
+                      ? state.loadHome(widget.site)
+                      : state.loadCategory(selected),
             icon: const Icon(Icons.refresh, size: 18),
           ),
         ],
@@ -411,7 +406,9 @@ class _FilterRow extends StatelessWidget {
                   ),
                 for (final option in group.options)
                   _FilterChip(
-                    key: ValueKey('category-filter-${group.key}-${option.value}'),
+                    key: ValueKey(
+                      'category-filter-${group.key}-${option.value}',
+                    ),
                     label: option.name,
                     selected: option.value == selectedValue,
                     onTap: enabled ? () => onSelect(option.value) : null,
@@ -526,63 +523,63 @@ class _VodGrid extends StatelessWidget {
           ),
         Expanded(
           child: LayoutBuilder(
-            builder: (context, constraints) => NotificationListener<
-                ScrollNotification>(
-              onNotification: _onScroll,
-              child: CustomScrollView(
-                slivers: [
-                  // 筛选条随网格一起滚动：窄窗口下多个维度约占 150~200px，固定住
-                  // 会永久吃掉近 1/3 的网格高度；分类条（页面级上下文）才固定。
-                  if (filters.isNotEmpty)
-                    SliverToBoxAdapter(
-                      child: _FilterBar(
-                        state: state,
-                        groups: filters,
-                        active: state.categoryFilters,
-                      ),
-                    ),
-                  if (vods.isEmpty)
-                    SliverFillRemaining(
-                      hasScrollBody: false,
-                      child: _emptyState(
-                        loading: loading,
-                        hasClasses: hasClasses,
-                      ),
-                    )
-                  else
-                    SliverPadding(
-                      padding: const EdgeInsets.fromLTRB(
-                        _posterGridPadding,
-                        14,
-                        _posterGridPadding,
-                        8,
-                      ),
-                      sliver: SliverGrid(
-                        gridDelegate: _gridDelegate(constraints.maxWidth),
-                        delegate: SliverChildBuilderDelegate(
-                          (context, index) => _VodCard(
-                            key: ValueKey('vod-card-${vods[index].vodId}'),
-                            vod: vods[index],
-                            onTap: () => _openDetail(context, vods[index]),
+            builder: (context, constraints) =>
+                NotificationListener<ScrollNotification>(
+                  onNotification: _onScroll,
+                  child: CustomScrollView(
+                    slivers: [
+                      // 筛选条随网格一起滚动：窄窗口下多个维度约占 150~200px，固定住
+                      // 会永久吃掉近 1/3 的网格高度；分类条（页面级上下文）才固定。
+                      if (filters.isNotEmpty)
+                        SliverToBoxAdapter(
+                          child: _FilterBar(
+                            state: state,
+                            groups: filters,
+                            active: state.categoryFilters,
                           ),
-                          childCount: vods.length,
                         ),
-                      ),
-                    ),
-                  // 刷新首页时旧列表**不被清空**（loadHome 保留 _homeResult），
-                  // 此时只压一条细进度条：整页闪成空白会让用户以为断网了。
-                  if (loading && vods.isNotEmpty)
-                    const SliverToBoxAdapter(
-                      child: Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 16),
-                        child: LinearProgressIndicator(minHeight: 2),
-                      ),
-                    ),
-                  if (paged)
-                    SliverToBoxAdapter(child: _ScrollFooter(state: state)),
-                ],
-              ),
-            ),
+                      if (vods.isEmpty)
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: _emptyState(
+                            loading: loading,
+                            hasClasses: hasClasses,
+                          ),
+                        )
+                      else
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(
+                            _posterGridPadding,
+                            14,
+                            _posterGridPadding,
+                            8,
+                          ),
+                          sliver: SliverGrid(
+                            gridDelegate: _gridDelegate(constraints.maxWidth),
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) => _VodCard(
+                                key: ValueKey('vod-card-${vods[index].vodId}'),
+                                vod: vods[index],
+                                onTap: () => _openDetail(context, vods[index]),
+                              ),
+                              childCount: vods.length,
+                            ),
+                          ),
+                        ),
+                      // 刷新首页时旧列表**不被清空**（loadHome 保留 _homeResult），
+                      // 此时只压一条细进度条：整页闪成空白会让用户以为断网了。
+                      if (loading && vods.isNotEmpty)
+                        const SliverToBoxAdapter(
+                          child: Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 16),
+                            child: LinearProgressIndicator(minHeight: 2),
+                          ),
+                        ),
+                      if (paged)
+                        SliverToBoxAdapter(child: _ScrollFooter(state: state)),
+                    ],
+                  ),
+                ),
           ),
         ),
       ],
@@ -612,7 +609,8 @@ class _VodGrid extends StatelessWidget {
     if (hasClasses) {
       return const _EmptyHint(
         title: '请选择一个分类',
-        message: '该站点首页只返回分类列表（未提供推荐内容）。'
+        message:
+            '该站点首页只返回分类列表（未提供推荐内容）。'
             '点顶部分类条里的任一项即可加载影片；若分类也为空，再切换站点或更新配置。',
       );
     }
@@ -792,9 +790,7 @@ class _PosterBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: highlight
-            ? const Color(0xCCE8830C)
-            : const Color(0x99000000),
+        color: highlight ? const Color(0xCCE8830C) : const Color(0x99000000),
         borderRadius: BorderRadius.circular(4),
       ),
       child: Text(
@@ -890,13 +886,6 @@ class _DetailPageState extends State<DetailPage> {
   /// 剧集是否网格模式（对齐上游 `@id/episodeViewMode`）。
   bool _episodeGridMode = false;
 
-  Vod? _folderVod;
-  String? _selectedFolderEntry;
-  String? _loadingFolderEntry;
-  AppError? _folderError;
-  SiteResult? _folderResult;
-  int _folderRequest = 0;
-
   @override
   void initState() {
     super.initState();
@@ -921,15 +910,6 @@ class _DetailPageState extends State<DetailPage> {
 
   void _onStateChanged() {
     if (!mounted) return;
-    // 刷新、返回或换站点时，旧资源请求和选集都随详情结果一起失效。
-    if (!identical(_folderResult, widget.state.detailResult)) {
-      _folderResult = widget.state.detailResult;
-      _folderRequest++;
-      _folderVod = null;
-      _selectedFolderEntry = null;
-      _loadingFolderEntry = null;
-      _folderError = null;
-    }
     setState(() {});
   }
 
@@ -963,9 +943,9 @@ class _DetailPageState extends State<DetailPage> {
     final counts = tmdb.seasonEpisodeCounts;
     final seasons = counts.keys.toList()..sort();
     if (seasons.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('TMDB 未返回季度信息，暂时无法手动绑定季度')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('TMDB 未返回季度信息，暂时无法手动绑定季度')));
       return;
     }
     final line = tmdb.sourceLine;
@@ -986,7 +966,6 @@ class _DetailPageState extends State<DetailPage> {
   }
 
   Vod? get _currentVod {
-    if (_folderVod != null) return _folderVod;
     final result = widget.state.detailResult;
     if (result != null &&
         result.list.isNotEmpty &&
@@ -1002,7 +981,7 @@ class _DetailPageState extends State<DetailPage> {
     try {
       final decision = await state.resolvePlayback(
         episodeTarget: episode.url,
-        flag: line.flag,
+        flag: line.playbackFlag,
         vodId: vod.vodId,
       );
       if (decision == null || decision.url == null) {
@@ -1017,7 +996,7 @@ class _DetailPageState extends State<DetailPage> {
       final resume = state.resumePositionFor(
         siteKey: state.selectedSite?.key ?? '',
         vodId: vod.vodId,
-        flag: line.flag,
+        flag: line.playbackFlag,
         episodeId: episode.url,
       );
       // TMDB 季度身份（`04` §8.1）：已确证季度时透传；未确证时只传 URL/集名。
@@ -1047,6 +1026,7 @@ class _DetailPageState extends State<DetailPage> {
               vodName: vod.vodName,
               episodeName: episode.name,
               flag: line.flag,
+              playbackFlag: line.playbackFlag,
               playLines: state.playLinesOf(vod),
               episodeIndex: episodeIndex,
               vodPic: vod.vodPic,
@@ -1066,9 +1046,8 @@ class _DetailPageState extends State<DetailPage> {
           ? error
           : AppError(AppErrorKind.unknown, '$error', cause: error);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(failure.userMessage)),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(failure.userMessage)));
     }
   }
 
@@ -1089,10 +1068,11 @@ class _DetailPageState extends State<DetailPage> {
     // 新页面会先套用上一部剧的线路与简介，点播即串剧。这里以 vod_id 判归属，
     // 不属于本页时退回列表页传入的条目（其线路可能已由列表数据携带）。
     final result = state.detailResult;
-    final belongs = result != null &&
+    final belongs =
+        result != null &&
         result.list.isNotEmpty &&
         result.list.first.vodId == widget.vod.vodId;
-    final vod = _folderVod ?? (belongs ? result.list.first : widget.vod);
+    final vod = belongs ? result.list.first : widget.vod;
     final lines = state.playLinesOf(vod);
     final loading = state.detailPhase == LoadPhase.loading;
     final tmdb = state.tmdb;
@@ -1153,7 +1133,7 @@ class _DetailPageState extends State<DetailPage> {
                 // 避免上一个条目的失败信息干扰当前页面（§8.3、§8.4）。
                 // 内容已延伸到 app bar 之下，因此这条提示要让出 app bar 的高度，
                 // 否则会被悬浮的返回/收藏图标压住。
-                if (state.detailError != null && lines.isEmpty)
+                if (state.detailError != null)
                   Padding(
                     padding: EdgeInsets.fromLTRB(
                       16,
@@ -1170,13 +1150,15 @@ class _DetailPageState extends State<DetailPage> {
                 // 未匹配时回退到来源海报，保证头部不空白。
                 // 高度由组件按视口自适应（见 TmdbDetailHeader.resolveHeight）。
                 TmdbDetailHeader(
-                  data: tmdb.detailData ??
+                  data:
+                      tmdb.detailData ??
                       TmdbDetailData(
                         title: display.vodName,
                         overview: display.vodContent,
                         posterUrl: display.vodPic,
                         backdropUrls: [
-                          if ((display.vodPic ?? '').isNotEmpty) display.vodPic!,
+                          if ((display.vodPic ?? '').isNotEmpty)
+                            display.vodPic!,
                         ],
                         rating: 0,
                       ),
@@ -1187,107 +1169,98 @@ class _DetailPageState extends State<DetailPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                    // TMDB 状态条原在 hero 之上（会被悬浮 app bar 遮住），
-                    // 改到 hero 下方：既不与图标重叠，也更靠近正文。
-                    TmdbStatusBar(
-                      state: tmdb,
-                      onConfigure: () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => TmdbSettingsPage(state: state),
+                      // TMDB 状态条原在 hero 之上（会被悬浮 app bar 遮住），
+                      // 改到 hero 下方：既不与图标重叠，也更靠近正文。
+                      TmdbStatusBar(
+                        state: tmdb,
+                        onConfigure: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => TmdbSettingsPage(state: state),
+                          ),
                         ),
+                        onMatch: _openMatchDialog,
+                        onRematch: _openMatchDialog,
+                        onSelectSeason: _openSeasonDialog,
+                        onRetry: () => state.reloadTmdb(),
                       ),
-                      onMatch: _openMatchDialog,
-                      onRematch: _openMatchDialog,
-                      onSelectSeason: _openSeasonDialog,
-                      onRetry: () => state.reloadTmdb(),
-                    ),
-                  const SizedBox(height: 12),
-                  // 信息表（`04` §3.1 ①）：对齐上游 `site/year/area/type/
-                  // director/actor` 的元信息行。**来源字段优先**，缺失处用 TMDB
-                  // 补位值（§3.2「仅补位不覆盖」），因此这里直接读补位后的 `display`
-                  // 与 `tmdbData`。
-                  TmdbInfoTable(
-                    rows: [
-                      ('类型', tmdbData?.genres.join(' / ')),
-                      ('地区', display.vodArea),
-                      ('年份', display.vodYear),
-                      ('时长', tmdbData?.runtimeLabel),
-                      ('季集', tmdbData?.seasonEpisodeLabel),
-                      ('状态', tmdbData?.status),
-                      ('导演', display.vodDirector),
-                      ('演员', display.vodActor),
-                      ('评分', tmdb.ratingText),
-                      ('备注', display.vodRemarks),
-                      ('语言', tmdbData?.languages.join(' / ')),
-                    ],
-                  ),
-                  if (display.vodContent != null &&
-                      display.vodContent!.trim().isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    // 简介：默认 4 行 + 「展开」（`04` §11 长文本要求）。
-                    _ExpandableOverview(text: display.vodContent!.trim()),
-                  ],
-                  const SizedBox(height: 12),
-                  // 季度选择器（`04` §4.1）：仅 tv 且已匹配时渲染。
-                  TmdbSeasonSelector(
-                    state: tmdb,
-                    onChanged: (season) {
-                      tmdb.selectSeason(season);
-                      unawaited(tmdb.loadEpisodes(generation: tmdb.generation));
-                    },
-                    onSelectManual: _openSeasonDialog,
-                  ),
-                  // 纯 TMDB 详情页入口（`04` §6.1）。
-                  if (tmdb.hasMatch && tmdb.identity != null)
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton.icon(
-                        key: const ValueKey('tmdb-open-detail'),
-                        onPressed: () => _openTmdbDetail(tmdb.identity!),
-                        icon: const Icon(Icons.movie_outlined, size: 18),
-                        label: const Text('在 TMDB 中查看'),
+                      const SizedBox(height: 12),
+                      // 信息表（`04` §3.1 ①）：对齐上游 `site/year/area/type/
+                      // director/actor` 的元信息行。**来源字段优先**，缺失处用 TMDB
+                      // 补位值（§3.2「仅补位不覆盖」），因此这里直接读补位后的 `display`
+                      // 与 `tmdbData`。
+                      TmdbInfoTable(
+                        rows: [
+                          ('类型', tmdbData?.genres.join(' / ')),
+                          ('地区', display.vodArea),
+                          ('年份', display.vodYear),
+                          ('时长', tmdbData?.runtimeLabel),
+                          ('季集', tmdbData?.seasonEpisodeLabel),
+                          ('状态', tmdbData?.status),
+                          ('导演', display.vodDirector),
+                          ('演员', display.vodActor),
+                          ('评分', tmdb.ratingText),
+                          ('备注', display.vodRemarks),
+                          ('语言', tmdbData?.languages.join(' / ')),
+                        ],
                       ),
-                    ),
-                  const Divider(height: 32),
-                  if (loading && lines.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 24),
-                      child: Center(child: CircularProgressIndicator()),
-                    )
-                  // 分享资源先展开分集，再复用普通线路选择与播放器换集。
-                  else if (_isFolderExpansion(result)) ...[
-                    _buildFolderEntries(context, vod, result!.list),
-                    if (_loadingFolderEntry != null)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        child: LinearProgressIndicator(),
+                      if (display.vodContent != null &&
+                          display.vodContent!.trim().isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        // 简介：默认 4 行 + 「展开」（`04` §11 长文本要求）。
+                        _ExpandableOverview(text: display.vodContent!.trim()),
+                      ],
+                      const SizedBox(height: 12),
+                      // 季度选择器（`04` §4.1）：仅 tv 且已匹配时渲染。
+                      TmdbSeasonSelector(
+                        state: tmdb,
+                        onChanged: (season) {
+                          tmdb.selectSeason(season);
+                          unawaited(
+                            tmdb.loadEpisodes(generation: tmdb.generation),
+                          );
+                        },
+                        onSelectManual: _openSeasonDialog,
                       ),
-                    if (_folderError != null)
-                      ErrorBanner(
-                        error: _folderError!,
-                        onDismiss: () => setState(() => _folderError = null),
-                      ),
-                  ]
-                  else if (lines.isEmpty)
-                    const Text('该影片没有可播放的剧集（vod_play_url 为空）。'),
-                  if (lines.isNotEmpty) ...[
-                    // 线路选择（`04` §3.1 ④）：点击即切换，剧集卡片随之切换。
-                    // 对齐上游 `@id/flag` —— 上游也只渲染**当前线路**的选集区。
-                    TmdbLineSelector(
-                      lines: lines,
-                      selectedFlag: _activeLine(lines).flag,
-                      episodeCounts: _episodeCountsByLine(lines),
-                      onChanged: (line) => _selectLine(line, lines),
-                    ),
-                    _buildEpisodes(context, vod, lines),
-                  ],
-                  // ⑥⑦⑧⑨ TMDB 附加区块（`04` §3.1）：失败时整块隐藏（不显示空态占位）。
-                  //
-                  // folder 展开**也要**渲染：被点的 folder 条目本身就是一部作品
-                  // （名称/海报/集数备注齐备），只是它没有线路而已（用户反馈
-                  // 「桥接站点还是没有 tmdb 详情页」）。信息表缺失字段由
-                  // `TmdbInfoTable` 自行跳过空值行。
-                  ..._buildTmdbBlocks(context, tmdb),
+                      // 纯 TMDB 详情页入口（`04` §6.1）。
+                      if (tmdb.hasMatch && tmdb.identity != null)
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            key: const ValueKey('tmdb-open-detail'),
+                            onPressed: () => _openTmdbDetail(tmdb.identity!),
+                            icon: const Icon(Icons.movie_outlined, size: 18),
+                            label: const Text('在 TMDB 中查看'),
+                          ),
+                        ),
+                      const Divider(height: 32),
+                      if (loading && lines.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 24),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      else if (lines.isEmpty)
+                        Text(
+                          state.detailError?.userMessage ??
+                              '该影片没有可播放的剧集（vod_play_url 为空）。',
+                        ),
+                      if (lines.isNotEmpty) ...[
+                        // 线路选择（`04` §3.1 ④）：点击即切换，剧集卡片随之切换。
+                        // 对齐上游 `@id/flag` —— 上游也只渲染**当前线路**的选集区。
+                        TmdbLineSelector(
+                          lines: lines,
+                          selectedFlag: _activeLine(lines).flag,
+                          episodeCounts: _episodeCountsByLine(lines),
+                          onChanged: (line) => _selectLine(line, lines),
+                        ),
+                        _buildEpisodes(context, vod, lines),
+                      ],
+                      // ⑥⑦⑧⑨ TMDB 附加区块（`04` §3.1）：失败时整块隐藏（不显示空态占位）。
+                      //
+                      // folder 展开**也要**渲染：被点的 folder 条目本身就是一部作品
+                      // （名称/海报/集数备注齐备），只是它没有线路而已（用户反馈
+                      // 「桥接站点还是没有 tmdb 详情页」）。信息表缺失字段由
+                      // `TmdbInfoTable` 自行跳过空值行。
+                      ..._buildTmdbBlocks(context, tmdb),
                     ],
                   ),
                 ),
@@ -1296,90 +1269,7 @@ class _DetailPageState extends State<DetailPage> {
     );
   }
 
-  /// 当前详情结果是否是 `folder` 展开产物（资源列表而非单部作品）。
-  ///
-  /// 判据：本页点开的条目是 `folder`，且返回的条目**自身不再有可播线路**
-  /// （它们是 `file` 类型的分享链，没有 `vod_play_from`/`vod_play_url`）。
-  /// 不用“结果条数”判：单部作品的详情也可能返回多条。
-  static bool _isFolderExpansion(SiteResult? result) {
-    if (result == null || result.list.isEmpty) return false;
-    return result.list.every(
-      (item) =>
-          item.vodTag == 'file' &&
-          (item.vodPlayUrl == null || item.vodPlayUrl!.isEmpty),
-    );
-  }
-
-  /// 渲染分享资源选择，分集就绪后仍可切换其他资源。
-  Widget _buildFolderEntries(
-    BuildContext context,
-    Vod vod,
-    List<Vod> entries,
-  ) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '选择资源（${entries.length}）',
-          style: Theme.of(context).textTheme.titleSmall,
-        ),
-        const SizedBox(height: 4),
-        Text(
-          '选择一条分享资源，加载分集后点选播放。',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-        const SizedBox(height: 8),
-        for (final entry in entries)
-          Card(
-            key: ValueKey('folder-entry-${entry.vodId}'),
-            child: ListTile(
-              leading: const Icon(Icons.cloud_download_outlined),
-              title: Text(entry.vodName),
-              subtitle: entry.vodRemarks == null || entry.vodRemarks!.isEmpty
-                  ? null
-                  : Text(entry.vodRemarks!),
-              selected: _selectedFolderEntry == entry.vodId,
-              trailing: _loadingFolderEntry == entry.vodId
-                  ? const SizedBox(
-                      width: 20, height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Icon(_selectedFolderEntry == entry.vodId
-                      ? Icons.check_circle_outline : Icons.chevron_right),
-              onTap: () => _expandFolderEntry(vod, entry),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Future<void> _expandFolderEntry(Vod vod, Vod entry) async {
-    final request = ++_folderRequest;
-    setState(() {
-      _loadingFolderEntry = entry.vodId;
-      _selectedFolderEntry = null;
-      _folderVod = null;
-      _folderError = null;
-    });
-    try {
-      final expanded = await widget.state.loadFolderResource(vod, entry);
-      if (!mounted || request != _folderRequest) return;
-      setState(() {
-        _folderVod = expanded;
-        _selectedFolderEntry = expanded == null ? null : entry.vodId;
-        _selectedLineFlag = '';
-      });
-    } catch (error) {
-      if (!mounted || request != _folderRequest) return;
-      setState(() => _folderError = error is AppError
-          ? error
-          : AppError(AppErrorKind.unknown, '$error', cause: error));
-    } finally {
-      if (mounted && request == _folderRequest) {
-        setState(() => _loadingFolderEntry = null);
-      }
-    }
-  }
+  /// 线路已经在详情加载阶段展开，详情页只负责标准线路渲染。
 
   /// 剧照墙 / 演职人员 / 相关推荐 / 相关视频（`04` §3.1 ⑥–⑨）。
   ///
@@ -1493,7 +1383,10 @@ class _DetailPageState extends State<DetailPage> {
   /// - 当前线路：先应用 TMDB 剧集元数据，再按可播放季度过滤；
   /// - 其他线路：不套用当前季度的元数据与过滤（避免跨线路串集），
   ///   只保留来源集名自带的季度信号过滤。
-  List<VodEpisode> _renderEpisodes(VodPlayLine rawLine, {required bool active}) {
+  List<VodEpisode> _renderEpisodes(
+    VodPlayLine rawLine, {
+    required bool active,
+  }) {
     final tmdb = widget.state.tmdb;
     if (!active) {
       final selected = tmdb.selectedSeason;
@@ -1525,9 +1418,7 @@ class _DetailPageState extends State<DetailPage> {
     final rawLine = _activeLine(lines);
     final line = tmdb.applyEpisodesToLine(rawLine).line;
     final episodes = _renderEpisodes(rawLine, active: true);
-    final ordered = _episodesReversed
-        ? episodes.reversed.toList()
-        : episodes;
+    final ordered = _episodesReversed ? episodes.reversed.toList() : episodes;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1557,13 +1448,8 @@ class _DetailPageState extends State<DetailPage> {
           actionLabel: '播放',
           cardWidth: _episodeCardWidth(context, episodes.length),
           gridMode: _episodeGridMode,
-          onTap: (index, _) => _playEpisodeAt(
-            vod,
-            rawLine,
-            line,
-            ordered,
-            index,
-          ),
+          onTap: (index, _) =>
+              _playEpisodeAt(vod, rawLine, line, ordered, index),
         ),
       ],
     );
@@ -1732,7 +1618,8 @@ class _UnsupportedSiteHint extends StatelessWidget {
   Widget build(BuildContext context) {
     return _EmptyHint(
       title: '站点运行时未安装或不支持',
-      message: '站点「${site.name}」需要 ${availability.runtimeName} 运行时'
+      message:
+          '站点「${site.name}」需要 ${availability.runtimeName} 运行时'
           '${availability.stage == null ? "" : "（计划阶段：${availability.stage}）"}。\n'
           '${availability.reason ?? ""}\n'
           '请在站点列表中选择其他可运行站点。',

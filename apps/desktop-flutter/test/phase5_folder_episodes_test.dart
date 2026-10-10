@@ -13,184 +13,175 @@ import 'package:webhtv_pc/state/app_state.dart';
 import 'package:webhtv_pc/ui/browse_pages.dart';
 
 void main() {
-  testWidgets('点击分享资源先展示分集，保留作品信息，不自动播放', (tester) async {
-    final temp = Directory.systemTemp.createTempSync('webhtv-folder-episodes');
-    final calls = <Uri>[];
-    var emptyDetail = false;
-    Completer<http.Response>? delayedDetail;
+  late Directory temp;
+  late AppState state;
+  final calls = <Uri>[];
+  final failures = <String>{};
+  Completer<http.Response>? delayed;
+  final parent = Vod(
+    vodId: 'atvp_detail:series',
+    vodName: '原始作品名',
+    vodTag: 'folder',
+  );
+
+  Map<String, Object?> detail(String resource) => {
+    'list': [
+      {
+        'vod_id': 'atvp_resume:$resource',
+        'vod_name': '分享资源标题',
+        'vod_tag': 'file',
+        // 真实网关里多个资源都可能返回同一个 flag，显示时要区分，播放时要原样发送。
+        'vod_play_from': '丫仙女',
+        'vod_play_url': '${resource}01\$$resource@1#${resource}02\$$resource@2',
+      },
+    ],
+  };
+  http.Response response(Object body) => http.Response(
+    jsonEncode(body),
+    200,
+    headers: {'content-type': 'application/json; charset=utf-8'},
+  );
+
+  setUp(() async {
+    calls.clear();
+    failures.clear();
+    delayed = null;
+    temp = Directory.systemTemp.createTempSync('webhtv-folder-lines');
     final client = MockClient((request) async {
       calls.add(request.url);
-      final query = request.url.queryParameters;
-      final Object body;
-      if (query.containsKey('play')) {
-        body = {'code': -1, 'msg': '选集之前不应调用播放'};
-      } else if (query.containsKey('ids')) {
-        if (query['ids'] == 'https://115.com/s/slow') {
-          return delayedDetail!.future;
-        }
-        if (emptyDetail) {
-          return http.Response(
-            '{"list":[]}',
-            200,
-            headers: {'content-type': 'application/json'},
-          );
-        }
-        body = {
-          'list': [
-            {
-              'vod_id': 'atvp_resume:opaque-handle',
-              'vod_name': '分享资源标题',
-              'vod_tag': 'file',
-              'vod_play_from': '丫仙女',
-              'vod_play_url':
-                  r'S01E01(5.89 GB)$1@7864@0@0#S01E02(5.6 GB)$1@7865@0@1',
-            },
-          ],
-        };
-      } else if (query.containsKey('t')) {
-        body = {
-          'list': [
-            {
-              'vod_id': 'https://115.com/s/example',
-              'vod_name': '115分享资源',
-              'vod_tag': 'file',
-            },
-            {
-              'vod_id': 'https://115.com/s/slow',
-              'vod_name': '较慢的资源',
-              'vod_tag': 'file',
-            },
-          ],
-        };
-      } else {
-        body = {'list': []};
+      final q = request.url.queryParameters;
+      if (q.containsKey('play')) {
+        return response({'code': -1, 'msg': '已捕获播放目标'});
       }
-      return http.Response(
-        jsonEncode(body),
-        200,
-        headers: {'content-type': 'application/json; charset=utf-8'},
-      );
+      if (q.containsKey('ids')) {
+        final resource = Uri.parse(q['ids']!).pathSegments.last;
+        if (resource == 'baidu' && delayed != null) return delayed!.future;
+        if (failures.contains(resource)) {
+          return response({'code': -1, 'msg': '资源暂时不可用'});
+        }
+        return response(detail(resource));
+      }
+      if (q.containsKey('t')) {
+        return response({
+          'list': [
+            for (final resource in ['baidu', 'quark', 'uc'])
+              {
+                'vod_id': 'https://share.example/$resource',
+                'vod_name': resource,
+                'vod_tag': 'file',
+              },
+          ],
+        });
+      }
+      return response({'list': []});
     });
-    final state = AppState(
+    state = AppState(
       paths: AppPaths.resolve(
         overrides: {'roaming': temp.path, 'local': temp.path},
       ),
       log: LogService(),
       httpClient: client,
     );
-    addTearDown(() async {
-      state.dispose();
-      await temp.delete(recursive: true);
-    });
-    await tester.runAsync(() async {
-      await state.bootstrap();
-      await state.importConfig(
-        jsonEncode({
-          'sites': [
-            {
-              'key': 'bridge',
-              'name': '桥接站点',
-              'type': 4,
-              'api': 'http://127.0.0.1:19978/vod/api?key=bridge',
-            },
-          ],
-        }),
-      );
-    });
+    await state.bootstrap();
+    await state.importConfig(
+      jsonEncode({
+        'sites': [
+          {
+            'key': 'bridge',
+            'name': '桥接站点',
+            'type': 4,
+            'api': 'http://127.0.0.1:19978/vod/api?key=bridge',
+          },
+        ],
+      }),
+    );
+    calls.clear();
+  });
+
+  tearDown(() async {
+    state.dispose();
+    await temp.delete(recursive: true);
+  });
+
+  Future<void> openDetail(WidgetTester tester) async {
     tester.view.physicalSize = const Size(1400, 1600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(
       MaterialApp(
-        home: DetailPage(
-          state: state,
-          vod: Vod(
-            vodId: 'atvp_detail:series',
-            vodName: '原始作品名',
-            vodTag: 'folder',
-          ),
-        ),
+        home: DetailPage(state: state, vod: parent),
       ),
     );
     await tester.pumpAndSettle();
-    await tester.drag(find.byType(Scrollable).first, const Offset(0, -2500));
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, -3000));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('115分享资源'));
-    await tester.pumpAndSettle();
+  }
 
-    expect(
-      calls.where((uri) => uri.queryParameters.containsKey('play')),
-      isEmpty,
-    );
-    expect(
-      calls.any(
-        (uri) => uri.queryParameters['ids'] == 'https://115.com/s/example',
-      ),
-      isTrue,
-    );
-    expect(find.textContaining('S01E01'), findsWidgets);
-    expect(find.textContaining('S01E02'), findsWidgets);
-    expect(find.textContaining('丫仙女'), findsWidgets);
-    expect(state.selectedVod?.vodName, '原始作品名');
-    expect(state.selectedVod?.vodId, 'atvp_detail:series');
-    expect(
-      state.playLinesOf(state.selectedVod!).single.episodes[1].url,
-      '1@7865@0@1',
-    );
+  testWidgets('桥接详情自动展示标准线路与分集，切线路无需点分享资源', (tester) async {
+    await openDetail(tester);
+    expect(find.textContaining('选择资源'), findsNothing);
+    expect(find.textContaining('baidu（2 集）'), findsOneWidget);
+    expect(find.textContaining('quark（2 集）'), findsOneWidget);
+    expect(find.textContaining('uc（2 集）'), findsOneWidget);
+    expect(find.textContaining('baidu01'), findsWidgets);
+    expect(calls.where((u) => u.queryParameters.containsKey('ids')).length, 3);
+    expect(calls.where((u) => u.queryParameters.containsKey('play')), isEmpty);
+    expect(state.detailResult!.list.single.vodId, parent.vodId);
+    expect(state.selectedVod?.vodName, parent.vodName);
 
-    // 点第二集才进入播放请求，传原始分集目标与网关给的线路名。
-    await tester.drag(find.byType(Scrollable).first, const Offset(0, -1000));
+    await tester.tap(find.textContaining('uc（2 集）'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.textContaining('S01E02').first);
-    await tester.pumpAndSettle();
-    await tester.tap(find.textContaining('S01E02').first);
+    expect(find.textContaining('uc02'), findsWidgets);
+    expect(find.textContaining('baidu01'), findsNothing);
+    expect(calls.where((u) => u.queryParameters.containsKey('ids')).length, 3);
+    await tester.tap(find.textContaining('uc02').first);
     await tester.pumpAndSettle();
     final play = calls.singleWhere(
-      (uri) => uri.queryParameters.containsKey('play'),
+      (u) => u.queryParameters.containsKey('play'),
     );
-    expect(play.queryParameters['play'], '1@7865@0@1');
+    expect(play.queryParameters['play'], 'uc@2');
     expect(play.queryParameters['flag'], '丫仙女');
+  });
 
-    // 空分集不能悄悄回退为分享链直播放；重新点击可重试。
-    emptyDetail = true;
-    await tester.ensureVisible(find.text('115分享资源'));
+  testWidgets('一个资源失败仍展示其余线路，刷新详情可重试', (tester) async {
+    failures.add('baidu');
+    await openDetail(tester);
+    expect(state.detailPhase, LoadPhase.ready);
+    expect(state.playLinesOf(state.selectedVod!).length, 2);
+    expect(find.textContaining('quark（2 集）'), findsOneWidget);
+    expect(find.textContaining('uc（2 集）'), findsOneWidget);
+    expect(state.detailError?.userMessage, contains('baidu'));
+    expect(state.log.export(), contains('baidu'));
+    failures.clear();
+    await tester.tap(find.byTooltip('刷新详情'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('115分享资源'));
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, -3000));
     await tester.pumpAndSettle();
-    expect(find.textContaining('没有返回可播放的分集'), findsWidgets);
-    expect(find.textContaining('S01E02'), findsNothing);
-    emptyDetail = false;
-    await tester.tap(find.text('115分享资源'));
-    await tester.pumpAndSettle();
-    expect(find.textContaining('S01E02'), findsWidgets);
+    expect(state.detailError, isNull);
+    expect(find.textContaining('baidu（2 集）'), findsOneWidget);
+  });
 
-    // 快速换资源：晚到的旧响应不得替换已经展示的新分集。
-    delayedDetail = Completer<http.Response>();
-    await tester.tap(find.text('较慢的资源'));
+  testWidgets('全部资源失败显示详情错误，不伪装成成功的空目录', (tester) async {
+    failures.addAll(['baidu', 'quark', 'uc']);
+    await openDetail(tester);
+    expect(state.detailPhase, LoadPhase.failed);
+    expect(state.detailError, isNotNull);
+    expect(state.detailResult, isNull);
+    expect(find.textContaining('选择资源'), findsNothing);
+    expect(calls.where((u) => u.queryParameters.containsKey('play')), isEmpty);
+  });
+
+  testWidgets('离开详情后停止后续资源展开，晚到响应不写回', (tester) async {
+    delayed = Completer<http.Response>();
+    final pending = state.loadDetail(parent);
     await tester.pump();
-    expect(find.byType(LinearProgressIndicator), findsOneWidget);
-    await tester.tap(find.text('115分享资源'));
-    await tester.pumpAndSettle();
-    delayedDetail.complete(
-      http.Response(
-        jsonEncode({
-          'list': [
-            {
-              'vod_id': 'atvp_resume:slow',
-              'vod_name': '旧响应',
-              'vod_play_from': '旧线路',
-              'vod_play_url': r'旧分集$old-target',
-            },
-          ],
-        }),
-        200,
-        headers: {'content-type': 'application/json; charset=utf-8'},
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.textContaining('S01E02'), findsWidgets);
-    expect(find.textContaining('旧分集'), findsNothing);
-    expect(state.playLinesOf(state.selectedVod!).single.flag, '丫仙女');
+    expect(calls.where((u) => u.queryParameters.containsKey('ids')).length, 1);
+    state.clearDetail();
+    delayed!.complete(response(detail('baidu')));
+    await pending;
+    expect(state.detailResult, isNull);
+    expect(state.selectedVod, isNull);
+    expect(calls.where((u) => u.queryParameters.containsKey('ids')).length, 1);
   });
 }

@@ -3,6 +3,7 @@
 - 状态：**已完成**（设计 `design/00`–`design/03` + 实现 T1–T14 全部落地；`PHASE5-ACCEPT result=PASS gates=all`）
 - 日期：2026-10-08
 - 后续验证：[T4 网盘分集与播放代理（2026-10-10）](evidence/t4-folder-playback.md)
+- 后续验证：[桥接线路标准化为普通线路（2026-10-11）](evidence/t4-standard-bridge-lines.md)
 - 对应设计文档章节：本目录 `design/00`–`design/03`、`docs/webhtv-pc-design.md` §21（Phase 5 生态与同步）、§22.1
 - 上游：`docs/phase4/README.md`（Phase 4 已完成：TMDB 元数据增强）
 - 上游参考工程：`webhtv/默影视`（Android，`F:\Workspace\webtv3\webhtv`，实测设备 `192.168.50.3:5559`）

@@ -84,6 +84,7 @@ class TmdbState extends ChangeNotifier {
   String _siteKey = '';
   String _vodId = '';
   String _sourceTitle = '';
+
   /// 当前详情页的站源条目（供 UI 读取原始字段）。
   Vod? _vod;
   TmdbSourceLine? _activeLine;
@@ -268,8 +269,7 @@ class TmdbState extends ChangeNotifier {
   ///
   /// 只有「站点被禁用」不渲染；「未配置」渲染状态条 + [去设置] 入口，
   /// 否则用户永远无法进入 TMDB 设置页。
-  bool get shouldRender =>
-      _phase != TmdbLoadPhase.idle && !siteDisabled;
+  bool get shouldRender => _phase != TmdbLoadPhase.idle && !siteDisabled;
 
   /// 季度导航是否需要显示切换控件（> 1 季）。
   bool get hasSeasonSwitcher => _availableSeasons.length > 1;
@@ -575,7 +575,8 @@ class TmdbState extends ChangeNotifier {
     // 首次加载时 `keep` 为 null（还没有用户选择），此时必须记为**实际使用的**
     // 第一条线路，否则 `_selectedLineFlag` 为空 → 季度记忆归不到任何线路
     // → 切走再切回时恢复不了（用户反馈的「又转换一次」）。
-    _selectedLineFlag = keep?.flag ?? (playLines.isEmpty ? '' : playLines.first.flag);
+    _selectedLineFlag =
+        keep?.flag ?? (playLines.isEmpty ? '' : playLines.first.flag);
 
     // 同一部作品的 TMDB 数据在**所有线路之间共用**（用户反馈 2026-10-08：
     // 「多线路貌似没共用同一份 tmdb 数据或缓存」）。
@@ -928,6 +929,7 @@ class TmdbState extends ChangeNotifier {
     final subset = VodPlayLine(
       flag: line.flag,
       episodes: applicable.map((index) => line.episodes[index]).toList(),
+      sourceFlag: line.sourceFlag,
     );
     final result = _enrichmentService.applyEpisodeMetadata(
       line: subset,
@@ -948,7 +950,11 @@ class TmdbState extends ChangeNotifier {
       merged[applicable[offset]] = result.line.episodes[offset];
     }
     return TmdbEpisodeEnrichmentResult(
-      line: VodPlayLine(flag: line.flag, episodes: merged),
+      line: VodPlayLine(
+        flag: line.flag,
+        episodes: merged,
+        sourceFlag: line.sourceFlag,
+      ),
       changed: true,
       appliedCount: result.appliedCount,
     );
@@ -1030,8 +1036,12 @@ class TmdbState extends ChangeNotifier {
       if (raw is! Map) continue;
       final number = raw['season_number'];
       final count = raw['episode_count'];
-      final seasonNumber = number is int ? number : (number is num ? number.toInt() : null);
-      final episodeCount = count is int ? count : (count is num ? count.toInt() : null);
+      final seasonNumber = number is int
+          ? number
+          : (number is num ? number.toInt() : null);
+      final episodeCount = count is int
+          ? count
+          : (count is num ? count.toInt() : null);
       if (seasonNumber == null || episodeCount == null) continue;
       if (episodeCount <= 0) continue;
       counts[seasonNumber] = episodeCount;
