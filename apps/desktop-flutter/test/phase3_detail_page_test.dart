@@ -116,6 +116,9 @@ void main() {
     // 列表条目只有基础字段：详情加载成功后应展示简介与两条剧集。
     await pumpDetail(tester, vodOf('demo-1', '列表条目'));
     await tester.pump();
+
+    expect(find.byKey(const ValueKey('tmdb-detail-hero-overview')), findsOneWidget);
+    expect(find.byKey(const ValueKey('detail-hero-play')), findsOneWidget);
     await scrollPastHero(tester);
 
     expect(find.textContaining('来自详情的简介'), findsWidgets);

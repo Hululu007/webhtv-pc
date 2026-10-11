@@ -2,12 +2,13 @@
 ///
 /// 两条约束：
 ///
-/// 1. **背景海报必须全屏**（原先是「AppBar + 16px 边距里一块 340px 的图」，
-///    用户反馈「太简陋，背景海报也没有全屏显示」）。因此锁定：
+/// 1. **背景海报铺满整宽、首屏信息可读**：详情 Hero 延伸到透明 AppBar 下方，
+///    高度约占首屏一半，让标题/简介/播放入口与线路可以更早出现，避免用户先滚过
+///    一整屏空背景。因此锁定：
 ///    - `Scaffold.extendBodyBehindAppBar == true`；
 ///    - AppBar 背景透明；
 ///    - hero 宽度 == 屏幕宽度（左右不留边距）；
-///    - hero 高度按视口取值（不写死 340）。
+///    - 默认高度为视口的 54%，并限制在 360~500px。
 /// 2. **不得出现无效的背景色块**（用户反馈「大量地方存在这种无效的阴影或背景色
 ///    区域太丑了」）。锁定海报墙的**框比与素材一致**（2:3 竖图用竖框），
 ///    避免竖图被塞进横框后两侧露出大片底色。
@@ -102,8 +103,8 @@ void main() {
       );
       expect(
         rect.height,
-        height,
-        reason: '默认高度应等于视口高度（满屏背景）',
+        height * 0.54,
+        reason: 'Hero 应保留背景氛围，同时让简介、播放入口和线路更早进入首屏',
       );
     });
   });
@@ -131,7 +132,7 @@ void main() {
       } catch (_) {}
     });
 
-    testWidgets('extendBodyBehindAppBar + 透明 AppBar + hero 无侧边距', (tester) async {
+    testWidgets('extendBodyBehindAppBar + 透明 AppBar + 首屏 Hero 无侧边距', (tester) async {
       tester.view.physicalSize = const Size(1200, 900);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
@@ -179,13 +180,12 @@ void main() {
       );
       expect(
         rect.height,
-        900,
-        reason: '背景海报要**满屏**（用户反馈 2026-10-10：「我想要全屏的效果」），'
-            '高度应等于视口高度，而不是只占一半',
+        closeTo(486, 0.1),
+        reason: 'Hero 高度为视口 54%，简介和播放入口应在首屏可见',
       );
     });
 
-    testWidgets('正文仍在 hero 之下（满屏后从第二屏开始，滚动可达）', (tester) async {
+    testWidgets('正文紧随 Hero，滚动后仍可继续查看', (tester) async {
       tester.view.physicalSize = const Size(1200, 900);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
@@ -205,15 +205,14 @@ void main() {
       final heroRect = tester.getRect(
         find.byKey(const ValueKey('tmdb-backdrop-slideshow')),
       );
-      expect(heroRect.height, 900, reason: 'hero 应满屏');
-
-      // 正文在 hero **之下**：首屏（视口高度）内看不到，必须滚动才可见。
-      // 这正是「背景全屏」的代价与预期——首屏全是背景图。
       expect(
-        find.byType(TmdbInfoTable),
-        findsNothing,
-        reason: 'hero 满屏时正文应在首屏之外（否则说明 hero 没满屏）',
+        heroRect.height,
+        closeTo(486, 0.1),
+        reason: 'hero 应占首屏约一半',
       );
+
+      // 详情信息应紧跟 Hero，首屏就能看到一部分；继续滚动仍可完整查看。
+      expect(find.byType(TmdbInfoTable), findsOneWidget);
       await tester.drag(
         find.byType(Scrollable).first,
         const Offset(0, -900),
@@ -222,7 +221,7 @@ void main() {
       expect(
         find.byType(TmdbInfoTable),
         findsOneWidget,
-        reason: '向下滚动后应能看到正文（内容没有被 hero 挤没）',
+        reason: '向下滚动后仍能看到正文（内容没有被 Hero 挤没）',
       );
       // hero 会随列表一起滚动，因此比较**滚动后**的实时位置。
       final heroAfter = tester.getRect(

@@ -937,6 +937,22 @@ class _DetailPageState extends State<DetailPage> {
   }
 
   /// 打开季度绑定弹窗（`04` §5.2）。
+  Future<void> _openOverviewDialog(String text) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('简介'),
+        content: SingleChildScrollView(child: SelectableText(text)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _openSeasonDialog() async {
     final state = widget.state;
     final tmdb = state.tmdb;
@@ -1151,17 +1167,51 @@ class _DetailPageState extends State<DetailPage> {
                 // 高度由组件按视口自适应（见 TmdbDetailHeader.resolveHeight）。
                 TmdbDetailHeader(
                   data:
-                      tmdb.detailData ??
-                      TmdbDetailData(
-                        title: display.vodName,
-                        overview: display.vodContent,
-                        posterUrl: display.vodPic,
-                        backdropUrls: [
-                          if ((display.vodPic ?? '').isNotEmpty)
-                            display.vodPic!,
-                        ],
-                        rating: 0,
-                      ),
+                    tmdb.detailData ??
+                    TmdbDetailData(
+                      title: display.vodName,
+                      overview: display.vodContent,
+                      posterUrl: display.vodPic,
+                      backdropUrls: [
+                        if ((display.vodPic ?? '').isNotEmpty)
+                          display.vodPic!,
+                      ],
+                      rating: 0,
+                    ),
+                  heroOverview: display.vodContent ?? tmdbData?.overview,
+                  heroActions: lines.isEmpty
+                      ? null
+                      : Wrap(
+                          spacing: 10,
+                          runSpacing: 8,
+                          children: [
+                            FilledButton.icon(
+                              key: const ValueKey('detail-hero-play'),
+                              onPressed: () => _play(
+                                vod,
+                                _activeLine(lines),
+                                0,
+                              ),
+                              icon: const Icon(Icons.play_arrow),
+                              label: const Text('播放第一集'),
+                            ),
+                            if ((display.vodContent ?? tmdbData?.overview ?? '')
+                                    .trim()
+                                    .length >
+                                220)
+                              TextButton.icon(
+                                key: const ValueKey('detail-hero-overview'),
+                                onPressed: () => _openOverviewDialog(
+                                  (display.vodContent ??
+                                          tmdbData?.overview ??
+                                          '')
+                                      .trim(),
+                                ),
+                                icon: const Icon(Icons.subject_outlined),
+                                label: const Text('查看简介'),
+                              ),
+                          ],
+                        ),
                 ),
                 // 正文统一留 16 边距（hero 不加，才能左右铺满）。
                 Padding(
@@ -1203,12 +1253,6 @@ class _DetailPageState extends State<DetailPage> {
                           ('语言', tmdbData?.languages.join(' / ')),
                         ],
                       ),
-                      if (display.vodContent != null &&
-                          display.vodContent!.trim().isNotEmpty) ...[
-                        const SizedBox(height: 12),
-                        // 简介：默认 4 行 + 「展开」（`04` §11 长文本要求）。
-                        _ExpandableOverview(text: display.vodContent!.trim()),
-                      ],
                       const SizedBox(height: 12),
                       // 季度选择器（`04` §4.1）：仅 tv 且已匹配时渲染。
                       TmdbSeasonSelector(

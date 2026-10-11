@@ -235,11 +235,19 @@ class TmdbDetailHeader extends StatelessWidget {
     this.statusBar,
     this.metadataBadge,
     this.height,
+    this.heroOverview,
+    this.heroActions,
   });
 
   final TmdbDetailData data;
   final Widget? statusBar;
   final String? metadataBadge;
+
+  /// 站点详情页可把来源简介提升到首屏；纯 TMDB 详情页保持旧布局。
+  final String? heroOverview;
+
+  /// 首屏主动作（例如“播放第一集”）。
+  final Widget? heroActions;
 
   /// 背景高度；为 `null` 时按视口自适应（见 [resolveHeight]）。
   final double? height;
@@ -255,8 +263,12 @@ class TmdbDetailHeader extends StatelessWidget {
   /// 注意：本函数**不知道父级约束**。若调用方把 header 放进有界高度（如
   /// `SizedBox(height: 400)`，测试与内嵌场景会这么用），需由 [build] 里的
   /// `LayoutBuilder` 再夹一道，否则内容会溢出（实测 `overflowed by 200 pixels`）。
-  static double resolveHeight(BuildContext context) =>
-      MediaQuery.sizeOf(context).height;
+  static double resolveHeight(BuildContext context) {
+    final height = MediaQuery.sizeOf(context).height;
+    // 主流媒体库详情页把 Hero 控制在首屏约一半，简介和播放入口可见，
+    // 线路/分集不必被推到第二屏之后。
+    return (height * 0.54).clamp(360.0, 500.0);
+  }
 
   @override
   Widget build(BuildContext context) =>
@@ -284,6 +296,8 @@ class TmdbDetailHeader extends StatelessWidget {
                 child: _HeaderContent(
                   data: data,
                   metadataBadge: metadataBadge,
+                  overview: heroOverview,
+                  actions: heroActions,
                 ),
               ),
             ],
@@ -780,18 +794,13 @@ class TmdbDetailView extends StatelessWidget {
           data: data,
           statusBar: statusBar,
           metadataBadge: metadataBadge,
+          heroOverview: data.overview,
         ),
         Padding(
           padding: padding,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (data.overview != null && data.overview!.trim().isNotEmpty)
-                _ExpandableText(
-                  key: const ValueKey('tmdb-detail-overview'),
-                  title: '简介',
-                  text: data.overview!.trim(),
-                ),
               if (_seasonSectionVisible) ...[
                 const SizedBox(height: 16),
                 _SectionHeader(
@@ -884,10 +893,17 @@ class TmdbDetailView extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class _HeaderContent extends StatelessWidget {
-  const _HeaderContent({required this.data, this.metadataBadge});
+  const _HeaderContent({
+    required this.data,
+    this.metadataBadge,
+    this.overview,
+    this.actions,
+  });
 
   final TmdbDetailData data;
   final String? metadataBadge;
+  final String? overview;
+  final Widget? actions;
 
   @override
   Widget build(BuildContext context) {
@@ -956,6 +972,26 @@ class _HeaderContent extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
+              ],
+              if ((overview ?? '').trim().isNotEmpty) ...[
+                const SizedBox(height: 10),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 760),
+                  child: Text(
+                    overview!.trim(),
+                    key: const ValueKey('tmdb-detail-hero-overview'),
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurface.withValues(alpha: 0.9),
+                      height: 1.35,
+                    ),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+              if (actions != null) ...[
+                const SizedBox(height: 12),
+                actions!,
               ],
             ],
           ),
@@ -1207,54 +1243,6 @@ class _SectionHeader extends StatelessWidget {
           ?trailing,
         ],
       ),
-    );
-  }
-}
-
-class _ExpandableText extends StatefulWidget {
-  const _ExpandableText({super.key, required this.title, required this.text});
-
-  final String title;
-  final String text;
-
-  @override
-  State<_ExpandableText> createState() => _ExpandableTextState();
-}
-
-class _ExpandableTextState extends State<_ExpandableText> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final long = widget.text.length > 120 || widget.text.contains('\n');
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          widget.title,
-          style: theme.textTheme.titleMedium?.copyWith(
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          widget.text,
-          key: const ValueKey('tmdb-overview-text'),
-          style: theme.textTheme.bodyMedium,
-          maxLines: _expanded ? null : 4,
-          overflow: _expanded ? null : TextOverflow.ellipsis,
-        ),
-        if (long)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton(
-              key: const ValueKey('tmdb-overview-toggle'),
-              onPressed: () => setState(() => _expanded = !_expanded),
-              child: Text(_expanded ? '收起' : '展开'),
-            ),
-          ),
-      ],
     );
   }
 }

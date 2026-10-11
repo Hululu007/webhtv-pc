@@ -520,22 +520,29 @@ class _TopBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final site = state.selectedSite;
     final record = state.activeRecord;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     return Container(
-      height: 56,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
+      height: 64,
+      padding: const EdgeInsets.symmetric(horizontal: 20),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        color: scheme.surface,
         border: Border(
-          bottom: BorderSide(color: Theme.of(context).dividerColor),
+          bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.55)),
         ),
       ),
       child: Row(
         children: [
-          const Text(
-            'WebHTV PC',
-            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+          Icon(Icons.movie_filter_outlined, color: scheme.primary, size: 24),
+          const SizedBox(width: 10),
+          Text(
+            'WebHTV',
+            style: theme.textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.2,
+            ),
           ),
-          const SizedBox(width: 16),
+          const SizedBox(width: 20),
           TextButton.icon(
             onPressed: onOpenConfig,
             icon: const Icon(Icons.settings_ethernet, size: 18),
@@ -555,7 +562,12 @@ class _TopBar extends StatelessWidget {
                 child: Icon(Icons.info_outline, size: 18),
               ),
             ),
-          Text('v$appVersion', style: Theme.of(context).textTheme.bodySmall),
+          Text(
+            'v$appVersion',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
         ],
       ),
     );
@@ -573,6 +585,8 @@ class _SideBar extends StatelessWidget {
     return NavigationRail(
       selectedIndex: section.index,
       onDestinationSelected: (index) => onSelect(ShellSection.values[index]),
+      minWidth: 76,
+      groupAlignment: -0.9,
       labelType: NavigationRailLabelType.all,
       destinations: const [
         NavigationRailDestination(
