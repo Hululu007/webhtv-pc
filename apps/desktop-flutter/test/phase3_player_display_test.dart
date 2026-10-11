@@ -20,6 +20,25 @@ void main() {
     );
   });
 
+  test('播放器手势与安卓版控制层语义一致', () {
+    expect(
+      resolvePlayerGesture(doubleTap: false, fullscreen: false),
+      PlayerGestureAction.toggleControls,
+    );
+    expect(
+      resolvePlayerGesture(doubleTap: false, fullscreen: true),
+      PlayerGestureAction.toggleControls,
+    );
+    expect(
+      resolvePlayerGesture(doubleTap: true, fullscreen: false),
+      PlayerGestureAction.enterFullscreen,
+    );
+    expect(
+      resolvePlayerGesture(doubleTap: true, fullscreen: true),
+      PlayerGestureAction.togglePlayback,
+    );
+  });
+
   test('字幕默认透明底并保留描边，样式参数映射到 media-kit 配置', () {
     const defaults = PlayerSubtitleStyle();
     expect(defaults.configuration.style.backgroundColor, Colors.transparent);

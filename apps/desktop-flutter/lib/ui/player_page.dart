@@ -148,6 +148,18 @@ class PlaybackRequest {
 ///
 /// 这些模式直接映射到 media_kit_video 的 [BoxFit] / [Video.aspectRatio]，
 /// 不改变媒体流本身，只改变窗口内的显示方式。
+enum PlayerGestureAction { toggleControls, enterFullscreen, togglePlayback }
+
+PlayerGestureAction resolvePlayerGesture({
+  required bool doubleTap,
+  required bool fullscreen,
+}) {
+  if (!doubleTap) return PlayerGestureAction.toggleControls;
+  return fullscreen
+      ? PlayerGestureAction.togglePlayback
+      : PlayerGestureAction.enterFullscreen;
+}
+
 enum PlayerVideoFitMode {
   contain('原始比例', BoxFit.contain, null),
   cover('裁切铺满', BoxFit.cover, null),
@@ -252,6 +264,7 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _fullscreen = false;
   bool _controlsVisible = true;
   Timer? _saveTimer;
+  Timer? _controlHideTimer;
   String? _loadError;
 
   /// 最近一次字幕错误提示是否已展示，避免每次 setState 重复弹提示。
@@ -296,6 +309,7 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 当前画面显示模式，不改变原始媒体流。
   PlayerVideoFitMode _videoFitMode = PlayerVideoFitMode.contain;
   PlayerSubtitleStyle _subtitleStyle = const PlayerSubtitleStyle();
+  double? _gestureRateBeforeLongPress;
 
   @override
   void initState() {
@@ -303,7 +317,11 @@ class _PlayerPageState extends State<PlayerPage> {
     _request = widget.request;
     _danmakuLoader = widget.danmakuLoader ?? DanmakuService();
     _controller = PlayerController()..addListener(_onControllerChanged);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _touchControls();
+      _load();
+    });
   }
 
   void _onControllerChanged() {
@@ -873,6 +891,8 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   void dispose() {
     _saveTimer?.cancel();
+    _controlHideTimer?.cancel();
+    _endGestureSpeed();
     _persistProgress();
     // 直播弹幕会话是网络资源，必须显式关闭（§20 资源释放）。
     unawaited(_teardownLiveSession('dispose'));
@@ -884,7 +904,12 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _toggleFullscreen() async {
     final next = !await windowManager.isFullScreen();
     await windowManager.setFullScreen(next);
-    if (mounted) setState(() => _fullscreen = next);
+    if (!mounted) return;
+    setState(() {
+      _fullscreen = next;
+      _controlsVisible = true;
+    });
+    _touchControls();
   }
 
   Future<void> _exitFullscreen() async {
@@ -1122,8 +1147,11 @@ class _PlayerPageState extends State<PlayerPage> {
               Expanded(
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: _togglePlaybackByGesture,
-                  onDoubleTap: _toggleFullscreen,
+                  onTap: _toggleControlsByGesture,
+                  onDoubleTap: _handleDoubleTapGesture,
+                  onLongPressStart: (_) => _beginGestureSpeed(),
+                  onLongPressEnd: (_) => _endGestureSpeed(),
+                  onLongPressCancel: _endGestureSpeed,
                   child: Stack(
                     children: [
                       Positioned.fill(
@@ -1170,8 +1198,10 @@ class _PlayerPageState extends State<PlayerPage> {
                   ),
                 ),
               ),
-              if (_controlsVisible || !_fullscreen)
-                _ControlBar(
+              if (_controlsVisible)
+                Listener(
+                  onPointerDown: (_) => _touchControls(),
+                  child: _ControlBar(
                   controller: _controller,
                   request: _request,
                   onToggleFullscreen: _toggleFullscreen,
@@ -1188,6 +1218,7 @@ class _PlayerPageState extends State<PlayerPage> {
                   onSelectVideoFit: _showVideoFitSettings,
                   onShowMediaInfo: _showMediaInfo,
                 ),
+                )
             ],
           ),
         ),
@@ -1223,11 +1254,55 @@ class _PlayerPageState extends State<PlayerPage> {
     return '$width×$height';
   }
 
-  void _togglePlaybackByGesture() {
-    _controller.playOrPause();
-    if (!_controlsVisible && mounted) {
+  void _touchControls() {
+    _controlHideTimer?.cancel();
+    if (mounted && !_controlsVisible) {
       setState(() => _controlsVisible = true);
     }
+    _controlHideTimer = Timer(const Duration(seconds: 4), () {
+      if (!mounted) return;
+      setState(() => _controlsVisible = false);
+    });
+  }
+
+  void _toggleControlsByGesture() {
+    if (resolvePlayerGesture(doubleTap: false, fullscreen: _fullscreen) ==
+        PlayerGestureAction.toggleControls) {
+      if (_controlsVisible) {
+        _controlHideTimer?.cancel();
+        setState(() => _controlsVisible = false);
+      } else {
+        _touchControls();
+      }
+    }
+  }
+
+  Future<void> _handleDoubleTapGesture() async {
+    switch (resolvePlayerGesture(
+      doubleTap: true,
+      fullscreen: _fullscreen,
+    )) {
+      case PlayerGestureAction.enterFullscreen:
+        await _toggleFullscreen();
+      case PlayerGestureAction.togglePlayback:
+        await _controller.playOrPause();
+        _touchControls();
+      case PlayerGestureAction.toggleControls:
+        _toggleControlsByGesture();
+    }
+  }
+
+  void _beginGestureSpeed() {
+    if (_gestureRateBeforeLongPress != null) return;
+    _gestureRateBeforeLongPress = _controller.rate;
+    _controller.setRate(2.0);
+    _touchControls();
+  }
+
+  void _endGestureSpeed() {
+    final previous = _gestureRateBeforeLongPress;
+    _gestureRateBeforeLongPress = null;
+    if (previous != null) _controller.setRate(previous);
   }
 
   Future<void> _showSubtitleStyleSettings() async {
