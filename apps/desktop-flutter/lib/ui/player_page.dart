@@ -144,6 +144,24 @@ class PlaybackRequest {
   }
 }
 
+/// 画面显示模式：保留原始比例、裁切铺满、拉伸填充或固定常用比例。
+///
+/// 这些模式直接映射到 media_kit_video 的 [BoxFit] / [Video.aspectRatio]，
+/// 不改变媒体流本身，只改变窗口内的显示方式。
+enum PlayerVideoFitMode {
+  contain('原始比例', BoxFit.contain, null),
+  cover('裁切铺满', BoxFit.cover, null),
+  fill('拉伸填充', BoxFit.fill, null),
+  ratio16x9('固定 16:9', BoxFit.contain, 16 / 9),
+  ratio4x3('固定 4:3', BoxFit.contain, 4 / 3);
+
+  const PlayerVideoFitMode(this.label, this.fit, this.aspectRatio);
+
+  final String label;
+  final BoxFit fit;
+  final double? aspectRatio;
+}
+
 class PlayerPage extends StatefulWidget {
   const PlayerPage({
     super.key,
@@ -208,6 +226,9 @@ class _PlayerPageState extends State<PlayerPage> {
 
   /// 最近一次播放诊断快照（§23），用于播放器内展示与复制。
   PlaybackDiagnostics? _diagnostics;
+
+  /// 当前画面显示模式，不改变原始媒体流。
+  PlayerVideoFitMode _videoFitMode = PlayerVideoFitMode.contain;
 
   @override
   void initState() {
@@ -996,6 +1017,16 @@ class _PlayerPageState extends State<PlayerPage> {
                       onPressed: _toggleDanmaku,
                     ),
                     IconButton(
+                      tooltip: '画面比例与缩放',
+                      icon: const Icon(Icons.aspect_ratio_outlined),
+                      onPressed: _showVideoFitSettings,
+                    ),
+                    IconButton(
+                      tooltip: '媒体信息',
+                      icon: const Icon(Icons.info_outline),
+                      onPressed: _showMediaInfo,
+                    ),
+                    IconButton(
                       tooltip: '播放诊断',
                       icon: const Icon(Icons.monitor_heart_outlined),
                       onPressed: _diagnostics == null ? null : _showDiagnostics,
@@ -1025,6 +1056,8 @@ class _PlayerPageState extends State<PlayerPage> {
                       Positioned.fill(
                         child: Video(
                           controller: _controller.videoController,
+                          fit: _videoFitMode.fit,
+                          aspectRatio: _videoFitMode.aspectRatio,
                           controls: NoVideoControls,
                         ),
                       ),
@@ -1076,10 +1109,133 @@ class _PlayerPageState extends State<PlayerPage> {
                   onSelectDanmaku: _showDanmakuSettings,
                   liveStatus: _liveStatus,
                   liveOnline: _liveOnline,
+                  videoFitMode: _videoFitMode,
+                  onSelectVideoFit: _showVideoFitSettings,
+                  onShowMediaInfo: _showMediaInfo,
                 ),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  String _formatDuration(Duration value) {
+    final total = value.inSeconds;
+    final hours = total ~/ 3600;
+    final minutes = (total % 3600) ~/ 60;
+    final seconds = total % 60;
+    String two(int number) => number.toString().padLeft(2, '0');
+    return hours > 0
+        ? '$hours:${two(minutes)}:${two(seconds)}'
+        : '${two(minutes)}:${two(seconds)}';
+  }
+
+  String _formatBitrate(num? bitsPerSecond) {
+    if (bitsPerSecond == null || bitsPerSecond <= 0) return '未知';
+    final bits = bitsPerSecond.toDouble();
+    if (bits >= 1000000) return '${(bits / 1000000).toStringAsFixed(1)} Mbps';
+    if (bits >= 1000) return '${(bits / 1000).toStringAsFixed(0)} Kbps';
+    return '${bits.toStringAsFixed(0)} bps';
+  }
+
+  String _mediaResolution() {
+    final width = _controller.videoWidth;
+    final height = _controller.videoHeight;
+    if (width == null || height == null || width <= 0 || height <= 0) {
+      return '未知';
+    }
+    return '$width×$height';
+  }
+
+  Future<void> _showVideoFitSettings() async {
+    final selected = await showModalBottomSheet<PlayerVideoFitMode>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              leading: Icon(Icons.aspect_ratio_outlined),
+              title: Text('画面比例与缩放'),
+              subtitle: Text('只改变显示方式，不改变原始视频'),
+            ),
+            for (final mode in PlayerVideoFitMode.values)
+              ListTile(
+                selected: mode == _videoFitMode,
+                leading: Icon(
+                  mode == _videoFitMode
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                ),
+                title: Text(mode.label),
+                onTap: () => Navigator.of(context).pop(mode),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+    setState(() => _videoFitMode = selected);
+  }
+
+  void _showMediaInfo() {
+    final video = _controller.selectedVideoTrack;
+    final audio = _controller.selectedAudioTrack;
+    final params = _controller.videoParams;
+    final audioParams = _controller.audioParams;
+    final diagnostics = _diagnostics;
+    final rows = <(String, String)>[
+      ('分辨率', _mediaResolution()),
+      ('显示比例', params.aspect == null ? '未知' : params.aspect!.toStringAsFixed(3)),
+      ('视频编码', video?.codec?.isNotEmpty == true ? video!.codec! : '未知'),
+      ('帧率', video?.fps == null ? '未知' : '${video!.fps!.toStringAsFixed(2)} fps'),
+      ('视频码率', _formatBitrate(video?.bitrate)),
+      ('像素格式', params.pixelformat ?? '未知'),
+      ('音频编码', audio?.codec?.isNotEmpty == true ? audio!.codec! : '未知'),
+      ('采样率', audioParams.sampleRate == null ? '未知' : '${audioParams.sampleRate} Hz'),
+      ('声道', audioParams.hrChannels ?? audioParams.channels ?? '未知'),
+      ('音频码率', _formatBitrate(_controller.audioBitrate ?? audio?.bitrate)),
+      ('格式', diagnostics?.format.label ?? '未知'),
+      ('缓冲', _formatDuration(_controller.buffered)),
+    ];
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('媒体信息'),
+        content: SizedBox(
+          width: 480,
+          child: ListView.separated(
+            shrinkWrap: true,
+            itemCount: rows.length,
+            separatorBuilder: (_, _) => const Divider(height: 1),
+            itemBuilder: (context, index) {
+              final (label, value) = rows[index];
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 88,
+                      child: Text(
+                        label,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    Expanded(child: SelectableText(value)),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
       ),
     );
   }
@@ -1231,6 +1387,9 @@ class _ControlBar extends StatelessWidget {
     required this.onSelectDanmaku,
     this.liveStatus,
     this.liveOnline,
+    this.videoFitMode = PlayerVideoFitMode.contain,
+    this.onSelectVideoFit,
+    this.onShowMediaInfo,
   });
 
   final PlayerController controller;
@@ -1248,6 +1407,9 @@ class _ControlBar extends StatelessWidget {
 
   /// 直播弹幕在线人数（收到 `online` 帧后非空）。
   final int? liveOnline;
+  final PlayerVideoFitMode videoFitMode;
+  final VoidCallback? onSelectVideoFit;
+  final VoidCallback? onShowMediaInfo;
 
   String _formatDuration(Duration value) {
     final total = value.inSeconds;
@@ -1258,6 +1420,28 @@ class _ControlBar extends StatelessWidget {
     return hours > 0
         ? '$hours:${two(minutes)}:${two(seconds)}'
         : '${two(minutes)}:${two(seconds)}';
+  }
+
+  String _formatBitrate(int? bitsPerSecond) {
+    if (bitsPerSecond == null || bitsPerSecond <= 0) return '';
+    if (bitsPerSecond >= 1000000) {
+      return '${(bitsPerSecond / 1000000).toStringAsFixed(1)} Mbps';
+    }
+    return '${(bitsPerSecond / 1000).toStringAsFixed(0)} Kbps';
+  }
+
+  String _mediaSummary(PlayerController controller) {
+    final width = controller.videoWidth;
+    final height = controller.videoHeight;
+    final track = controller.selectedVideoTrack;
+    return [
+      if (width != null && height != null) '$width×$height',
+      if (track?.codec?.isNotEmpty == true) track!.codec!,
+      if (track?.fps != null && track!.fps! > 0)
+        '${track.fps!.toStringAsFixed(2)} fps',
+      if (_formatBitrate(track?.bitrate).isNotEmpty)
+        _formatBitrate(track?.bitrate),
+    ].join(' · ');
   }
 
   @override
@@ -1347,7 +1531,7 @@ class _ControlBar extends StatelessWidget {
                     .map(
                       (rate) => DropdownMenuItem(
                         value: rate,
-                        child: Text('${rate}x'),
+                        child: Text('${rate.toString()}x'),
                       ),
                     )
                     .toList(),
@@ -1397,6 +1581,16 @@ class _ControlBar extends StatelessWidget {
                 icon: const Icon(Icons.comment_outlined),
               ),
               IconButton(
+                tooltip: '画面比例与缩放（${videoFitMode.label}）',
+                onPressed: onSelectVideoFit,
+                icon: const Icon(Icons.aspect_ratio_outlined),
+              ),
+              IconButton(
+                tooltip: '媒体信息',
+                onPressed: onShowMediaInfo,
+                icon: const Icon(Icons.info_outline),
+              ),
+              IconButton(
                 tooltip: '全屏（F11）',
                 onPressed: onToggleFullscreen,
                 icon: const Icon(Icons.fullscreen),
@@ -1417,6 +1611,15 @@ class _ControlBar extends StatelessWidget {
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
+                  ),
+                ),
+              if (controller.videoWidth != null ||
+                  controller.selectedVideoTrack != null)
+                Tooltip(
+                  message: '媒体信息',
+                  child: Text(
+                    _mediaSummary(controller),
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
               Text(

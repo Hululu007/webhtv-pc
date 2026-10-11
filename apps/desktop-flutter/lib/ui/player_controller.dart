@@ -146,6 +146,14 @@ class PlayerController extends ChangeNotifier {
   String? _currentUrl;
   PlayerLoadOutcome? _lastOutcome;
 
+  /// media-kit 在媒体打开后持续上报的真实媒体元数据。
+  VideoParams _videoParams = const VideoParams();
+  AudioParams _audioParams = const AudioParams();
+  Tracks _tracks = const Tracks();
+  int? _videoWidth;
+  int? _videoHeight;
+  double? _audioBitrate;
+
   /// 本次播放的诊断信息（§23）。每次 [open] 重建，包含引擎/格式/网络/错误与阶段耗时。
   PlaybackDiagnostics? _diagnostics;
   PlaybackDiagnosticsBuilder? _diagnosticsBuilder;
@@ -164,6 +172,32 @@ class PlayerController extends ChangeNotifier {
   String? get currentUrl => _currentUrl;
   PlayerLoadOutcome? get lastOutcome => _lastOutcome;
   String? get lastEngineError => _lastEngineError;
+  VideoParams get videoParams => _videoParams;
+  AudioParams get audioParams => _audioParams;
+  Tracks get tracks => _tracks;
+  int? get videoWidth => _videoWidth ?? _videoParams.dw ?? _videoParams.w;
+  int? get videoHeight => _videoHeight ?? _videoParams.dh ?? _videoParams.h;
+  double? get audioBitrate => _audioBitrate;
+
+  /// 当前视频/音频轨，包含 codec、fps、bitrate、采样率等信息。
+  VideoTrack? get selectedVideoTrack => _selectedVideoTrack;
+  AudioTrack? get selectedAudioTrack => _selectedAudioTrack;
+
+  VideoTrack? get _selectedVideoTrack {
+    final id = _player.state.track.video.id;
+    for (final track in _tracks.video) {
+      if (track.id == id) return track;
+    }
+    return _tracks.video.where((track) => track.id != 'auto' && track.id != 'no').firstOrNull;
+  }
+
+  AudioTrack? get _selectedAudioTrack {
+    final id = _player.state.track.audio.id;
+    for (final track in _tracks.audio) {
+      if (track.id == id) return track;
+    }
+    return _tracks.audio.where((track) => track.id != 'auto' && track.id != 'no').firstOrNull;
+  }
 
   /// 最近一次播放的诊断快照（§23）。未开始播放时为 null。
   PlaybackDiagnostics? get diagnostics => _diagnostics;
@@ -370,16 +404,39 @@ class PlayerController extends ChangeNotifier {
         _rate = value;
         notifyListeners();
       }),
+      _player.stream.videoParams.listen((value) {
+        _videoParams = value;
+        notifyListeners();
+      }),
+      _player.stream.audioParams.listen((value) {
+        _audioParams = value;
+        notifyListeners();
+      }),
+      _player.stream.audioBitrate.listen((value) {
+        _audioBitrate = value;
+        notifyListeners();
+      }),
+      _player.stream.width.listen((value) {
+        _videoWidth = value;
+        notifyListeners();
+      }),
+      _player.stream.height.listen((value) {
+        _videoHeight = value;
+        notifyListeners();
+      }),
       _player.stream.error.listen((message) {
         _lastEngineError = message;
         // 非致命告警（无声卡/无 GPU）不应被当成加载失败：加载结果以 duration 判定。
         notifyListeners();
       }),
       _player.stream.tracks.listen((tracks) {
+        _tracks = tracks;
         _updateEmbeddedSubtitles(tracks.subtitle);
+        notifyListeners();
       }),
       _player.stream.track.listen((track) {
         _syncSelectedSubtitle(track.subtitle);
+        notifyListeners();
       }),
     ]);
   }
