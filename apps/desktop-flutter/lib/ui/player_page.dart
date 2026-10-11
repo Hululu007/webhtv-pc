@@ -162,6 +162,72 @@ enum PlayerVideoFitMode {
   final double? aspectRatio;
 }
 
+/// 字幕显示样式：默认透明底 + 黑色描边，避免视频上出现整块黑色背景。
+class PlayerSubtitleStyle {
+  const PlayerSubtitleStyle({
+    this.color = Colors.white,
+    this.backgroundColor = Colors.black,
+    this.backgroundOpacity = 0,
+    this.outlineWidth = 2,
+    this.textScale = 1,
+    this.bottomPadding = 24,
+  });
+
+  final Color color;
+  final Color backgroundColor;
+  final double backgroundOpacity;
+  final double outlineWidth;
+  final double textScale;
+  final double bottomPadding;
+
+  PlayerSubtitleStyle copyWith({
+    Color? color,
+    Color? backgroundColor,
+    double? backgroundOpacity,
+    double? outlineWidth,
+    double? textScale,
+    double? bottomPadding,
+  }) => PlayerSubtitleStyle(
+    color: color ?? this.color,
+    backgroundColor: backgroundColor ?? this.backgroundColor,
+    backgroundOpacity: backgroundOpacity ?? this.backgroundOpacity,
+    outlineWidth: outlineWidth ?? this.outlineWidth,
+    textScale: textScale ?? this.textScale,
+    bottomPadding: bottomPadding ?? this.bottomPadding,
+  );
+
+  List<Shadow> get shadows {
+    if (outlineWidth <= 0) return const [];
+    final d = outlineWidth.clamp(0.5, 4.0).toDouble();
+    return [
+      for (final offset in [
+        Offset(-d, -d),
+        Offset(0, -d),
+        Offset(d, -d),
+        Offset(-d, 0),
+        Offset(d, 0),
+        Offset(-d, d),
+        Offset(0, d),
+        Offset(d, d),
+      ])
+        Shadow(color: Colors.black, offset: offset, blurRadius: 0),
+    ];
+  }
+
+  SubtitleViewConfiguration get configuration => SubtitleViewConfiguration(
+    style: TextStyle(
+      height: 1.35,
+      fontSize: 32 * textScale,
+      color: color,
+      fontWeight: FontWeight.w500,
+      backgroundColor: backgroundColor.withValues(alpha: backgroundOpacity),
+      shadows: shadows,
+    ),
+    textAlign: TextAlign.center,
+    padding: EdgeInsets.fromLTRB(16, 0, 16, bottomPadding),
+  );
+}
+
 class PlayerPage extends StatefulWidget {
   const PlayerPage({
     super.key,
@@ -229,6 +295,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   /// 当前画面显示模式，不改变原始媒体流。
   PlayerVideoFitMode _videoFitMode = PlayerVideoFitMode.contain;
+  PlayerSubtitleStyle _subtitleStyle = const PlayerSubtitleStyle();
 
   @override
   void initState() {
@@ -1003,9 +1070,14 @@ class _PlayerPageState extends State<PlayerPage> {
                   ),
                   actions: [
                     IconButton(
-                      tooltip: '字幕',
+                      tooltip: '字幕轨',
                       icon: const Icon(Icons.subtitles_outlined),
                       onPressed: _showSubtitleMenu,
+                    ),
+                    IconButton(
+                      tooltip: '字幕样式',
+                      icon: const Icon(Icons.format_color_text_outlined),
+                      onPressed: _showSubtitleStyleSettings,
                     ),
                     IconButton(
                       tooltip: _danmakuStyle.enabled ? '弹幕（开启）' : '弹幕（关闭）',
@@ -1049,8 +1121,9 @@ class _PlayerPageState extends State<PlayerPage> {
             children: [
               Expanded(
                 child: GestureDetector(
-                  onTap: () =>
-                      setState(() => _controlsVisible = !_controlsVisible),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _togglePlaybackByGesture,
+                  onDoubleTap: _toggleFullscreen,
                   child: Stack(
                     children: [
                       Positioned.fill(
@@ -1059,6 +1132,7 @@ class _PlayerPageState extends State<PlayerPage> {
                           fit: _videoFitMode.fit,
                           aspectRatio: _videoFitMode.aspectRatio,
                           controls: NoVideoControls,
+                          subtitleViewConfiguration: _subtitleStyle.configuration,
                         ),
                       ),
                       // 弹幕叠加层（§21 Phase 3 / §13.1 直播弹幕）：绘制在视频上方、
@@ -1106,6 +1180,7 @@ class _PlayerPageState extends State<PlayerPage> {
                   onSelectEpisode: (index) => _playEpisode(index),
                   onSelectLine: (flag) => _playEpisode(0, overrideFlag: flag),
                   onSelectSubtitle: _showSubtitleMenu,
+                  onSelectSubtitleStyle: _showSubtitleStyleSettings,
                   onSelectDanmaku: _showDanmakuSettings,
                   liveStatus: _liveStatus,
                   liveOnline: _liveOnline,
@@ -1146,6 +1221,140 @@ class _PlayerPageState extends State<PlayerPage> {
       return '未知';
     }
     return '$width×$height';
+  }
+
+  void _togglePlaybackByGesture() {
+    _controller.playOrPause();
+    if (!_controlsVisible && mounted) {
+      setState(() => _controlsVisible = true);
+    }
+  }
+
+  Future<void> _showSubtitleStyleSettings() async {
+    var draft = _subtitleStyle;
+    final result = await showModalBottomSheet<PlayerSubtitleStyle>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) => SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('字幕样式', style: Theme.of(context).textTheme.titleLarge),
+                const SizedBox(height: 4),
+                Text(
+                  '去除黑色字幕底框，并调整字幕位置、描边和时间偏移。',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 18),
+                Text('文字颜色', style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 10,
+                  children: [
+                    for (final color in const [
+                      Colors.white,
+                      Colors.yellow,
+                      Colors.cyanAccent,
+                      Colors.lightGreenAccent,
+                      Colors.orangeAccent,
+                      Colors.pinkAccent,
+                    ])
+                      InkWell(
+                        onTap: () => setModalState(
+                          () => draft = draft.copyWith(color: color),
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        child: Container(
+                          width: 30,
+                          height: 30,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: color,
+                            border: Border.all(
+                              color: draft.color == color
+                                  ? Theme.of(context).colorScheme.primary
+                                  : Colors.white54,
+                              width: draft.color == color ? 3 : 1,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                Text('字幕底色（默认透明）', style: Theme.of(context).textTheme.titleSmall),
+                Slider(
+                  value: draft.backgroundOpacity,
+                  min: 0,
+                  max: 0.8,
+                  divisions: 8,
+                  label: '${(draft.backgroundOpacity * 100).round()}%',
+                  onChanged: (value) => setModalState(
+                    () => draft = draft.copyWith(backgroundOpacity: value),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text('描边宽度 ${draft.outlineWidth.toStringAsFixed(1)}', style: Theme.of(context).textTheme.bodySmall),
+                Slider(
+                  value: draft.outlineWidth,
+                  min: 0,
+                  max: 4,
+                  divisions: 8,
+                  label: draft.outlineWidth.toStringAsFixed(1),
+                  onChanged: (value) => setModalState(
+                    () => draft = draft.copyWith(outlineWidth: value),
+                  ),
+                ),
+                Text('字号 ${((draft.textScale) * 100).round()}%', style: Theme.of(context).textTheme.bodySmall),
+                Slider(
+                  value: draft.textScale,
+                  min: 0.6,
+                  max: 1.8,
+                  divisions: 12,
+                  label: '${(draft.textScale * 100).round()}%',
+                  onChanged: (value) => setModalState(
+                    () => draft = draft.copyWith(textScale: value),
+                  ),
+                ),
+                Text('字幕位置 ${draft.bottomPadding.round()}dp', style: Theme.of(context).textTheme.bodySmall),
+                Slider(
+                  value: draft.bottomPadding,
+                  min: 0,
+                  max: 120,
+                  divisions: 12,
+                  label: '${draft.bottomPadding.round()}dp',
+                  onChanged: (value) => setModalState(
+                    () => draft = draft.copyWith(bottomPadding: value),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: () => setModalState(() {
+                        draft = const PlayerSubtitleStyle();
+                      }),
+                      child: const Text('恢复默认'),
+                    ),
+                    const Spacer(),
+                    FilledButton(
+                      onPressed: () => Navigator.of(context).pop(draft),
+                      child: const Text('应用'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    setState(() => _subtitleStyle = result);
   }
 
   Future<void> _showVideoFitSettings() async {
@@ -1384,6 +1593,7 @@ class _ControlBar extends StatelessWidget {
     required this.onSelectEpisode,
     required this.onSelectLine,
     required this.onSelectSubtitle,
+    required this.onSelectSubtitleStyle,
     required this.onSelectDanmaku,
     this.liveStatus,
     this.liveOnline,
@@ -1400,6 +1610,7 @@ class _ControlBar extends StatelessWidget {
   final ValueChanged<int> onSelectEpisode;
   final ValueChanged<String> onSelectLine;
   final VoidCallback onSelectSubtitle;
+  final VoidCallback onSelectSubtitleStyle;
   final VoidCallback onSelectDanmaku;
 
   /// 直播弹幕连接状态（仅直播弹幕时非空）。
@@ -1563,8 +1774,8 @@ class _ControlBar extends StatelessWidget {
                 ),
               IconButton(
                 tooltip: controller.hasSubtitles
-                    ? '字幕（${controller.selectedSubtitle?.label ?? '未选择'}）'
-                    : '字幕（无可选字幕轨）',
+                    ? '字幕轨（${controller.selectedSubtitle?.label ?? '未选择'}）'
+                    : '字幕轨（无可选字幕轨）',
                 onPressed: onSelectSubtitle,
                 icon: Icon(
                   controller.selectedSubtitle == null ||
@@ -1573,6 +1784,11 @@ class _ControlBar extends StatelessWidget {
                       ? Icons.subtitles_off_outlined
                       : Icons.subtitles_outlined,
                 ),
+              ),
+              IconButton(
+                tooltip: '字幕样式',
+                onPressed: onSelectSubtitleStyle,
+                icon: const Icon(Icons.format_color_text_outlined),
               ),
               // 弹幕设置（§21 Phase 3）；开关本身在 AppBar 与设置面板内。
               IconButton(

@@ -19,4 +19,22 @@ void main() {
       ['原始比例', '裁切铺满', '拉伸填充', '固定 16:9', '固定 4:3'],
     );
   });
+
+  test('字幕默认透明底并保留描边，样式参数映射到 media-kit 配置', () {
+    const defaults = PlayerSubtitleStyle();
+    expect(defaults.configuration.style.backgroundColor, Colors.transparent);
+    expect(defaults.configuration.style.shadows, isNotEmpty);
+    expect(defaults.configuration.padding.bottom, 24);
+
+    final custom = defaults.copyWith(
+      backgroundOpacity: 0.5,
+      textScale: 1.5,
+      bottomPadding: 72,
+      outlineWidth: 0,
+    );
+    expect(custom.configuration.style.backgroundColor?.a, closeTo(0.5, 0.01));
+    expect(custom.configuration.style.fontSize, 48);
+    expect(custom.configuration.style.shadows, isEmpty);
+    expect(custom.configuration.padding.bottom, 72);
+  });
 }
