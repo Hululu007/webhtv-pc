@@ -431,6 +431,31 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// 命名与 [searchHistory]（按关键词查播放历史的方法）区分，避免两者混淆。
   List<String> get recentSearchKeywords => _searchHistory;
 
+  /// 读取某部作品上次使用的播放器画面模式。
+  String? playerVideoFitModeFor({
+    required String siteKey,
+    required String vodId,
+  }) {
+    final value = _uiPreferences?.videoFitMode(siteKey: siteKey, vodId: vodId);
+    return value == null || value.isEmpty ? null : value;
+  }
+
+  /// 持久化某部作品的播放器画面模式，失败不影响当前播放。
+  void rememberPlayerVideoFitMode({
+    required String siteKey,
+    required String vodId,
+    required String mode,
+  }) {
+    unawaited(
+      _uiPreferences?.rememberVideoFitMode(
+            siteKey: siteKey,
+            vodId: vodId,
+            mode: mode,
+          ) ??
+          Future<void>.value(),
+    );
+  }
+
   bool get hasConfig => _config != null && _config!.sites.isNotEmpty;
 
   /// 站点列表(含运行时可用性),隐藏 `hide=1` 的站点。
@@ -1873,6 +1898,31 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       );
       notifyListeners();
       rethrow;
+    }
+  }
+
+  /// 用详情结果补齐旧历史记录缺失的海报，不改变进度和更新时间。
+  void updateHistoryPoster(PlaybackHistory item, String posterUrl) {
+    final database = _database;
+    final poster = posterUrl.trim();
+    if (database == null || poster.isEmpty || item.vodPic == poster) return;
+    try {
+      database.upsertHistory(
+        siteKey: item.siteKey,
+        vodId: item.vodId,
+        vodName: item.vodName,
+        vodPic: poster,
+        flag: item.flag,
+        episodeName: item.episodeName,
+        episodeId: item.episodeId,
+        positionMs: item.positionMs,
+        durationMs: item.durationMs,
+        completed: item.completed,
+        updatedAt: item.updatedAt,
+      );
+      notifyListeners();
+    } catch (error) {
+      log.warning('补齐历史海报失败：$error', scope: 'history');
     }
   }
 

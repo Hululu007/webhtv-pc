@@ -63,7 +63,10 @@ void main() {
     await state.importConfig(_config, displayName: '站点记忆测试');
     state.dispose();
     // 清掉导入时可能记下的站点，构造「从未选过」的初始态。
-    final store = UiPreferencesStore(path: paths.settingsPath, log: LogService());
+    final store = UiPreferencesStore(
+      path: paths.settingsPath,
+      log: LogService(),
+    );
     await store.load();
     await store.rememberSite('');
   }
@@ -106,11 +109,7 @@ void main() {
     for (var i = 0; i < 40 && lastSiteKeyOnDisk() != 'site_c'; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 25));
     }
-    expect(
-      lastSiteKeyOnDisk(),
-      'site_c',
-      reason: '选择站点后必须落盘（否则重启无从恢复）',
-    );
+    expect(lastSiteKeyOnDisk(), 'site_c', reason: '选择站点后必须落盘（否则重启无从恢复）');
   });
 
   test('重启后默认回到最近使用的站点（而不是第一个）', () async {
@@ -181,7 +180,8 @@ void main() {
     expect(
       reopened.selectedSite?.key,
       'site_x',
-      reason: '记住的站点不存在时必须退回当前配置的第一个，'
+      reason:
+          '记住的站点不存在时必须退回当前配置的第一个，'
           '否则首页会 siteUnsupported（用户曾实测过这类空站）',
     );
   });
@@ -197,7 +197,10 @@ void main() {
       }),
     );
 
-    final store = UiPreferencesStore(path: paths.settingsPath, log: LogService());
+    final store = UiPreferencesStore(
+      path: paths.settingsPath,
+      log: LogService(),
+    );
     await store.load();
     await store.rememberSite('site_b');
 
@@ -215,12 +218,59 @@ void main() {
     );
   });
 
+  test('UiPreferencesStore：按站点和影片记住播放器画面模式', () async {
+    final store = UiPreferencesStore(
+      path: paths.settingsPath,
+      log: LogService(),
+    );
+    await store.load();
+    await store.rememberVideoFitMode(
+      siteKey: 'bridge-site',
+      vodId: 'vod-2696',
+      mode: 'ratio16x9',
+    );
+
+    final reopened = UiPreferencesStore(
+      path: paths.settingsPath,
+      log: LogService(),
+    );
+    await reopened.load();
+    expect(
+      reopened.videoFitMode(siteKey: 'bridge-site', vodId: 'vod-2696'),
+      'ratio16x9',
+    );
+    expect(reopened.videoFitMode(siteKey: 'bridge-site', vodId: 'other'), '');
+  });
+
+  test('播放器画面模式按站点和影片持久化', () async {
+    await seedConfigOnly();
+    final state = build();
+    addTearDown(state.dispose);
+    await state.bootstrap();
+    state.rememberPlayerVideoFitMode(
+      siteKey: 'site_a',
+      vodId: 'vod-1',
+      mode: 'cover',
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    final reopened = build();
+    addTearDown(reopened.dispose);
+    await reopened.bootstrap();
+    expect(
+      reopened.playerVideoFitModeFor(siteKey: 'site_a', vodId: 'vod-1'),
+      'cover',
+    );
+  });
+
   test('UiPreferencesStore：文件损坏时退回默认且不抛', () async {
     final file = File(paths.settingsPath);
     await file.parent.create(recursive: true);
     await file.writeAsString('{ this is not json');
 
-    final store = UiPreferencesStore(path: paths.settingsPath, log: LogService());
+    final store = UiPreferencesStore(
+      path: paths.settingsPath,
+      log: LogService(),
+    );
     await store.load();
     expect(store.lastSiteKey, '');
     expect(store.loaded, isTrue, reason: '损坏也要标记为已读，避免重复尝试');

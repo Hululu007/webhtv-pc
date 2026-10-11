@@ -19,7 +19,10 @@
 ///    必须由调用点显式传入该集的入口目标，否则历史会记成站点认不了的值。
 library;
 
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:webhtv_pc/ui/library_pages.dart';
 import 'package:webhtv_pc/ui/player_page.dart';
 
 PlaybackRequest _request({
@@ -38,6 +41,20 @@ PlaybackRequest _request({
 );
 
 void main() {
+  group('历史记录兼容旧本地代理地址', () {
+    test('恢复旧 /p/<token>/<base64> 记录为站点入口目标', () {
+      const target = 'https://pan.baidu.com/s/example?id=1';
+      final encoded = base64Url.encode(utf8.encode(target)).replaceAll('=', '');
+      final old = 'http://127.0.0.1:4712/p/token/$encoded';
+      expect(restoreHistoryPlaybackTarget(old), target);
+    });
+
+    test('普通入口目标保持不变', () {
+      const target = '1@7865@0@1';
+      expect(restoreHistoryPlaybackTarget(target), target);
+    });
+  });
+
   group('episodeTarget 与 url 的语义分离（§15.2）', () {
     test('不传 episodeTarget → 回退到 url（命令行 / 直播兼容）', () {
       const url = 'http://127.0.0.1:4712/p/token/aHR0cHM6Ly8';
@@ -79,7 +96,10 @@ void main() {
   group('copyWith 不因换 url 而漂移 episodeTarget（缺陷成因）', () {
     test('只换 url：episodeTarget 必须保持不变', () {
       const target = 'https://pan.baidu.com/s/10VoZ5K';
-      final first = _request(url: 'http://127.0.0.1/p/t1/a', episodeTarget: target);
+      final first = _request(
+        url: 'http://127.0.0.1/p/t1/a',
+        episodeTarget: target,
+      );
 
       // 模拟「只更新可播地址」的调用（例如重试 / 刷新直链）。
       final second = first.copyWith(url: 'http://127.0.0.1/p/t2/b');

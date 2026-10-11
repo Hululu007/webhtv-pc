@@ -4,9 +4,9 @@
 /// 两段，各自有独立的 store。UI 偏好与它们语义无关，混进去会让任何一方保存时
 /// 覆盖另一方的键。这里沿用同样的「读改写、只替换自己那一段」模式。
 ///
-/// 当前只存一项：
-/// - `lastSiteKey`：**最近一次使用的站点**。重启后默认加载它；只有从未选过
-///   （首次使用）才退回配置里的第一个站点（用户需求 2026-10-10）。
+/// 当前保存：
+/// - `lastSiteKey`：**最近一次使用的站点**；
+/// - `videoFitModes`：按 `siteKey + vodId` 记住播放器画面模式。
 library;
 
 import 'dart:convert';
@@ -24,6 +24,7 @@ class UiPreferencesStore {
   final LogService? _log;
 
   String _lastSiteKey = '';
+  final Map<String, String> _videoFitModes = {};
   bool _loaded = false;
 
   /// 最近一次使用的站点 key；从未选过时为空串。
@@ -31,6 +32,9 @@ class UiPreferencesStore {
 
   /// 是否已成功读取过磁盘内容。
   bool get loaded => _loaded;
+
+  String videoFitMode({required String siteKey, required String vodId}) =>
+      _videoFitModes[_videoFitKey(siteKey, vodId)] ?? '';
 
   /// 从磁盘读取。文件不存在或解析失败时保持默认值并记日志（不阻塞启动）。
   Future<void> load() async {
@@ -51,6 +55,14 @@ class UiPreferencesStore {
         if (ui is Map) {
           final value = ui['lastSiteKey'];
           if (value is String) _lastSiteKey = value.trim();
+          final modes = ui['videoFitModes'];
+          if (modes is Map) {
+            for (final entry in modes.entries) {
+              if (entry.key is String && entry.value is String) {
+                _videoFitModes[entry.key as String] = entry.value as String;
+              }
+            }
+          }
         }
       }
       _loaded = true;
@@ -71,6 +83,24 @@ class UiPreferencesStore {
     return _persist();
   }
 
+  Future<bool> rememberVideoFitMode({
+    required String siteKey,
+    required String vodId,
+    required String mode,
+  }) async {
+    final key = _videoFitKey(siteKey, vodId);
+    if (_videoFitModes[key] == mode) return true;
+    _videoFitModes[key] = mode;
+    // 偏好是缓存，不允许无限增长。
+    if (_videoFitModes.length > 200) {
+      _videoFitModes.remove(_videoFitModes.keys.first);
+    }
+    return _persist();
+  }
+
+  String _videoFitKey(String siteKey, String vodId) =>
+      '${siteKey.trim()}\\n${vodId.trim()}';
+
   Future<bool> _persist() async {
     try {
       final file = File(path);
@@ -86,7 +116,9 @@ class UiPreferencesStore {
           // 旧文件损坏 → 直接覆盖，不把损坏内容带进新文件。
         }
       }
-      existing['ui'] = {'lastSiteKey': _lastSiteKey};
+      final ui = <String, Object?>{'lastSiteKey': _lastSiteKey};
+      if (_videoFitModes.isNotEmpty) ui['videoFitModes'] = _videoFitModes;
+      existing['ui'] = ui;
 
       final temporary = File('$path.tmp');
       await temporary.writeAsString(

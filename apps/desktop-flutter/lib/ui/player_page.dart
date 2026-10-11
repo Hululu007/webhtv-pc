@@ -258,7 +258,7 @@ class PlayerPage extends StatefulWidget {
   State<PlayerPage> createState() => _PlayerPageState();
 }
 
-class _PlayerPageState extends State<PlayerPage> {
+class _PlayerPageState extends State<PlayerPage> with WindowListener {
   late final PlayerController _controller;
   late PlaybackRequest _request;
   bool _fullscreen = false;
@@ -315,8 +315,21 @@ class _PlayerPageState extends State<PlayerPage> {
   void initState() {
     super.initState();
     _request = widget.request;
+    final savedFit = widget.state.playerVideoFitModeFor(
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+    );
+    if (savedFit != null) {
+      for (final mode in PlayerVideoFitMode.values) {
+        if (mode.name == savedFit) {
+          _videoFitMode = mode;
+          break;
+        }
+      }
+    }
     _danmakuLoader = widget.danmakuLoader ?? DanmakuService();
     _controller = PlayerController()..addListener(_onControllerChanged);
+    windowManager.addListener(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _touchControls();
@@ -853,7 +866,11 @@ class _PlayerPageState extends State<PlayerPage> {
     final position = _controller.position;
     final duration = _controller.duration;
     widget.state.recordProgress(
-      vod: Vod(vodId: _request.vodId, vodName: _request.vodName),
+      vod: Vod(
+        vodId: _request.vodId,
+        vodName: _request.vodName,
+        vodPic: _request.vodPic,
+      ),
       flag: _request.playbackFlag,
       episodeName: _request.episodeName,
       // 存**站点入口目标**而不是解析后的播放地址：历史续播要把这个值回传给站点
@@ -890,6 +907,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   @override
   void dispose() {
+    windowManager.removeListener(this);
     _saveTimer?.cancel();
     _controlHideTimer?.cancel();
     _endGestureSpeed();
@@ -901,22 +919,78 @@ class _PlayerPageState extends State<PlayerPage> {
     super.dispose();
   }
 
-  Future<void> _toggleFullscreen() async {
-    final next = !await windowManager.isFullScreen();
-    await windowManager.setFullScreen(next);
+  @override
+  void onWindowEnterFullScreen() {
     if (!mounted) return;
     setState(() {
-      _fullscreen = next;
+      _fullscreen = true;
+      _controlsVisible = true;
+    });
+    _touchControls();
+  }
+
+  @override
+  void onWindowLeaveFullScreen() {
+    if (!mounted) return;
+    setState(() {
+      _fullscreen = false;
+      _controlsVisible = true;
+    });
+    _controlHideTimer?.cancel();
+  }
+
+  Future<void> _toggleFullscreen() async {
+    final next = !await windowManager.isFullScreen();
+    try {
+      if (next) {
+        // Windows 全屏失败时如果只更新 Flutter 状态，标题栏会残留；
+        // 先切无边框，再切系统全屏，最后用实际窗口状态回读确认。
+        await windowManager.setTitleBarStyle(
+          TitleBarStyle.hidden,
+          windowButtonVisibility: false,
+        );
+        await windowManager.setAsFrameless();
+        await windowManager.setFullScreen(true);
+        await windowManager.focus();
+        var actual = await windowManager.isFullScreen();
+        if (!actual) {
+          await Future<void>.delayed(const Duration(milliseconds: 80));
+          await windowManager.setFullScreen(true);
+          actual = await windowManager.isFullScreen();
+        }
+        if (!actual) {
+          await windowManager.setTitleBarStyle(
+            TitleBarStyle.normal,
+            windowButtonVisibility: true,
+          );
+          throw StateError('Windows 全屏状态未确认');
+        }
+      } else {
+        await windowManager.setFullScreen(false);
+        await windowManager.setTitleBarStyle(
+          TitleBarStyle.normal,
+          windowButtonVisibility: true,
+        );
+      }
+    } catch (error) {
+      widget.state.log.warning('切换全屏失败：$error', scope: 'player');
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('全屏切换失败，请再试一次')));
+      }
+      return;
+    }
+    if (!mounted) return;
+    final actual = await windowManager.isFullScreen();
+    setState(() {
+      _fullscreen = actual;
       _controlsVisible = true;
     });
     _touchControls();
   }
 
   Future<void> _exitFullscreen() async {
-    if (await windowManager.isFullScreen()) {
-      await windowManager.setFullScreen(false);
-      if (mounted) setState(() => _fullscreen = false);
-    }
+    if (await windowManager.isFullScreen()) await _toggleFullscreen();
   }
 
   List<VodEpisode> get _episodes {
@@ -1160,7 +1234,8 @@ class _PlayerPageState extends State<PlayerPage> {
                           fit: _videoFitMode.fit,
                           aspectRatio: _videoFitMode.aspectRatio,
                           controls: NoVideoControls,
-                          subtitleViewConfiguration: _subtitleStyle.configuration,
+                          subtitleViewConfiguration:
+                              _subtitleStyle.configuration,
                         ),
                       ),
                       // 弹幕叠加层（§21 Phase 3 / §13.1 直播弹幕）：绘制在视频上方、
@@ -1202,23 +1277,23 @@ class _PlayerPageState extends State<PlayerPage> {
                 Listener(
                   onPointerDown: (_) => _touchControls(),
                   child: _ControlBar(
-                  controller: _controller,
-                  request: _request,
-                  onToggleFullscreen: _toggleFullscreen,
-                  onPrevious: _playPrevious,
-                  onNext: _playNext,
-                  onSelectEpisode: (index) => _playEpisode(index),
-                  onSelectLine: (flag) => _playEpisode(0, overrideFlag: flag),
-                  onSelectSubtitle: _showSubtitleMenu,
-                  onSelectSubtitleStyle: _showSubtitleStyleSettings,
-                  onSelectDanmaku: _showDanmakuSettings,
-                  liveStatus: _liveStatus,
-                  liveOnline: _liveOnline,
-                  videoFitMode: _videoFitMode,
-                  onSelectVideoFit: _showVideoFitSettings,
-                  onShowMediaInfo: _showMediaInfo,
+                    controller: _controller,
+                    request: _request,
+                    onToggleFullscreen: _toggleFullscreen,
+                    onPrevious: _playPrevious,
+                    onNext: _playNext,
+                    onSelectEpisode: (index) => _playEpisode(index),
+                    onSelectLine: (flag) => _playEpisode(0, overrideFlag: flag),
+                    onSelectSubtitle: _showSubtitleMenu,
+                    onSelectSubtitleStyle: _showSubtitleStyleSettings,
+                    onSelectDanmaku: _showDanmakuSettings,
+                    liveStatus: _liveStatus,
+                    liveOnline: _liveOnline,
+                    videoFitMode: _videoFitMode,
+                    onSelectVideoFit: _showVideoFitSettings,
+                    onShowMediaInfo: _showMediaInfo,
+                  ),
                 ),
-                )
             ],
           ),
         ),
@@ -1278,10 +1353,7 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   Future<void> _handleDoubleTapGesture() async {
-    switch (resolvePlayerGesture(
-      doubleTap: true,
-      fullscreen: _fullscreen,
-    )) {
+    switch (resolvePlayerGesture(doubleTap: true, fullscreen: _fullscreen)) {
       case PlayerGestureAction.enterFullscreen:
         await _toggleFullscreen();
       case PlayerGestureAction.togglePlayback:
@@ -1361,7 +1433,10 @@ class _PlayerPageState extends State<PlayerPage> {
                   ],
                 ),
                 const SizedBox(height: 18),
-                Text('字幕底色（默认透明）', style: Theme.of(context).textTheme.titleSmall),
+                Text(
+                  '字幕底色（默认透明）',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
                 Slider(
                   value: draft.backgroundOpacity,
                   min: 0,
@@ -1373,7 +1448,10 @@ class _PlayerPageState extends State<PlayerPage> {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Text('描边宽度 ${draft.outlineWidth.toStringAsFixed(1)}', style: Theme.of(context).textTheme.bodySmall),
+                Text(
+                  '描边宽度 ${draft.outlineWidth.toStringAsFixed(1)}',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
                 Slider(
                   value: draft.outlineWidth,
                   min: 0,
@@ -1384,7 +1462,10 @@ class _PlayerPageState extends State<PlayerPage> {
                     () => draft = draft.copyWith(outlineWidth: value),
                   ),
                 ),
-                Text('字号 ${((draft.textScale) * 100).round()}%', style: Theme.of(context).textTheme.bodySmall),
+                Text(
+                  '字号 ${((draft.textScale) * 100).round()}%',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
                 Slider(
                   value: draft.textScale,
                   min: 0.6,
@@ -1395,7 +1476,10 @@ class _PlayerPageState extends State<PlayerPage> {
                     () => draft = draft.copyWith(textScale: value),
                   ),
                 ),
-                Text('字幕位置 ${draft.bottomPadding.round()}dp', style: Theme.of(context).textTheme.bodySmall),
+                Text(
+                  '字幕位置 ${draft.bottomPadding.round()}dp',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
                 Slider(
                   value: draft.bottomPadding,
                   min: 0,
@@ -1462,6 +1546,11 @@ class _PlayerPageState extends State<PlayerPage> {
     );
     if (selected == null || !mounted) return;
     setState(() => _videoFitMode = selected);
+    widget.state.rememberPlayerVideoFitMode(
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+      mode: selected.name,
+    );
   }
 
   void _showMediaInfo() {
@@ -1472,13 +1561,22 @@ class _PlayerPageState extends State<PlayerPage> {
     final diagnostics = _diagnostics;
     final rows = <(String, String)>[
       ('分辨率', _mediaResolution()),
-      ('显示比例', params.aspect == null ? '未知' : params.aspect!.toStringAsFixed(3)),
+      (
+        '显示比例',
+        params.aspect == null ? '未知' : params.aspect!.toStringAsFixed(3),
+      ),
       ('视频编码', video?.codec?.isNotEmpty == true ? video!.codec! : '未知'),
-      ('帧率', video?.fps == null ? '未知' : '${video!.fps!.toStringAsFixed(2)} fps'),
+      (
+        '帧率',
+        video?.fps == null ? '未知' : '${video!.fps!.toStringAsFixed(2)} fps',
+      ),
       ('视频码率', _formatBitrate(video?.bitrate)),
       ('像素格式', params.pixelformat ?? '未知'),
       ('音频编码', audio?.codec?.isNotEmpty == true ? audio!.codec! : '未知'),
-      ('采样率', audioParams.sampleRate == null ? '未知' : '${audioParams.sampleRate} Hz'),
+      (
+        '采样率',
+        audioParams.sampleRate == null ? '未知' : '${audioParams.sampleRate} Hz',
+      ),
       ('声道', audioParams.hrChannels ?? audioParams.channels ?? '未知'),
       ('音频码率', _formatBitrate(_controller.audioBitrate ?? audio?.bitrate)),
       ('格式', diagnostics?.format.label ?? '未知'),

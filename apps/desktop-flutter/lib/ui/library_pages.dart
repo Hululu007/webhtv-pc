@@ -1,12 +1,16 @@
 /// 最近观看与收藏页（§17.2 历史页 / 收藏页，§15）。
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/app_error.dart';
+import '../services/proxy_server.dart';
 import '../services/storage.dart';
 import '../services/tmdb_history.dart';
 import '../state/app_state.dart';
+import '../core/protocol.dart';
 import 'app.dart';
 import 'player_page.dart';
 
@@ -24,9 +28,62 @@ class _HistoryPageState extends State<HistoryPage> {
 
   AppState get _state => widget.state;
 
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_repairMissingPosters());
+    });
+  }
+
   List<PlaybackHistory> get _items => _keyword.isEmpty
       ? _state.recentHistory()
       : _state.searchHistory(_keyword);
+
+  /// 旧版本历史没有保存海报：打开历史页时按 vod_id 后台补齐，避免用户看到一屏
+  /// 破图占位。只处理前 12 条且按作品去重，不阻塞历史页首帧。
+  Future<void> _repairMissingPosters() async {
+    final service = _state.siteService;
+    final config = _state.config;
+    if (service == null || config == null) return;
+    final candidates = <PlaybackHistory>[];
+    final seen = <String>{};
+    for (final item in _items) {
+      if (item.vodPic != null && item.vodPic!.trim().isNotEmpty) continue;
+      final key = '${item.siteKey}@@@${item.vodId}';
+      if (seen.add(key)) candidates.add(item);
+      if (candidates.length >= 12) break;
+    }
+    var changed = false;
+    for (final item in candidates) {
+      Site? site;
+      for (final candidate in config.sites) {
+        if (candidate.key == item.siteKey) {
+          site = candidate;
+          break;
+        }
+      }
+      if (site == null) continue;
+      try {
+        final parent = Vod(
+          vodId: item.vodId,
+          vodName: item.vodName,
+          vodTag: item.vodId.startsWith('atvp_detail:') ? 'folder' : null,
+        );
+        final result = parent.isFolder
+            ? await service.folderDetail(site, parent)
+            : await service.detail(site, item.vodId);
+        if (result.value.list.isEmpty) continue;
+        final poster = result.value.list.first.vodPic;
+        if (poster == null || poster.trim().isEmpty) continue;
+        _state.updateHistoryPoster(item, poster);
+        changed = true;
+      } catch (_) {
+        // 单条旧记录补图失败不影响历史列表和继续播放。
+      }
+    }
+    if (changed && mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -141,38 +198,52 @@ class _HistoryPageState extends State<HistoryPage> {
                   itemCount: items.length,
                   itemBuilder: (context, index) {
                     final item = items[index];
-                    return ListTile(
-                      leading: SizedBox(
-                        width: 48,
-                        height: 64,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: PosterImage(url: item.vodPic),
+                    return InkWell(
+                      key: ValueKey('history-row-${item.id}'),
+                      onTap: () => _resume(item),
+                      onDoubleTap: () => _resume(item),
+                      child: ListTile(
+                        leading: SizedBox(
+                          width: 64,
+                          height: 84,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: PosterImage(url: item.vodPic),
+                          ),
                         ),
-                      ),
-                      title: Text(item.vodName),
-                      subtitle: Text(
-                        '${item.episodeName} · ${item.progressPercent}%'
-                        '${item.completed ? " · 已看完" : ""}\n'
-                        '更新 ${DateTime.fromMillisecondsSinceEpoch(item.updatedAt).toLocal()}',
-                      ),
-                      isThreeLine: true,
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          OutlinedButton(
-                            onPressed: () => _resume(item),
-                            child: Text(item.completed ? '重播' : '继续播放'),
-                          ),
-                          IconButton(
-                            tooltip: '删除该记录',
-                            onPressed: () {
-                              _state.deleteHistory(item.id);
-                              setState(() {});
-                            },
-                            icon: const Icon(Icons.delete_outline),
-                          ),
-                        ],
+                        title: Text(
+                          item.vodName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          '${item.episodeName} · ${item.progressPercent}%'
+                          '${item.completed ? " · 已看完" : ""}\n'
+                          '更新 ${DateTime.fromMillisecondsSinceEpoch(item.updatedAt).toLocal()}',
+                        ),
+                        isThreeLine: true,
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: () => _resume(item),
+                              icon: Icon(
+                                item.completed
+                                    ? Icons.replay
+                                    : Icons.play_arrow,
+                              ),
+                              label: Text(item.completed ? '重播' : '继续播放'),
+                            ),
+                            IconButton(
+                              tooltip: '删除该记录',
+                              onPressed: () {
+                                _state.deleteHistory(item.id);
+                                setState(() {});
+                              },
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          ],
+                        ),
                       ),
                     );
                   },
@@ -214,14 +285,22 @@ class _HistoryPageState extends State<HistoryPage> {
     if (mounted) setState(() {});
   }
 
+  /// 把旧版本保存的本地代理地址还原成站点入口目标。
+  ///
+  /// 旧记录可能把 `http://127.0.0.1:<port>/p/<token>/<base64>` 写进了
+  /// `episode_id`。token 已失效，但路径最后一段仍包含原始站点目标，可以无损恢复。
+  String _historyEntryTarget(PlaybackHistory item) =>
+      restoreHistoryPlaybackTarget(item.episodeId);
+
   /// 从历史恢复播放。
   ///
   /// 设计约束：历史只保存剧集地址与站点 key，恢复时需要重新解析播放决策，
   /// 避免把过期直链直接交给播放器（§15.2 “继续播放”）。
   Future<void> _resume(PlaybackHistory item) async {
     final state = _state;
-    final config = state.config;
-    final site = config?.sites
+    final episodeTarget = _historyEntryTarget(item);
+    final result = state.config;
+    final site = result?.sites
         .where((candidate) => candidate.key == item.siteKey)
         .firstOrNull;
     if (site == null) {
@@ -233,7 +312,7 @@ class _HistoryPageState extends State<HistoryPage> {
     await state.selectSite(site);
     try {
       final decision = await state.resolvePlayback(
-        episodeTarget: item.episodeId,
+        episodeTarget: episodeTarget,
         flag: item.flag,
         vodId: item.vodId,
       );
@@ -241,7 +320,7 @@ class _HistoryPageState extends State<HistoryPage> {
         throw AppError(
           AppErrorKind.playbackUrlMissing,
           '历史记录没有可用播放地址',
-          detail: item.episodeId,
+          detail: episodeTarget,
         );
       }
       if (!mounted) return;
@@ -253,7 +332,7 @@ class _HistoryPageState extends State<HistoryPage> {
               url: decision.url!,
               // 续播后再次写进度时必须保留**同一个入口目标**，否则这一条历史会
               // 被刚解析出的可播地址覆盖，下一次续播又失败。
-              episodeTarget: item.episodeId,
+              episodeTarget: episodeTarget,
               headers: decision.headers?.asRequestHeaders ?? const {},
               title: item.vodName,
               siteKey: item.siteKey,
@@ -277,9 +356,8 @@ class _HistoryPageState extends State<HistoryPage> {
           ? error
           : AppError(AppErrorKind.unknown, '$error', cause: error);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(failure.userMessage)),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(failure.userMessage)));
     }
   }
 }
@@ -318,7 +396,9 @@ class FavoritesPage extends StatelessWidget {
                     final item = items[index];
                     return ListTile(
                       leading: Icon(
-                        item.kind == 'vod' ? Icons.movie_outlined : Icons.dns_outlined,
+                        item.kind == 'vod'
+                            ? Icons.movie_outlined
+                            : Icons.dns_outlined,
                       ),
                       title: Text(item.title),
                       subtitle: Text(
@@ -355,6 +435,17 @@ extension _FirstOrNull<T> on Iterable<T> {
     }
     return null;
   }
+}
+
+/// 兼容旧版本把本地代理地址写进历史记录的情况。
+String restoreHistoryPlaybackTarget(String episodeId) {
+  final uri = Uri.tryParse(episodeId);
+  if (uri != null && uri.path.startsWith(LocalProxyServer.pathPrefix)) {
+    final encoded = uri.pathSegments.isEmpty ? '' : uri.pathSegments.last;
+    final decoded = LocalProxyServer.decodeTarget(encoded);
+    if (decoded != null) return decoded.toString();
+  }
+  return episodeId;
 }
 
 /// 便于测试与诊断：把历史列表渲染成纯文本。
