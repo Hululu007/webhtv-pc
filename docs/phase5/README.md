@@ -4,6 +4,7 @@
 - 日期：2026-10-08
 - 后续验证：[T4 网盘分集与播放代理（2026-10-10）](evidence/t4-folder-playback.md)
 - 后续验证：[桥接线路标准化为普通线路（2026-10-11）](evidence/t4-standard-bridge-lines.md)
+- 后续验证：[站点选择器打开卡顿修复（2026-10-12）](evidence/site-picker-latency.md)
 - 对应设计文档章节：本目录 `design/00`–`design/03`、`docs/webhtv-pc-design.md` §21（Phase 5 生态与同步）、§22.1
 - 上游：`docs/phase4/README.md`（Phase 4 已完成：TMDB 元数据增强）
 - 上游参考工程：`webhtv/默影视`（Android，`F:\Workspace\webtv3\webhtv`，实测设备 `192.168.50.3:5559`）
@@ -161,6 +162,12 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 | L3 | `integration_test/phase5_bridge_flow_test.dart` | 4 个用例 / 8 步 |
 | L3 | `integration_test/phase5_sync_flow_test.dart` | 1 个用例 / 8 步 |
 | L3 | `integration_test/phase5_sync_push_flow_test.dart` | 1 个用例 / 6 步 |
+
+后续修复的回归套件（不属于 Phase 5 本体，列此备查）：
+
+| 层 | 套件 | 用例数（实测） |
+| --- | --- | --- |
+| L1 | `test/log_service_test.dart`（站点选择器卡顿修复，§16.4） | 8 |
 
 ### 3.2 反向验证（机器校验）
 
