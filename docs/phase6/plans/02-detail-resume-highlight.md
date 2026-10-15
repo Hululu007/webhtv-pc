@@ -886,13 +886,16 @@ class DetailPage extends StatefulWidget {
 ```dart
     // 详情到达后自动切到历史线路（`docs/phase6/design/02` §4、§4.1）。
     //
-    // 为什么在 build 里而不是 initState：详情请求在页面挂载后才完成，
-    // initState 时 lines 还是残缺的。
+    // **必须等 `belongs` 为真**（= 本页的详情结果已到达），不能只看
+    // `lines.isNotEmpty`：后者在详情未到达时可能是**列表页传入条目的残缺线路**
+    // （见上面 `belongs` 的注释：回退分支是列表条目，「其线路可能已由列表数据
+    // 携带」）。在残缺集合上解析会得出错误线路——§2.1 第二级的「集 URL 唯一命中」
+    // 在集合变小时可能**假唯一**；而且 `_selectedLineFlag` 一旦写入就**永久锁死**
+    // （下面 `isEmpty` 守卫会让真详情到达后不再重解析）。
     //
-    // **只有 `matched == true` 才切**（`design/02` §4.1）：`matched == false`
-    // 涵盖「无历史」「历史线路在但那一集已消失」两种情形，它们都不该改变
-    // 用户的线路选择——切过去也没有那一集。
-    if (lines.isNotEmpty) {
+    // 权衡：「列表条目自带完整线路、但详情请求始终失败」的场景不再自动切线路。
+    // 这与 §4 的措辞一致——详情没到达就没有**已确认**的线路集。
+    if (belongs && lines.isNotEmpty) {
       final target = _resumeTarget(lines);
       // 只在「用户还没手动选过」时应用（`_selectedLineFlag` 为空）。
       // 用户手动切过线路后，历史不得把选择抢回去。
