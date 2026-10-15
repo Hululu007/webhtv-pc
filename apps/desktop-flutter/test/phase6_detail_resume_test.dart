@@ -158,6 +158,11 @@ void main() {
         lines: lines,
       );
       expect(target.episodeIndex, 1, reason: '集名兜底');
+      // 集名兜底**也算完整命中**：线路对上了、集也对上了（只是靠名字而非 URL）。
+      // 这条断言是 Task 3 的前提——`matched` 决定是否自动切线路
+      // （`design/02` §4.1），不锁住它会让「集名兜底」的行为漂移。
+      expect(target.matched, isTrue, reason: '集名命中也是完整命中');
+      expect(target.episodeName, '第2集');
     });
 
     test('都不匹配时取第 0 集且 matched=false', () {
