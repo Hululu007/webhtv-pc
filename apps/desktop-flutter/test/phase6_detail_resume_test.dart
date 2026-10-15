@@ -1,7 +1,10 @@
-/// 详情页从历史恢复播放的解析（`docs/phase6/design/02` §2）。
+/// 详情页历史续播的门禁（`docs/phase6/design/02`）。
 ///
-/// 纯逻辑，无 Flutter 依赖：线路三级匹配与"歧义就不猜"是本轮最容易写错的
-/// 语义，必须在无窗口环境下锁死。
+/// 分两层：
+/// - **纯逻辑**（Task 1–2）：`resolveHistoryTarget` 的线路三级匹配与
+///   `historyPlayLabel` 的文案决策，无 Flutter 依赖；
+/// - **widget**（Task 3 起）：`DetailPage` 的历史参数与自动选线路，
+///   需要真实 `AppState` 与窗口。
 library;
 
 import 'dart:io';
@@ -303,6 +306,15 @@ void main() {
         tester.view.resetPhysicalSize();
         tester.view.resetDevicePixelRatio();
       });
+      // 模拟「本页详情已到达」（`design/02` §4 的自动切线路**只在详情到达后**
+      // 才允许发生）：`build` 的守卫是 `belongs && lines.isNotEmpty`，而
+      // `belongs` 要求 `state.detailResult` 属于本页影片。不注入的话 `belongs`
+      // 恒为 false，切线路根本不触发，用例就变成空洞的了。
+      //
+      // `loadDetail` 在没有站点服务时提前返回（`app_state.dart` 的
+      // `service == null || site == null`），所以这份注入不会被页面自身的
+      // 详情请求清掉——与 `phase3_detail_page_test` 的做法一致。
+      state.seedDetailForTest(vod: vod);
       await tester.pumpWidget(
         MaterialApp(
           home: DetailPage(
