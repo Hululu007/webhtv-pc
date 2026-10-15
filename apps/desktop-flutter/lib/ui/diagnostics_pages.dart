@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/history_view.dart';
 import '../core/playback_diagnostics.dart';
 import '../services/log_service.dart';
 import '../services/storage.dart';
@@ -66,6 +67,37 @@ class SettingsPage extends StatelessWidget {
           onSelectionChanged: (selection) {
             state.setThemeMode(themeModeName(selection.first));
           },
+        ),
+        const Divider(height: 32),
+        // 历史记录区块（`docs/phase6/design/01` §4.3）。
+        //
+        // 为什么放在设置页而不是历史页顶部：这是**一次定好、长期生效**的
+        // 行为偏好，与主题、搜索线程同类；历史页顶部那排是每次操作的临时控件。
+        Text('历史记录', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        SegmentedButton<String>(
+          key: const ValueKey('settings-history-click-action'),
+          segments: const [
+            ButtonSegment<String>(
+              value: UiHistoryClickAction.detail,
+              icon: Icon(Icons.article_outlined, size: 18),
+              label: Text('进入详情页'),
+            ),
+            ButtonSegment<String>(
+              value: UiHistoryClickAction.play,
+              icon: Icon(Icons.play_arrow, size: 18),
+              label: Text('直接播放'),
+            ),
+          ],
+          selected: {state.historyClickAction},
+          onSelectionChanged: (selection) {
+            state.setHistoryClickAction(selection.first);
+          },
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '点击历史记录时的行为。长按卡片始终进入删除状态。',
+          style: Theme.of(context).textTheme.bodySmall,
         ),
         const Divider(height: 32),
         // 搜索区块。
