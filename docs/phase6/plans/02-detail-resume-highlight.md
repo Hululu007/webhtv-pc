@@ -55,11 +55,16 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 - Test: `test/phase6_detail_resume_test.dart`
 
 **Interfaces:**
-- Consumes: `PlaybackHistory`（`lib/services/storage.dart`）、`VodPlayLine` / `VodEpisode`（`lib/core/protocol.dart`）
+- Consumes: `VodPlayLine` / `VodEpisode`（`lib/core/protocol.dart`）
 - Produces:
-  - `class HistoryResumeTarget`，字段 `flag`（`String`）、`episodeIndex`（`int`）、`episodeName`（`String`）、`matched`（`bool`）
-  - `HistoryResumeTarget resolveHistoryTarget({required PlaybackHistory? history, required List<VodPlayLine> lines})`
-  - `HistoryResumeTarget.firstEpisodeOf(List<VodPlayLine> lines)`
+  - `class HistoryResumeTarget`，字段 `flag`（`String`）、`episodeIndex`（`int`）、`episodeName`（`String`）、`matched`（`bool`）；工厂 `HistoryResumeTarget.firstEpisodeOf(List<VodPlayLine> lines)`
+  - `HistoryResumeTarget resolveHistoryTarget({required String historyFlag, required String historyEpisodeId, required String historyEpisodeName, required List<VodPlayLine> lines})`
+
+> **分层约束（不得违反）**：`lib/core/` 是**纯逻辑层**——全仓库 `core/` 下**没有任何
+> 文件** import `../services/`，多个 core 模块明写「不依赖 Flutter，也不依赖
+> `dart:io`」。因此本函数**不得**收 `PlaybackHistory`（它定义在
+> `services/storage.dart`），只收它真正需要的三个标量字段。
+> 调用方（`DetailPage`）自己从 `PlaybackHistory` 取字段传进来。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -75,7 +80,6 @@ library;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webhtv_pc/core/history_view.dart';
 import 'package:webhtv_pc/core/protocol.dart';
-import 'package:webhtv_pc/services/storage.dart';
 
 void main() {
   VodPlayLine lineOf(
@@ -90,25 +94,17 @@ void main() {
     ],
   );
 
-  PlaybackHistory historyOf({
-    String flag = '线路一',
-    String episodeName = '第2集',
-    String episodeId = 'http://x/e2',
-    int positionMs = 30000,
-    int durationMs = 100000,
-    bool completed = false,
-  }) => PlaybackHistory(
-    id: 1,
-    siteKey: 'site-a',
-    vodId: 'v1',
-    vodName: '剧集甲',
-    flag: flag,
-    episodeName: episodeName,
-    episodeId: episodeId,
-    positionMs: positionMs,
-    durationMs: durationMs,
-    updatedAt: 1000,
-    completed: completed,
+  /// 调用助手：默认是「没有历史」（三个字段全空）。
+  HistoryResumeTarget resolve({
+    String flag = '',
+    String episodeId = '',
+    String episodeName = '',
+    required List<VodPlayLine> lines,
+  }) => resolveHistoryTarget(
+    historyFlag: flag,
+    historyEpisodeId: episodeId,
+    historyEpisodeName: episodeName,
+    lines: lines,
   );
 
   final twoLines = [
@@ -118,14 +114,14 @@ void main() {
 
   group('无历史', () {
     test('返回第一条线路第 0 集，matched=false', () {
-      final target = resolveHistoryTarget(history: null, lines: twoLines);
+      final target = resolve(lines: twoLines);
       expect(target.flag, '线路一');
       expect(target.episodeIndex, 0);
       expect(target.matched, isFalse);
     });
 
     test('没有线路时返回空目标，不抛异常', () {
-      final target = resolveHistoryTarget(history: null, lines: const []);
+      final target = resolve(lines: const []);
       expect(target.flag, '');
       expect(target.episodeIndex, 0);
       expect(target.matched, isFalse);
@@ -134,8 +130,9 @@ void main() {
 
   group('第一级：flag 精确命中', () {
     test('flag 与集 URL 都对上 → 命中', () {
-      final target = resolveHistoryTarget(
-        history: historyOf(flag: '线路二', episodeId: 'http://y/e2'),
+      final target = resolve(
+        flag: '线路二',
+        episodeId: 'http://y/e2',
         lines: twoLines,
       );
       expect(target.flag, '线路二');
@@ -146,8 +143,9 @@ void main() {
 
     test('flag 命中但该线路不含这一集 → 降级到第二级', () {
       // 线路二不含 z/e9，但线路一也不含 → 最终退回第一条线路。
-      final target = resolveHistoryTarget(
-        history: historyOf(flag: '线路二', episodeId: 'http://z/e9'),
+      final target = resolve(
+        flag: '线路二',
+        episodeId: 'http://z/e9',
         lines: twoLines,
       );
       expect(target.flag, '线路一');
@@ -160,8 +158,9 @@ void main() {
         lineOf('线路一', [('第1集', 'http://x/e1')]),
         lineOf('合并线路', [('第1集', 'http://y/e1')], sourceFlag: '原始flag'),
       ];
-      final target = resolveHistoryTarget(
-        history: historyOf(flag: '原始flag', episodeId: 'http://y/e1'),
+      final target = resolve(
+        flag: '原始flag',
+        episodeId: 'http://y/e1',
         lines: lines,
       );
       expect(target.flag, '合并线路', reason: '按 playbackFlag 匹配，返回展示 flag');
@@ -171,8 +170,9 @@ void main() {
 
   group('第二级：集 URL 唯一命中', () {
     test('flag 不认识但集 URL 唯一 → 命中那条线路', () {
-      final target = resolveHistoryTarget(
-        history: historyOf(flag: '已不存在的线路', episodeId: 'http://y/e2'),
+      final target = resolve(
+        flag: '已不存在的线路',
+        episodeId: 'http://y/e2',
         lines: twoLines,
       );
       expect(target.flag, '线路二');
@@ -185,8 +185,9 @@ void main() {
         lineOf('线路一', [('第1集', 'http://same/e1')]),
         lineOf('线路二', [('第1集', 'http://same/e1')]),
       ];
-      final target = resolveHistoryTarget(
-        history: historyOf(flag: '不存在的线路', episodeId: 'http://same/e1'),
+      final target = resolve(
+        flag: '不存在的线路',
+        episodeId: 'http://same/e1',
         lines: ambiguous,
       );
       expect(target.flag, '线路一', reason: '歧义时退回第一条，不猜');
@@ -195,13 +196,10 @@ void main() {
   });
 
   group('第三级：线路名命中', () {
-    test('flag 命中且线路含该集（第一级未命中时仍可命中）', () {
+    test('flag 命中但集对不上 → 线路命中、不算完整命中', () {
       // 历史 episodeId 是空串（旧数据）→ 第一级因"不含该集"失败，
       // 第二级因 URL 为空无法匹配，第三级按 flag 命中。
-      final target = resolveHistoryTarget(
-        history: historyOf(flag: '线路二', episodeId: ''),
-        lines: twoLines,
-      );
+      final target = resolve(flag: '线路二', lines: twoLines);
       expect(target.flag, '线路二');
       expect(target.episodeIndex, 0, reason: '集匹配不上时取第 0 集');
       expect(target.matched, isFalse, reason: '线路命中但集没命中 → 不算完整命中');
@@ -213,8 +211,10 @@ void main() {
       final lines = [
         lineOf('线路一', [('第9集', 'http://x/e1'), ('第2集', 'http://x/e2')]),
       ];
-      final target = resolveHistoryTarget(
-        history: historyOf(flag: '线路一', episodeId: 'http://x/e2', episodeName: '第9集'),
+      final target = resolve(
+        flag: '线路一',
+        episodeId: 'http://x/e2',
+        episodeName: '第9集',
         lines: lines,
       );
       expect(target.episodeIndex, 1, reason: 'URL 精确匹配优先于集名');
@@ -224,24 +224,20 @@ void main() {
       final lines = [
         lineOf('线路一', [('第1集', 'http://x/e1'), ('第2集', 'http://x/e2')]),
       ];
-      final target = resolveHistoryTarget(
-        history: historyOf(
-          flag: '线路一',
-          episodeId: 'http://stale/old',
-          episodeName: '第2集',
-        ),
+      final target = resolve(
+        flag: '线路一',
+        episodeId: 'http://stale/old',
+        episodeName: '第2集',
         lines: lines,
       );
       expect(target.episodeIndex, 1, reason: '集名兜底');
     });
 
     test('都不匹配时取第 0 集且 matched=false', () {
-      final target = resolveHistoryTarget(
-        history: historyOf(
-          flag: '线路一',
-          episodeId: 'http://stale/old',
-          episodeName: '第99集',
-        ),
+      final target = resolve(
+        flag: '线路一',
+        episodeId: 'http://stale/old',
+        episodeName: '第99集',
         lines: twoLines,
       );
       expect(target.flag, '线路一');
@@ -275,9 +271,12 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 在 `lib/core/history_view.dart` 顶部 import 区加：
 
 ```dart
-import '../services/storage.dart';
 import 'protocol.dart';
 ```
+
+> **只 import `protocol.dart`**：`lib/core/` 是纯逻辑层，全仓库 `core/` 下
+> 没有任何文件 import `../services/`。`PlaybackHistory` 定义在
+> `services/storage.dart`，因此本模块**不得**引用它——只收它需要的三个标量字段。
 
 在文件末尾追加：
 
@@ -331,18 +330,25 @@ class HistoryResumeTarget {
 ///
 /// 线路匹配三级顺序，任一级命中即返回；集匹配两级顺序。
 /// **任何一级出现歧义都不猜**（对齐上游 `uniqueFlagForEpisodeUrl`）。
+///
+/// 收标量而不是 `PlaybackHistory`：后者在 `services/storage.dart`，
+/// 而本模块属于纯逻辑层（`core/` 不得依赖 `services/`）。
 HistoryResumeTarget resolveHistoryTarget({
-  required PlaybackHistory? history,
+  required String historyFlag,
+  required String historyEpisodeId,
+  required String historyEpisodeName,
   required List<VodPlayLine> lines,
 }) {
-  if (history == null || lines.isEmpty) {
-    return HistoryResumeTarget.firstEpisodeOf(lines);
-  }
+  if (lines.isEmpty) return HistoryResumeTarget.firstEpisodeOf(lines);
+  final hasHistory = historyFlag.isNotEmpty ||
+      historyEpisodeId.isNotEmpty ||
+      historyEpisodeName.isNotEmpty;
+  if (!hasHistory) return HistoryResumeTarget.firstEpisodeOf(lines);
 
   // 第一级：flag 精确命中，且该线路**包含**这一集。
   for (final line in lines) {
-    if (line.playbackFlag != history.flag && line.flag != history.flag) continue;
-    final index = _episodeIndexOf(line, history);
+    if (line.playbackFlag != historyFlag && line.flag != historyFlag) continue;
+    final index = _episodeIndexOf(line, historyEpisodeId, historyEpisodeName);
     if (index >= 0) {
       return HistoryResumeTarget(
         flag: line.flag,
@@ -354,10 +360,10 @@ HistoryResumeTarget resolveHistoryTarget({
   }
 
   // 第二级：集 URL 在所有线路里**唯一**命中。
-  if (history.episodeId.isNotEmpty) {
+  if (historyEpisodeId.isNotEmpty) {
     final hits = <(VodPlayLine, int)>[];
     for (final line in lines) {
-      final index = _indexOfUrl(line, history.episodeId);
+      final index = _indexOfUrl(line, historyEpisodeId);
       if (index >= 0) hits.add((line, index));
     }
     if (hits.length == 1) {
@@ -373,8 +379,8 @@ HistoryResumeTarget resolveHistoryTarget({
 
   // 第三级：线路名命中（含 URL 为空或集已不存在的旧数据）。
   for (final line in lines) {
-    if (line.playbackFlag != history.flag && line.flag != history.flag) continue;
-    final index = _episodeIndexOf(line, history);
+    if (line.playbackFlag != historyFlag && line.flag != historyFlag) continue;
+    final index = _episodeIndexOf(line, historyEpisodeId, historyEpisodeName);
     return HistoryResumeTarget(
       flag: line.flag,
       episodeIndex: index < 0 ? 0 : index,
@@ -390,14 +396,14 @@ HistoryResumeTarget resolveHistoryTarget({
 }
 
 /// 在线路内定位历史那一集：URL 精确优先，集名兜底。
-int _episodeIndexOf(VodPlayLine line, PlaybackHistory history) {
-  if (history.episodeId.isNotEmpty) {
-    final byUrl = _indexOfUrl(line, history.episodeId);
+int _episodeIndexOf(VodPlayLine line, String episodeId, String episodeName) {
+  if (episodeId.isNotEmpty) {
+    final byUrl = _indexOfUrl(line, episodeId);
     if (byUrl >= 0) return byUrl;
   }
-  if (history.episodeName.isNotEmpty) {
+  if (episodeName.isNotEmpty) {
     for (var i = 0; i < line.episodes.length; i++) {
-      if (line.episodes[i].name == history.episodeName) return i;
+      if (line.episodes[i].name == episodeName) return i;
     }
   }
   return -1;
@@ -752,8 +758,18 @@ class DetailPage extends StatefulWidget {
   ///
   /// 在详情到达后才解析：`_activeLine` 依赖 `lines`，而 `lines` 在详情请求
   /// 返回前可能是列表页传入的残缺数据，在残缺数据上解析会得出错误线路。
-  HistoryResumeTarget _resumeTarget(List<VodPlayLine> lines) =>
-      resolveHistoryTarget(history: _history, lines: lines);
+  ///
+  /// 传三个标量而不是 `PlaybackHistory`：`resolveHistoryTarget` 在纯逻辑层
+  /// （`core/`），不得依赖 `services/storage.dart`。
+  HistoryResumeTarget _resumeTarget(List<VodPlayLine> lines) {
+    final history = _history;
+    return resolveHistoryTarget(
+      historyFlag: history?.flag ?? '',
+      historyEpisodeId: history?.episodeId ?? '',
+      historyEpisodeName: history?.episodeName ?? '',
+      lines: lines,
+    );
+  }
 ```
 
 (c) 把历史线路应用到 `_selectedLineFlag`。在 `build` 里 `final lines = state.playLinesOf(vod);` **之后**插入：
@@ -1317,28 +1333,25 @@ git commit -m "新增：线路 chip「最近播放」标记（design/02 §5）"
       );
     });
 
-    testWidgets('剧照仍是 16:9', (tester) async {
-      await pump(tester);
-      final still = tester.getSize(
-        find
-            .descendant(
-              of: find.byKey(
-                const ValueKey('tmdb-episode-card-线路一-0'),
-              ),
-              matching: find.byType(AspectRatio),
-            )
-            .first,
-      );
-      expect(still.width / still.height, closeTo(16 / 9, 0.1));
-    });
+    // 第三条断言「剧照仍是 16:9」**不写**：见下方 Ruling。
   });
 ```
 
-> 若剧照当前用固定 `height: 110` 而非 `AspectRatio`，第三个用例的
-> `find.byType(AspectRatio)` 会找不到——此时改为断言
-> `tester.getSize(...)` 的宽高比落在 16:9 ± 0.1，或在实现里把剧照区改成
-> `AspectRatio(aspectRatio: 16 / 9)`。**两种做法都可以，但必须与
-> `DESIGN.md` 的「剧照 16:9」一致**。
+> **剧照 16:9 的断言不在本任务范围内——已删除，改为 parked 记录。**
+>
+> 原因（pre-flight 扫描时核实）：`TmdbEpisodeCardTile` 的剧照当前是
+> `SizedBox(height: 110)`，**宽度随列宽变化**（150–300），因此它本来
+> **就不是** 16:9 —— 这是 `DESIGN.md`「剧照 16:9」纪律的一处**既有偏差**，
+> 与本轮「最近播放」标记无关。
+>
+> 修它需要同时改卡片高度（`mainAxisExtent`）与网格度量，否则会溢出；
+> 而 `DESIGN.md` 的 Metric-Neutral Rule 明确警告净高度变化会把控件挤出
+> 800×600 测试视口。因此：
+>
+> **Ruling**：本任务**不改卡片几何**，只加「最近播放」标记。
+> 剧照比例偏差记入 ledger 作为 deferred minor，交最终整支审查裁定。
+>
+> 因此 Task 6 的测试只保留前两条（标记存在性 + `OutlinedButton` 不补集）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1373,11 +1386,17 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
   final int recentIndex;
 ```
 
-两处 `TmdbEpisodeCardTile(...)` 都加：
+两处 `TmdbEpisodeCardTile(...)` 都加（**必须显式传 `recentKey`**：
 
 ```dart
             isRecent: index == recentIndex,
+            recentKey: ValueKey('$keyPrefix-recent-$index'),
 ```
+
+> **为什么用 `recentKey` 而不是从 `stillKey` 派生**：`stillKey` 是
+> `'<keyPrefix>-still-<集号>'`，集号可能缺失或重复；测试按**渲染下标**
+> 定位（`'<keyPrefix>-recent-<index>'`），下标才是稳定且唯一的。
+> 派生 key 会让测试断言与实现不一致。
 
 (b) `TmdbEpisodeCardTile` 加参数与视觉：
 
@@ -1386,11 +1405,18 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
     super.key,
     this.buttonKey,
     this.stillKey,
+    this.recentKey,
     required this.card,
     this.actionLabel = '播放',
     this.onTap,
     this.isRecent = false,
   });
+
+  /// 「最近播放」角标的 key。
+  ///
+  /// 与 [stillKey] 分开：角标的位置/存在性由**渲染下标**决定，
+  /// 而 `stillKey` 用的是集号（可能缺失或重复）。
+  final Key? recentKey;
 
   /// 是否是「最近播放」那一集（`docs/phase6/design/02` §6）。
   final bool isRecent;
@@ -1419,9 +1445,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
                         left: 6,
                         bottom: 6,
                         child: Container(
-                          key: stillKey == null
-                              ? null
-                              : ValueKey('$stillKey-recent'),
+                          key: recentKey,
                           padding: const EdgeInsets.symmetric(
                             horizontal: 6,
                             vertical: 2,
