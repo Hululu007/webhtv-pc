@@ -23,7 +23,9 @@ import 'player_page.dart';
 import 'search_page.dart';
 import 'tmdb_detail_page.dart';
 import 'tmdb_detail_view.dart';
+import 'common.dart';
 import 'tmdb_widgets.dart';
+import 'tokens.dart';
 
 class BrowsePage extends StatelessWidget {
   const BrowsePage({super.key, required this.state});
@@ -111,7 +113,8 @@ class _BrowseTabBarState extends State<_BrowseTabBar> {
     final hasHomeList = home?.list.isNotEmpty ?? false;
     final selected = state.selectedTypeId;
     final loading = state.contentPhase == LoadPhase.loading;
-    final hasFilters = state.categoryFilters.isNotEmpty;
+    // 当前分类可用的筛选维度。空 = 这个分类没有筛选，入口按钮**不渲染**。
+    final filters = _VodGrid.filtersFor(state, selected);
 
     return Container(
       height: 46,
@@ -156,13 +159,12 @@ class _BrowseTabBarState extends State<_BrowseTabBar> {
               ),
             ),
           ),
-          // 每组的「全部」只能各自取消自己，跨维度清空需要一个总入口。
-          if (hasFilters)
-            TextButton(
-              key: const ValueKey('category-filter-clear'),
-              onPressed: loading ? null : state.clearCategoryFilters,
-              child: const Text('重置筛选'),
-            ),
+          // 筛选入口：**只有真的有筛选维度时才出现**。
+          //
+          // 「没有筛选的分组就不应该有筛选按钮」（用户反馈 2026-10-13）——
+          // 一个点了什么也没有的按钮比没有按钮更糟。
+          if (filters.isNotEmpty)
+            _FilterMenuButton(state: state, groups: filters),
           IconButton(
             key: const ValueKey('browse-refresh'),
             tooltip: selected == null ? '刷新首页' : '刷新当前分类',
@@ -266,29 +268,119 @@ class _WheelScroll extends StatelessWidget {
   }
 }
 
-/// 筛选条（§7.4.7）：每个维度一行「等宽标签 + 横向 chip」，随内容滚动。
+/// 分类条上的**筛选入口按钮**：点击后悬浮显示筛选面板。
+///
+/// 设计取舍（用户反馈 2026-10-13：「筛选区域不再默认展示，加一个按钮点击后
+/// 悬浮显示」）：
+/// - **按需出现**：`groups` 为空时调用点根本不渲染这个按钮——没有筛选的分组
+///   不该有一个点了没反应的按钮；
+/// - **悬浮而不是常驻**：面板不占布局、不推挤海报网格。原来常驻时多维度要吃掉
+///   内容区顶部 150~200px；
+/// - **必须显示"已生效"**：面板藏起来之后，用户看不到自己选过什么。所以有生效
+///   筛选时按钮**染成星等琥珀 + 数字角标**，一眼知道"现在筛着 2 个维度"；
+/// - **「重置筛选」放进面板**：它属于筛选状态，和筛选控件在一起才不会找不到。
+class _FilterMenuButton extends StatelessWidget {
+  const _FilterMenuButton({required this.state, required this.groups});
+
+  final AppState state;
+  final List<VodFilterGroup> groups;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final semantic = context.semanticColors;
+    final active = state.categoryFilters;
+    final activeCount = active.length;
+
+    return MenuAnchor(
+      // 点外部自动关闭；面板内点 chip 不会关（`MenuAnchor` 只在选中 menu item
+      // 或点外部时关，这里的 chip 是普通控件）。
+      style: MenuStyle(
+        backgroundColor: WidgetStatePropertyAll(
+          theme.colorScheme.surfaceContainerHigh,
+        ),
+        padding: const WidgetStatePropertyAll(
+          EdgeInsets.symmetric(vertical: AppSpace.sm),
+        ),
+      ),
+      menuChildren: [
+        SizedBox(
+          width: 520,
+          child: ConstrainedBox(
+            // 维度多时面板自身滚动，不撑破窗口。
+            constraints: const BoxConstraints(maxHeight: 420),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: AppSpace.md),
+              child: _FilterPanelBody(state: state, groups: groups),
+            ),
+          ),
+        ),
+      ],
+      builder: (context, controller, child) {
+        final open = controller.isOpen;
+        return Padding(
+          padding: const EdgeInsets.only(right: AppSpace.xs),
+          child: TextButton.icon(
+            key: const ValueKey('category-filter-menu'),
+            onPressed: () =>
+                open ? controller.close() : controller.open(),
+            icon: Icon(
+              Icons.tune,
+              size: 18,
+              color: activeCount > 0 ? semantic.magnitude : null,
+            ),
+            label: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('筛选'),
+                if (activeCount > 0) ...[
+                  const SizedBox(width: AppSpace.xs),
+                  // 数字角标：面板藏起来后，这是"筛了几项"的唯一提示。
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: semantic.magnitude,
+                      borderRadius: AppRadius.pillAll,
+                    ),
+                    child: Text(
+                      '$activeCount',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        // 琥珀底上用夜空墨色：琥珀是亮色，白字对比度不足。
+                        color: AppPalette.nightGround,
+                        fontWeight: AppWeight.title,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            style: TextButton.styleFrom(
+              foregroundColor: activeCount > 0
+                  ? semantic.magnitude
+                  : theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 悬浮面板的内容：每个维度一行「等宽标签 + 横向 chip」+ 底部重置。
 ///
 /// 布局对齐主流桌面媒体库：行首是该维度的标签列（各行**等宽**，所以 chip 左边缘
 /// 对齐），右侧 chip 自适应换行。选中态是主色淡底 + 主色文字，未选中是弱化纯文字。
 ///
-/// 为什么不再用「每条一行 + 勾选框」：
-/// - 垂直一行一项时，「剧情」这类 17 项的维度会把侧栏撞成几百像素高的长条，
-///   真正的分类列表被挤到屏幕外；横向 chip 换行后同样 17 项只占 3 行；
-/// - 早期用「更多（11）」折叠，用户根本不知道折起来的是什么，干脆全量展开；
-/// - 勾选框 + 实底高亮是设置表单的视觉语言，不像媒体库的筛选条。
-///
-/// 整条**随网格滚动**而不是固定：窄窗口（1280×720）下多个维度约 150~200px，
-/// 固定住会永久吃掉近 1/3 的网格高度。分类条（页面级上下文）固定即可。
-class _FilterBar extends StatelessWidget {
-  const _FilterBar({
-    required this.state,
-    required this.groups,
-    required this.active,
-  });
+/// 为什么不用「每条一行 + 勾选框」：勾选框 + 实底高亮是设置表单的视觉语言，
+/// 不像媒体库的筛选条；横向 chip 换行后「剧情」这类 17 项的维度只占 3 行。
+class _FilterPanelBody extends StatelessWidget {
+  const _FilterPanelBody({required this.state, required this.groups});
 
   final AppState state;
   final List<VodFilterGroup> groups;
-  final Map<String, String> active;
 
   /// 标签列宽度的上下限：短名（「地区」）不留大片空白，长名（「资源类型」）
   /// 也不能无限挤压 chip 区。
@@ -297,29 +389,44 @@ class _FilterBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final labelWidth = _measureLabelWidth(context);
-    // 请求在途时禁用点击：筛选是「即时生效」，连点会把多个响应乱序写回状态。
-    final enabled = state.contentPhase != LoadPhase.loading;
-    return Container(
-      key: const ValueKey('category-filter-bar'),
-      padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: theme.dividerColor)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          for (final group in groups)
-            _FilterRow(
-              group: group,
-              labelWidth: labelWidth,
-              selectedValue: active[group.key] ?? '',
-              enabled: enabled,
-              onSelect: (value) => state.setCategoryFilter(group.key, value),
+    // 筛选 chip **始终可点**。
+    //
+    // 原来这里在 `contentPhase == loading` 时把整条筛选栏禁用，理由写的是
+    // 「连点会把多个响应乱序写回状态」。但那个理由**不成立**：状态层已经用
+    // `_categoryRunId` 作废在途响应（`app_state.dart:1442`、`:1459`），
+    // 乱序写回早就被挡住了。代价却很实在——站点慢的时候（桥接站、网盘站，
+    // 实测 0.3~2s）整条筛选栏在请求期间完全点不动，用户看到的就是
+    // 「筛选按钮点击没反应，不会筛选」（用户反馈 2026-10-11）。
+    //
+    // 即时生效的控件不应该在每次生效的过程中把自己关掉。
+    const enabled = true;
+    final active = state.categoryFilters;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final group in groups)
+          _FilterRow(
+            group: group,
+            labelWidth: labelWidth,
+            selectedValue: active[group.key] ?? '',
+            enabled: enabled,
+            onSelect: (value) => state.setCategoryFilter(group.key, value),
+          ),
+        if (active.isNotEmpty) ...[
+          const Divider(height: AppSpace.lg),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              key: const ValueKey('category-filter-clear'),
+              onPressed: state.clearCategoryFilters,
+              icon: const Icon(Icons.filter_alt_off_outlined, size: 18),
+              label: const Text('重置筛选'),
             ),
+          ),
         ],
-      ),
+      ],
     );
   }
 
@@ -373,7 +480,18 @@ class _FilterRow extends StatelessWidget {
   Widget build(BuildContext context) {
     // 站点自带「全部」（`v` 为空串）时不重复补；缺失时必须补，否则该维度一旦
     // 选中就没有任何入口能取消它（只能整条重置）。
-    final hasAll = group.options.any((option) => option.value.isEmpty);
+    //
+    // 先按 `value` 去重：chip 的 key 是 `category-filter-<维度>-<值>`，
+    // 一旦站点数据里出现两个同值选项（实测有站点给出两个空值选项），key 就重复，
+    // Flutter 抛 `Duplicate keys found` —— **在真机上那是一屏红**。
+    // 同值选项在语义上本来就是同一个筛选项，去重不丢信息，也保住了 key 的格式
+    // （外部没有依赖 key 的测试，但没必要改）。
+    final options = <VodFilterOption>[];
+    final seenValues = <String>{};
+    for (final option in group.options) {
+      if (seenValues.add(option.value)) options.add(option);
+    }
+    final hasAll = options.any((option) => option.value.isEmpty);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
@@ -404,7 +522,7 @@ class _FilterRow extends StatelessWidget {
                     selected: selectedValue.isEmpty,
                     onTap: enabled ? () => onSelect('') : null,
                   ),
-                for (final option in group.options)
+                for (final option in options)
                   _FilterChip(
                     key: ValueKey(
                       'category-filter-${group.key}-${option.value}',
@@ -441,35 +559,14 @@ class _FilterChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final dark = theme.brightness == Brightness.dark;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-      child: Material(
-        color: selected
-            ? scheme.primary.withValues(alpha: dark ? 0.22 : 0.12)
-            : Colors.transparent,
-        borderRadius: BorderRadius.circular(14),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(14),
-          hoverColor: scheme.primary.withValues(alpha: dark ? 0.10 : 0.06),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontSize: 13,
-                height: 1.2,
-                color: selected ? scheme.primary : scheme.onSurfaceVariant,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-              ),
-            ),
-          ),
-        ),
+      child: TagChip(
+        label: label,
+        selected: selected,
+        onTap: onTap,
+        // 这是可选控件：禁用时也必须保留选中态（见 `TagChip.selectable`）。
+        selectable: true,
       ),
     );
   }
@@ -497,7 +594,6 @@ class _VodGrid extends StatelessWidget {
     // 直接显示"没有内容"会把正常站点误报成空站（实测 126 站点里 40 个如此），
     // 因此按“有无分类”区分两种空态文案。
     final hasClasses = result?.classes.isNotEmpty ?? false;
-    final filters = _filtersFor(state, state.selectedTypeId);
     final loading = state.contentPhase == LoadPhase.loading;
     // 分页页脚只在分类上下文里出现：首页结果没有分页语义。
     final paged = state.selectedTypeId != null && vods.isNotEmpty;
@@ -528,16 +624,12 @@ class _VodGrid extends StatelessWidget {
                   onNotification: _onScroll,
                   child: CustomScrollView(
                     slivers: [
-                      // 筛选条随网格一起滚动：窄窗口下多个维度约占 150~200px，固定住
-                      // 会永久吃掉近 1/3 的网格高度；分类条（页面级上下文）才固定。
-                      if (filters.isNotEmpty)
-                        SliverToBoxAdapter(
-                          child: _FilterBar(
-                            state: state,
-                            groups: filters,
-                            active: state.categoryFilters,
-                          ),
-                        ),
+                      // 筛选条**不再常驻**。
+                      //
+                      // 它原来占内容区顶部 150~200px（多维度时更多），把海报挤下去，
+                      // 而多数时候用户并不筛选（用户反馈 2026-10-13：「筛选区域不再
+                      // 默认展示」）。现在它归分类条上的「筛选」按钮，点击后**悬浮**
+                      // 显示——不占布局、不推挤网格。
                       if (vods.isEmpty)
                         SliverFillRemaining(
                           hasScrollBody: false,
@@ -605,7 +697,7 @@ class _VodGrid extends StatelessWidget {
   }
 
   Widget _emptyState({required bool loading, required bool hasClasses}) {
-    if (loading) return const Center(child: CircularProgressIndicator());
+    if (loading) return const LoadingBlock();
     if (hasClasses) {
       return const _EmptyHint(
         title: '请选择一个分类',
@@ -646,7 +738,11 @@ class _VodGrid extends StatelessWidget {
   /// 首页的 `filters` 是按 `type_id` 分组的 map，所以必须用当前 `type_id` 取子集；
   /// 分类请求返回的 `filters` 已经是**该分类自己的**一组（`map` 只有一个键或
   /// 直接就是列表），因此优先用它，拿不到再回退首页。
-  static List<VodFilterGroup> _filtersFor(AppState state, String? typeId) {
+  /// 当前分类可用的筛选维度（分类结果优先，其次首页）。
+  ///
+  /// 公开而不是私有：分类条上的筛选入口按钮也要用它来决定**是否渲染**
+  /// （没有维度就不该有按钮）。
+  static List<VodFilterGroup> filtersFor(AppState state, String? typeId) {
     if (typeId == null) return const [];
     final fromCategory = _groupFor(state.categoryResult, typeId);
     if (fromCategory.isNotEmpty) return fromCategory;
@@ -659,9 +755,11 @@ class _VodGrid extends StatelessWidget {
     final direct = filters[typeId];
     if (direct != null && direct.isNotEmpty) return direct;
     // 某些站点把全部维度放在单个键下（或键名与 type_id 不一致）：
-    // 此时只要只有一组就直接用它，否则合并全部（宁多不少）。
+    // 此时只要只有一组就直接用它。
     if (filters.length == 1) return filters.values.first;
-    return [for (final group in filters.values) ...group];
+    // 多组且没有一组对应当前 type_id：合并全部，但**按维度 key 去重**
+    // （去重的原因与取舍见 `mergeFilterGroups` 的文档）。
+    return mergeFilterGroups(filters.values);
   }
 
   Future<void> _openDetail(BuildContext context, Vod vod) async {
@@ -827,7 +925,7 @@ class _ScrollFooter extends StatelessWidget {
           child: SizedBox(
             width: 22,
             height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2.4),
+            child: LoadingBlock(center: false),
           ),
         ),
       );
@@ -1096,6 +1194,21 @@ class _DetailPageState extends State<DetailPage> {
     final display = tmdb.hasMatch ? tmdb.enrich(vod).vod : vod;
     // TMDB 展示模型（海报/背景/类型/时长/季集数/演职人员…）。
     final tmdbData = tmdb.detailData;
+    // 头部数据：未匹配 TMDB 时回退到来源海报，保证头部不空白。
+    //
+    // 提成局部变量是因为**页面级背景**要用同一份。两处各算一次的话，
+    // 回退分支可能得出不同结果（背景与头部的图不一致）。
+    final headerData =
+        tmdb.detailData ??
+        TmdbDetailData(
+          title: display.vodName,
+          overview: display.vodContent,
+          posterUrl: display.vodPic,
+          backdropUrls: [
+            if ((display.vodPic ?? '').isNotEmpty) display.vodPic!,
+          ],
+          rating: 0,
+        );
 
     return Scaffold(
       // 头部是**全幅 hero**（用户反馈 2026-10-09：「详情页太简陋，背景海报也没有
@@ -1140,9 +1253,23 @@ class _DetailPageState extends State<DetailPage> {
           ),
         ],
       ),
-      body: loading && lines.isEmpty
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
+      body: Stack(
+        children: [
+          // 页面级**固定**背景（用户反馈 2026-10-13：「后续内容也应该显示在图片上」）。
+          //
+          // 为什么放在这里而不是头部里：`Positioned.fill` **脱离滚动**，所以
+          // 整页内容都浮在图上；图片不会随内容滚走、下半页也不会变回纯色。
+          // 头部因此不再自己画图（`paintImage: false`）。
+          Positioned.fill(
+            child: TmdbDetailBackdrop(
+              urls: headerData.backdropUrls,
+              fallbackUrl: headerData.posterUrl,
+            ),
+          ),
+          if (loading && lines.isEmpty)
+            const Positioned.fill(child: Center(child: LoadingBlock()))
+          else
+            ListView(
               padding: EdgeInsets.zero,
               children: [
                 // 详情错误只在「确实是在拉本页详情且没有可用线路」时提示，
@@ -1166,18 +1293,9 @@ class _DetailPageState extends State<DetailPage> {
                 // 未匹配时回退到来源海报，保证头部不空白。
                 // 高度由组件按视口自适应（见 TmdbDetailHeader.resolveHeight）。
                 TmdbDetailHeader(
-                  data:
-                    tmdb.detailData ??
-                    TmdbDetailData(
-                      title: display.vodName,
-                      overview: display.vodContent,
-                      posterUrl: display.vodPic,
-                      backdropUrls: [
-                        if ((display.vodPic ?? '').isNotEmpty)
-                          display.vodPic!,
-                      ],
-                      rating: 0,
-                    ),
+                  // 图片由页面级背景负责（见本 body 的 Stack），头部只画内容。
+                  paintImage: false,
+                  data: headerData,
                   heroOverview: display.vodContent ?? tmdbData?.overview,
                   heroActions: lines.isEmpty
                       ? null
@@ -1240,15 +1358,19 @@ class _DetailPageState extends State<DetailPage> {
                       // 与 `tmdbData`。
                       TmdbInfoTable(
                         rows: [
-                          ('类型', tmdbData?.genres.join(' / ')),
-                          ('地区', display.vodArea),
-                          ('年份', display.vodYear),
-                          ('时长', tmdbData?.runtimeLabel),
-                          ('季集', tmdbData?.seasonEpisodeLabel),
-                          ('状态', tmdbData?.status),
-                          ('导演', display.vodDirector),
-                          ('演员', display.vodActor),
-                          ('评分', tmdb.ratingText),
+                          // **只留 hero 没说的字段。**
+                          //
+                          // 原来 11 行里 8 行与 hero 标签行**逐字重复**
+                          // （类型/地区/年份/时长/季集/状态/评分），导演在 hero 简介里
+                          // 已有，演员在下方「演职人员」区块里还带头像。
+                          // 整块等于把同样的信息让人读两遍（用户反馈 2026-10-13）。
+                          //
+                          // 为什么不按原计划"并进 hero 标签行"：`_MetaChips` 有
+                          // **7 个上限**（`maxChips: 7`），而 hero 现在正好是 7 个
+                          // （TMDB 8.0 / 2026 / 47分钟 / 1季·30集 / 剧情 / China /
+                          // Returning Series）——再塞两条会把已有的挤掉，反而更差。
+                          //
+                          // `TmdbInfoTable` 会跳过空值行，所以字段缺失时这块整块消失。
                           ('备注', display.vodRemarks),
                           ('语言', tmdbData?.languages.join(' / ')),
                         ],
@@ -1280,7 +1402,7 @@ class _DetailPageState extends State<DetailPage> {
                       if (loading && lines.isEmpty)
                         const Padding(
                           padding: EdgeInsets.symmetric(vertical: 24),
-                          child: Center(child: CircularProgressIndicator()),
+                          child: LoadingBlock(),
                         )
                       else if (lines.isEmpty)
                         Text(
@@ -1310,6 +1432,8 @@ class _DetailPageState extends State<DetailPage> {
                 ),
               ],
             ),
+        ],
+      ),
     );
   }
 
@@ -1625,29 +1749,7 @@ class _EmptyHint extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.inbox_outlined,
-            size: 40,
-            color: Theme.of(context).disabledColor,
-          ),
-          const SizedBox(height: 12),
-          Text(title, style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 460),
-            child: Text(
-              message,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-        ],
-      ),
-    );
+    return EmptyState(title: title, message: message);
   }
 }
 
@@ -1679,22 +1781,49 @@ class _NoticeBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpace.md,
+        vertical: AppSpace.xs,
+      ),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.secondaryContainer,
-        borderRadius: BorderRadius.circular(6),
+        // 通知是**信息**，不是警报：不铺满色块，只用一层极淡的底 + 发丝边，
+        // 让它在层级上明显轻于错误横幅（后者用 errorContainer 实底）。
+        // 原实现用 `secondaryContainer` 实底满宽，与错误横幅同等重量，
+        // 两条叠在一起时读者分不清哪条更要紧。
+        color: scheme.surfaceContainerHigh.withValues(alpha: 0.5),
+        borderRadius: AppRadius.smAll,
+        border: Border.all(
+          color: scheme.outlineVariant.withValues(alpha: 0.6),
+        ),
       ),
       child: Row(
         children: [
-          const Icon(Icons.notifications_none, size: 18),
-          const SizedBox(width: 8),
-          Expanded(child: Text(message)),
+          Icon(Icons.info_outline, size: 16, color: scheme.onSurfaceVariant),
+          const SizedBox(width: AppSpace.sm),
+          Expanded(
+            child: Text(
+              message,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          // 用收紧的 IconButton 而不是默认尺寸：默认最小点击区会把这条
+          // 信息条撑到 60px 以上，与"轻量通知"的意图相反。
+          // 保留 IconButton 类型：测试按类型统计 InkWell / GestureDetector，
+          // 换成它们会引入无谓风险。
           IconButton(
             tooltip: '关闭提示',
             onPressed: onDismiss,
-            icon: const Icon(Icons.close, size: 16),
+            icon: const Icon(Icons.close, size: 15),
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+            color: scheme.onSurfaceVariant,
           ),
         ],
       ),

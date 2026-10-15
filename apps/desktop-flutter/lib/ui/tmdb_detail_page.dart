@@ -20,6 +20,7 @@ import '../core/tmdb_detail_model.dart';
 import '../core/tmdb_identity.dart';
 import '../core/tmdb_media.dart';
 import '../services/tmdb_service.dart';
+import 'common.dart';
 import 'tmdb_detail_view.dart';
 import 'tmdb_widgets.dart';
 
@@ -240,7 +241,7 @@ class _TmdbDetailPageState extends State<TmdbDetailPage> {
       body: switch (_phase) {
         TmdbLoadPhase.idle ||
         TmdbLoadPhase.loading => data == null
-            ? const Center(child: CircularProgressIndicator())
+            ? const LoadingBlock()
             : _buildContent(context, data),
         TmdbLoadPhase.disabled => Center(
           child: Padding(
@@ -281,9 +282,27 @@ class _TmdbDetailPageState extends State<TmdbDetailPage> {
 
   Widget _buildContent(BuildContext context, TmdbDetailData? data) {
     if (data == null) return const SizedBox.shrink();
-    return SingleChildScrollView(
-      child: TmdbDetailView(
-        data: data,
+    // 页面级**固定**背景 + 内层滚动（与源详情页 `DetailPage` 同构）。
+    //
+    // 为什么 Stack 放在**调用方**而不是 `TmdbDetailView` 内部：
+    // `Positioned.fill` 固定的是 **Stack 的框**，不是视口。`TmdbDetailView` 自身
+    // 返回不可滚动的 `Column`，如果在那里加 Stack，Stack 会被撑成整个内容那么高，
+    // 背景图跟着被拉成十几比一的框，`cover` 会疯狂裁切放大——比不铺还糟。
+    // 只有把**滚动容器放进 Stack 里**，背景才是视口大小且不随内容滚动。
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: TmdbDetailBackdrop(
+            urls: data.backdropUrls,
+            fallbackUrl: data.posterUrl,
+          ),
+        ),
+        SingleChildScrollView(
+          child: TmdbDetailView(
+            // 图片由上面的固定背景负责，视图内部不再画（否则重复解码，
+            // 且两层同图不同框比会在交界处错位）。
+            paintBackdrop: false,
+            data: data,
         seasons: data.seasons,
         selectedSeason: _selectedSeason,
         selectableSeasons: _tmdbSeasons,
@@ -300,16 +319,12 @@ class _TmdbDetailPageState extends State<TmdbDetailPage> {
         // 纯 TMDB 页没有播放按钮（`04` §6.2）：动作改为「搜索站源」。
         episodeActionLabel: '搜索站源',
         episodeCards: _episodeCards,
-        // 信息表：纯 TMDB 页的数据全部来自 TMDB，因此直接展示元数据。
+        // 信息表：**只留 hero 没说的字段**。
+        //
+        // 与源详情页同一条规则（见 `browse_pages.dart` 里那份更长的说明）：
+        // 类型/地区/年份/时长/季集/状态/评分都已在 hero 标签行里出现，
+        // 导演在 hero 简介里，重复展示只是让人读两遍。
         infoRows: [
-          ('类型', data.genres.join(' / ')),
-          ('地区', data.countries.join(' / ')),
-          ('年份', data.yearLabel),
-          ('时长', data.runtimeLabel),
-          ('季集', data.seasonEpisodeLabel),
-          ('状态', data.status),
-          ('导演', data.directorLabel),
-          ('评分', data.ratingLabel),
           ('语言', data.languages.join(' / ')),
         ],
         recommendations: _recommendations,
@@ -323,7 +338,9 @@ class _TmdbDetailPageState extends State<TmdbDetailPage> {
         onRecommendationTap: (item) => _openItem(item),
         onOpenVideo: widget.onOpenVideo,
         onCopyVideo: widget.onCopyVideo,
-      ),
+          ),
+        ),
+      ],
     );
   }
 

@@ -19,6 +19,7 @@ import '../services/startup_trace.dart';
 import '../services/storage.dart';
 import '../state/app_state.dart';
 import 'browse_pages.dart';
+import 'common.dart';
 import 'config_pages.dart';
 import 'diagnostics_pages.dart';
 import 'library_pages.dart';
@@ -27,6 +28,35 @@ import 'player_page.dart';
 import 'search_page.dart';
 import 'spider_page.dart';
 import 'theme.dart';
+import 'tokens.dart';
+
+/// 把状态层存的主题字符串映射成 `ThemeMode`。
+///
+/// 状态层只依赖 `foundation`，因此不认识 `ThemeMode`；映射放在 UI 层。
+/// 不认识的值回落到暗色（星等星表的主身份）。
+ThemeMode themeModeOf(String raw) {
+  switch (raw) {
+    case 'light':
+      return ThemeMode.light;
+    case 'system':
+      return ThemeMode.system;
+    case 'dark':
+    default:
+      return ThemeMode.dark;
+  }
+}
+
+/// `ThemeMode` 回写成状态层存的字符串。
+String themeModeName(ThemeMode mode) {
+  switch (mode) {
+    case ThemeMode.light:
+      return 'light';
+    case ThemeMode.system:
+      return 'system';
+    case ThemeMode.dark:
+      return 'dark';
+  }
+}
 
 /// 命令行为参数，供冒烟验证与自动化使用：
 /// - `--media=<url>`：启动后直接播放指定地址；
@@ -210,7 +240,9 @@ class _WebHtvAppState extends State<WebHtvApp> {
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(Brightness.light),
       darkTheme: buildAppTheme(Brightness.dark),
-      themeMode: ThemeMode.dark,
+      // 主题由用户偏好驱动（设置页可切换并持久化）。
+      // 状态层存原始字符串、这里映射成 `ThemeMode`，避免状态层依赖 material。
+      themeMode: themeModeOf(_state.themeMode),
       home: !_bootstrapped
           ? const _SplashPage()
           : AppShell(state: _state, startup: widget.startup),
@@ -439,6 +471,8 @@ class _AppShellState extends State<AppShell> {
       builder: (_) => SitePickerDialog(
         items: _state.siteItems,
         log: _state.log,
+        // 把"当前站点"传进去：换源对话框必须能标出你现在在哪个源上。
+        selectedKey: _state.selectedSite?.key,
       ),
     );
     if (selected != null) {
@@ -451,7 +485,7 @@ class _AppShellState extends State<AppShell> {
   Widget build(BuildContext context) {
     final boundaryAccepted = _boundaryAccepted;
     if (boundaryAccepted == null) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(body: LoadingBlock());
     }
 
     return Scaffold(
@@ -470,7 +504,12 @@ class _AppShellState extends State<AppShell> {
                   onSelect: (value) => setState(() => _section = value),
                 ),
                 const VerticalDivider(width: 1),
-                Expanded(child: _buildContent()),
+                Expanded(
+                  child: _WallpaperBackdrop(
+                    url: _state.config?.wallpaper,
+                    child: _buildContent(),
+                  ),
+                ),
               ],
             ),
           ),
@@ -524,33 +563,29 @@ class _TopBar extends StatelessWidget {
     final scheme = theme.colorScheme;
     return Container(
       height: 64,
-      padding: const EdgeInsets.symmetric(horizontal: 20),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpace.xl),
       decoration: BoxDecoration(
-        color: scheme.surface,
+        // 顶栏是世界的"外壳"：比内容低一档的表面，靠发丝线分隔。
+        color: scheme.surfaceContainerLowest,
         border: Border(
           bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.55)),
         ),
       ),
       child: Row(
         children: [
-          Icon(Icons.movie_filter_outlined, color: scheme.primary, size: 24),
-          const SizedBox(width: 10),
-          Text(
-            'WebHTV',
-            style: theme.textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w800,
-              letterSpacing: 0.2,
-            ),
-          ),
-          const SizedBox(width: 20),
+          _BrandMark(logo: state.config?.logo),
+          const SizedBox(width: AppSpace.md),
+          Text('WebHTV', style: theme.textTheme.titleMedium),
+          const SizedBox(width: AppSpace.xl),
           TextButton.icon(
             onPressed: onOpenConfig,
             icon: const Icon(Icons.settings_ethernet, size: 18),
             label: Text(record == null ? '导入配置' : '配置：${record.name}'),
           ),
+          const SizedBox(width: AppSpace.xs),
           TextButton.icon(
             onPressed: state.siteItems.isEmpty ? null : onOpenSitePicker,
-            icon: const Icon(Icons.dns, size: 18),
+            icon: const Icon(Icons.dns_outlined, size: 18),
             label: Text(site == null ? '选择站点' : '站点：${site.name}'),
           ),
           const Spacer(),
@@ -562,14 +597,86 @@ class _TopBar extends StatelessWidget {
                 child: Icon(Icons.info_outline, size: 18),
               ),
             ),
-          Text(
-            'v$appVersion',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
+          Text('v$appVersion', style: theme.textTheme.labelSmall),
         ],
       ),
+    );
+  }
+}
+
+/// 顶栏品牌标记：配置提供 `logo` 时用它，否则用应用自身图标。
+///
+/// 用户确认「配置提供的 `logo` 必须真的生效」——这是**用户的**品牌，
+/// 优先级高于 PC 端自身身份（`PRODUCT.md` 的 Brand Commitments）。
+///
+/// 与 `PosterImage` 同一个教训：外层 `Container` **不能加 `alignment`**，
+/// 否则子节点拿到松约束、`BoxFit.cover` 没有盒子可铺。这里用紧约束 + `clipBehavior`。
+class _BrandMark extends StatelessWidget {
+  const _BrandMark({required this.logo});
+
+  final String? logo;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final target = logo?.trim() ?? '';
+    Widget fallback() =>
+        Icon(Icons.movie_filter_outlined, color: scheme.primary, size: 18);
+    return Container(
+      width: 30,
+      height: 30,
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh,
+        borderRadius: AppRadius.smAll,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: target.isEmpty
+          ? fallback()
+          : Image.network(
+              target,
+              fit: BoxFit.cover,
+              // logo 是用户提供的外部资源：取不到时**安静退回应用图标**，
+              // 不留破图。它只是标记，不该影响可用性。
+              errorBuilder: (_, _, _) => fallback(),
+              loadingBuilder: (context, child, progress) =>
+                  progress == null ? child : fallback(),
+            ),
+    );
+  }
+}
+
+/// 配置壁纸背景 + 一层纱。
+///
+/// 用户确认「配置提供的 `wallpaper` 必须真的生效」。但壁纸是**任意图片**，
+/// 深浅不可预知，而内容必须始终可读——所以壁纸之上永远有一层由底色染出的纱，
+/// 它的不透明度是设计决定，不是图片的属性。
+///
+/// 只铺在内容区：顶栏与侧栏保持实底，保证导航在任何壁纸上都清晰。
+class _WallpaperBackdrop extends StatelessWidget {
+  const _WallpaperBackdrop({required this.url, required this.child});
+
+  final String? url;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final target = url?.trim() ?? '';
+    if (target.isEmpty) return child;
+    final semantic = context.semanticColors;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Image.network(
+          target,
+          fit: BoxFit.cover,
+          // 取不到壁纸时安静退回纯底色：它只是背景。
+          errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          loadingBuilder: (context, child, progress) =>
+              progress == null ? child : const SizedBox.shrink(),
+        ),
+        ColoredBox(color: semantic.wallpaperVeil),
+        child,
+      ],
     );
   }
 }
@@ -671,13 +778,25 @@ class _BoundarySheet extends StatelessWidget {
 ///   对用户毫无价值（用户原话：「名称即可提高易用性」）。
 /// 因此只展示站点名称 + 可用状态；key/type/运行时/阶段改为写日志，便于定位问题。
 class SitePickerDialog extends StatefulWidget {
-  const SitePickerDialog({super.key, required this.items, required this.log});
+  const SitePickerDialog({
+    super.key,
+    required this.items,
+    required this.log,
+    this.selectedKey,
+  });
 
   final List<SiteListItem> items;
 
   /// 站点清单的内部字段（key/type/运行时/阶段/不可用原因）不再上屏，
   /// 改为写日志：排查「某站点为何不可用」时仍然拿得到。
   final LogService log;
+
+  /// 当前正在使用的站点 key。
+  ///
+  /// 为什么必须传进来：这是**换源**对话框，而它此前完全不知道当前用的是哪个源——
+  /// 用户配置里有上百个站点时，没有任何东西告诉他"你现在在哪个上面"，
+  /// 只能靠记忆（截图复核时发现，2026-10-11）。
+  final String? selectedKey;
 
   @override
   State<SitePickerDialog> createState() => _SitePickerDialogState();
@@ -756,6 +875,56 @@ class _SitePickerDialogState extends State<SitePickerDialog> {
     ];
   }
 
+  /// 单个站点行（两列网格里的一格）。
+  ///
+  /// 抽成方法而不是内联在 `itemBuilder` 里：两列网格与单列列表共用同一套行渲染，
+  /// 也便于单独读这一行的语义（状态色 / 当前标记 / 可搜索标记）。
+  Widget _siteRow(BuildContext context, SiteListItem item) {
+    final theme = Theme.of(context);
+    final availability = item.availability;
+    final available = availability.available;
+    final isCurrent =
+        widget.selectedKey != null && item.site.key == widget.selectedKey;
+    final semantic = context.semanticColors;
+    return ListTile(
+      key: ValueKey('site-option-${item.site.key}'),
+      dense: true,
+      selected: isCurrent,
+      leading: Icon(
+        available ? Icons.check_circle_outline : Icons.block,
+        // 用设计系统的状态色，不用 `Colors.greenAccent` 与框架的
+        // `disabledColor`——那两个不属于这个世界（craft-floor：散落的框架默认值）。
+        color: available ? semantic.statusOk : semantic.statusUnknown,
+      ),
+      // 只显示名称：key/type/运行时属协议内部字段，已写日志。
+      title: Text(item.site.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: available
+          ? null
+          : Text(
+              availability.reason ?? '当前不可用',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (isCurrent) ...[
+            Text(
+              '当前',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: semantic.magnitude,
+              ),
+            ),
+            const SizedBox(width: AppSpace.sm),
+          ],
+          if (item.site.searchable) const Icon(Icons.search, size: 16),
+        ],
+      ),
+      enabled: available,
+      onTap: available ? () => Navigator.of(context).pop(item.site) : null,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -765,8 +934,13 @@ class _SitePickerDialogState extends State<SitePickerDialog> {
     return AlertDialog(
       title: const Text('选择站点'),
       content: SizedBox(
-        width: 640,
-        height: 480,
+        // 宽一点、高一点：站点数实测可达 170+。
+        //
+        // 原来 640x480 + 每行约 54px，一屏只看得见 7 个站点，找第 100 个要滚很久，
+        // 而对话框右侧又空着一大片（截图复核时发现，2026-10-11）。
+        // 桌面端对话框没有移动端那种宽度压力，用两列排布把滚动距离砍半。
+        width: 760,
+        height: 560,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -826,41 +1000,19 @@ class _SitePickerDialogState extends State<SitePickerDialog> {
                         ),
                       ),
                     )
-                  : ListView.builder(
-                      itemCount: items.length,
-                      itemBuilder: (context, index) {
-                        final item = items[index];
-                        final availability = item.availability;
-                        final available = availability.available;
-                        return ListTile(
-                          key: ValueKey('site-option-${item.site.key}'),
-                          dense: true,
-                          leading: Icon(
-                            available
-                                ? Icons.check_circle_outline
-                                : Icons.block,
-                            color: available
-                                ? Colors.greenAccent
-                                : theme.disabledColor,
+                  : GridView.builder(
+                      // **两列**排布：站点数实测可达 170+，单列一屏只看得到 7 个。
+                      // 对话框有 760px 宽，单列时右半边整片空着——两列把滚动距离
+                      // 砍半，也让"扫一眼找站点"成为可能（截图复核时发现，2026-10-11）。
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2,
+                            mainAxisExtent: 48,
+                            crossAxisSpacing: 8,
                           ),
-                          // 只显示名称：key/type/运行时属协议内部字段，已写日志。
-                          title: Text(item.site.name),
-                          subtitle: available
-                              ? null
-                              : Text(
-                                  availability.reason ?? '当前不可用',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                          trailing: item.site.searchable
-                              ? const Icon(Icons.search, size: 16)
-                              : null,
-                          enabled: available,
-                          onTap: available
-                              ? () => Navigator.of(context).pop(item.site)
-                              : null,
-                        );
-                      },
+                      itemCount: items.length,
+                      itemBuilder: (context, index) =>
+                          _siteRow(context, items[index]),
                     ),
             ),
           ],
@@ -891,32 +1043,12 @@ class _GroupChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final dark = theme.brightness == Brightness.dark;
-    return Padding(
-      padding: const EdgeInsets.only(right: 6),
-      child: Material(
-        color: selected
-            ? scheme.primary.withValues(alpha: dark ? 0.22 : 0.12)
-            : scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(14),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(14),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Text(
-              label,
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontSize: 13,
-                color: selected ? scheme.primary : scheme.onSurfaceVariant,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-              ),
-            ),
-          ),
-        ),
-      ),
+    return TagChip(
+      label: label,
+      selected: selected,
+      onTap: onTap,
+      // 站点分组同样是可选控件：禁用时保留选中态。
+      selectable: true,
     );
   }
 }
@@ -961,7 +1093,13 @@ class ErrorBanner extends StatelessWidget {
                 SelectableText(
                   '错误码：${error.kind.name}'
                   '${error.retryable ? " · 可重试" : ""}',
-                  style: Theme.of(context).textTheme.bodySmall,
+                  // 彩色表面上的次级文字必须**从该色相染色**，不能用底色的墨
+                  // （craft-floor：never gray / tint from that hue）。
+                  // 原来这里用裸 `bodySmall`，拿到的是 `onSurface`。
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onErrorContainer
+                        .withValues(alpha: 0.72),
+                  ),
                 ),
               ],
             ),
@@ -1035,12 +1173,31 @@ class PosterImage extends StatelessWidget {
     this.width,
     this.height,
     this.fit = BoxFit.cover,
+    this.cacheWidth,
+    this.background = true,
   });
 
   final String? url;
   final double? width;
   final double? height;
   final BoxFit fit;
+
+  /// 解码宽度上限（转发给 `Image.network` 的 `cacheWidth`）。
+  ///
+  /// 给**已经确定会被放大/糊掉**的用途用（如详情页背景的模糊垫底层）：
+  /// 那种层看不出细节，按满宽解码只是白白吃内存与解码时间
+  /// （TMDB `w1280` 后景约 121KB，`original` 约 983KB）。
+  final int? cacheWidth;
+
+  /// 是否绘制占位底色，默认 `true`（普通图位需要它兜住"图还没到"的状态）。
+  ///
+  /// **叠层背景的上层必须传 `false`。** 这个底色是**不透明**的，而且这里的
+  /// `Container` 会撑满父级给的紧约束——放在 `Stack` 里就会把下层的模糊垫底
+  /// **整块盖住**。实测（2026-10-13）：详情页背景的"模糊延伸"因此**从来没有
+  /// 渲染过**，屏幕上只有一块纯色信箱边加一个硬边图片，用户看到的就是这个
+  /// （「怎么变得这么丑了」）。单元测试只断言了 `fit`，断言不到"谁盖住了谁"，
+  /// 所以全绿也没拦住它。
+  final bool background;
 
   @override
   Widget build(BuildContext context) {
@@ -1063,7 +1220,7 @@ class PosterImage extends StatelessWidget {
     return Container(
       width: width,
       height: height,
-      color: _posterPlaceholderColor(context),
+      color: background ? _posterPlaceholderColor(context) : null,
       child: target.isEmpty
           ? Center(child: _placeholderIcon(context))
           : Image.network(
@@ -1071,6 +1228,7 @@ class PosterImage extends StatelessWidget {
               width: width,
               height: height,
               fit: fit,
+              cacheWidth: cacheWidth,
               loadingBuilder: (context, child, progress) => progress == null
                   ? child
                   : Center(child: _placeholderIcon(context, loading: true)),

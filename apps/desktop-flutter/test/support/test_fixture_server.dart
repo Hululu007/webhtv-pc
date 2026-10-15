@@ -311,7 +311,11 @@ class TestFixtureServer {
     if (route == '/api/type0' ||
         route == '/api/type1' ||
         route == '/api/type2' ||
-        route == '/api/type4') {
+        route == '/api/type4' ||
+        // 分页/空结果样本（§14.1 分页搜索门禁用）：与 type1 走同一套
+        // `_serveApi` 分派，差异只在 `wd` 分支的返回内容。
+        route == '/api/paged' ||
+        route == '/api/empty') {
       await _serveApi(request, route, parameters);
       return;
     }
@@ -539,6 +543,41 @@ class TestFixtureServer {
   ) async {
     if (route == '/api/type4' && parameters.containsKey('play')) {
       await _serveType4Play(request, parameters);
+      return;
+    }
+    // 空结果样本：站点成功但零条目（用于验证「零结果站点不允许翻页」）。
+    if (route == '/api/empty') {
+      await _json(request, {
+        'page': 1,
+        'pagecount': 1,
+        'limit': 20,
+        'total': 0,
+        'list': <Object?>[],
+      });
+      return;
+    }
+    if (route == '/api/paged') {
+      // 分页样本（§14.1）：`pg` 决定内容，`pagecount` 声明总页数，
+      // `repeatAfterFirst=true` 时第 2 页起重复第 1 页内容——上游站点在
+      // 「越界页码」时常返回末页内容，分页逻辑必须靠内容重复判耗尽。
+      final page = int.tryParse(parameters['pg'] ?? '1') ?? 1;
+      final pageCount = int.tryParse(parameters['pageCount'] ?? '0') ?? 0;
+      final repeat = parameters['repeatAfterFirst'] == 'true';
+      final effective = repeat ? 1 : page;
+      await _json(request, {
+        'page': page,
+        'pagecount': pageCount,
+        'limit': 20,
+        'total': 0,
+        'list': [
+          {
+            'vod_id': 'paged-$effective',
+            'vod_name': '分页条目$effective',
+            'vod_pic': '',
+            'vod_remarks': '第 $effective 页',
+          },
+        ],
+      });
       return;
     }
     if (parameters.containsKey('wd')) {

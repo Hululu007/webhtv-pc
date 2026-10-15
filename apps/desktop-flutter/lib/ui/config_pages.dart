@@ -10,6 +10,7 @@ import '../core/tmdb_config.dart';
 import '../state/app_state.dart';
 import '../state/sync_state.dart';
 import 'app.dart';
+import 'common.dart';
 
 /// 配置导入页：URL / 本地文件 / JSON 文本三种入口。
 class ConfigPage extends StatefulWidget {
@@ -112,7 +113,8 @@ class _ConfigPageState extends State<ConfigPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('配置导入与管理')),
       body: Padding(
-        padding: const EdgeInsets.all(16),
+        // 表单收进限宽内容列（见 `formPagePadding`）。
+        padding: formPagePadding(context),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -121,33 +123,22 @@ class _ConfigPageState extends State<ConfigPage> {
               '导入失败不会覆盖已有配置。',
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _name,
-                    decoration: const InputDecoration(
-                      labelText: '配置名称（可选）',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                OutlinedButton.icon(
-                  onPressed: _busy ? null : _pickFile,
-                  icon: const Icon(Icons.folder_open),
-                  label: const Text('选择本地文件'),
-                ),
-                const SizedBox(width: 8),
-                OutlinedButton.icon(
-                  onPressed: _busy ? null : _importFixture,
-                  icon: const Icon(Icons.science_outlined),
-                  label: const Text('使用仓库 fixture'),
-                ),
-              ],
+            TextField(
+              controller: _name,
+              decoration: const InputDecoration(
+                labelText: '配置名称（可选）',
+                border: OutlineInputBorder(),
+              ),
             ),
             const SizedBox(height: 12),
-            Expanded(
+            // 输入框给**固定高度**，不再用 `Expanded` + `expands` 吃掉整窗剩余空间。
+            //
+            // 原来它是 `Expanded(child: TextField(expands: true))`，于是窗口多高
+            // 它就多高——1440x900 下约 270px 的**空**输入框成了整页最重的东西，
+            // 而它喂的「导入」按钮只有小小一颗，层级是反的（截图复核时发现，
+            // 2026-10-11）。固定高度让"输入区"和"动作"回到应有的主次。
+            SizedBox(
+              height: 180,
               child: TextField(
                 controller: _input,
                 maxLines: null,
@@ -161,7 +152,15 @@ class _ConfigPageState extends State<ConfigPage> {
               ),
             ),
             const SizedBox(height: 12),
-            Row(
+            // 「导入」与它真正服务的两个来源放**同一行**。
+            //
+            // 原来两个来源按钮被放在「配置名称」那一行的右端，与它们服务的
+            // 导入动作隔了一整个输入框；现在它们紧挨着导入按钮，读起来是
+            // 「导入（从文件 / 从 fixture / 从上面的内容）」。
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 FilledButton.icon(
                   onPressed: _busy ? null : _import,
@@ -169,25 +168,34 @@ class _ConfigPageState extends State<ConfigPage> {
                       ? const SizedBox(
                           width: 16,
                           height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                          child: LoadingBlock(center: false, size: 16),
                         )
                       : const Icon(Icons.playlist_add_check),
                   label: const Text('导入'),
                 ),
-                const SizedBox(width: 12),
-                if (_resultMessage != null)
-                  Expanded(
-                    child: Text(
-                      _resultMessage!,
-                      style: TextStyle(
-                        color: _resultIsError
-                            ? Theme.of(context).colorScheme.error
-                            : Theme.of(context).colorScheme.primary,
-                      ),
-                    ),
-                  ),
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _pickFile,
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('选择本地文件'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _importFixture,
+                  icon: const Icon(Icons.science_outlined),
+                  label: const Text('使用仓库 fixture'),
+                ),
               ],
             ),
+            if (_resultMessage != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _resultMessage!,
+                style: TextStyle(
+                  color: _resultIsError
+                      ? Theme.of(context).colorScheme.error
+                      : Theme.of(context).colorScheme.primary,
+                ),
+              ),
+            ],
             if (state.lastError != null) ...[
               const SizedBox(height: 12),
               ErrorBanner(
@@ -355,7 +363,8 @@ class _TmdbSettingsPageState extends State<TmdbSettingsPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('TMDB 设置')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        // 表单收进限宽内容列（见 `formPagePadding`）。
+        padding: formPagePadding(context),
         children: [
           SwitchListTile(
             key: const ValueKey('tmdb-enabled'),
@@ -565,7 +574,7 @@ class _TmdbSettingsPageState extends State<TmdbSettingsPage> {
                 const SizedBox(
                   width: 18,
                   height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+                  child: LoadingBlock(center: false, size: 16),
                 ),
               ],
             ],

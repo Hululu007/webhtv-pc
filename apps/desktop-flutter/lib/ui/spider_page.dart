@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../services/spider_process.dart';
 import '../services/spider_registry.dart';
 import '../state/app_state.dart';
+import 'common.dart';
 
 class SpiderPage extends StatefulWidget {
   const SpiderPage({super.key, required this.state});
@@ -75,7 +76,7 @@ class _SpiderPageState extends State<SpiderPage> {
               if (_scanning) const SizedBox(
                 width: 16,
                 height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
+                child: LoadingBlock(center: false, size: 16),
               ),
               const SizedBox(width: 8),
               OutlinedButton.icon(
@@ -90,20 +91,19 @@ class _SpiderPageState extends State<SpiderPage> {
           const SizedBox(height: 16),
           _SectionTitle('已安装的本地 Spider（${local.length}）'),
           if (local.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text(
-                '未发现本地 Spider。把 manifest.json 放在配置目录的 spiders/ 下，'
-                '并在站点 api 中使用 spider-local:<key> 引用。',
-              ),
+            const SectionEmpty(
+              icon: Icons.extension_outlined,
+              title:
+                  '未发现本地 Spider。把 manifest.json 放在配置目录的 spiders/ 下，'
+                  '并在站点 api 中使用 spider-local:<key> 引用。',
             ),
           for (final spider in local) _LocalSpiderCard(spider: spider),
           const SizedBox(height: 24),
           _SectionTitle('运行时状态（${runtimes.length}）'),
           if (runtimes.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text('本次会话还没有站点启动过 Spider 运行时。'),
+            const SectionEmpty(
+              icon: Icons.memory_outlined,
+              title: '本次会话还没有站点启动过 Spider 运行时。',
             ),
           for (final runtime in runtimes)
             _RuntimeCard(

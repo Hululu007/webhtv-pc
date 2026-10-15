@@ -357,6 +357,52 @@ void main() {
       expect(result.filters['1']!.first.options[1].value, '大陆');
     });
 
+    test('筛选项缺 `v` 时回退到显示名，绝不塌成空串（真实缺陷回归锁）', () {
+      // 背景（用户反馈 2026-10-11，两次）：
+      // 原实现 `value: asString(map['v']) ?? ''`，站点不提供 `v` 时该维度下
+      // **所有选项的 value 全变成空串**。后果分两层：
+      // 1. 每个 chip 都满足 `selectedValue.isEmpty` → 整排看起来全是选中态，
+      //    点任何一个只是"清空该维度"，用户读成"点了没反应"；
+      // 2. 按 value 去重时它们又塌成一项，整排只剩「全部」。
+      // 用户两次反馈是同一个根因的两种表现。
+      final result = HttpApiResponseParser.parse(
+        jsonEncode({
+          'filters': {
+            '1': [
+              {
+                'key': 'class',
+                'name': '剧情',
+                'value': [
+                  {'n': '全部', 'v': ''},
+                  // 只有 `n`，没有 `v` —— 木偶[盘] 这类站点的真实形态。
+                  {'n': '国产剧'},
+                  {'n': '欧美剧'},
+                  {'n': '日韩剧'},
+                ],
+              },
+            ],
+          },
+          'list': <Object>[],
+        }),
+        siteKey: 'k',
+      );
+
+      final options = result.filters['1']!.first.options;
+      expect(options.map((o) => o.name).toList(), ['全部', '国产剧', '欧美剧', '日韩剧']);
+      expect(
+        options.map((o) => o.value).toList(),
+        // 「全部」的 `v` **存在且为空串**，必须保留空串语义（表示清除该维度）；
+        // 其余缺 `v` 的回退到显示名。
+        ['', '国产剧', '欧美剧', '日韩剧'],
+        reason: '缺 v 的选项不能塌成空串，否则整排会同时"全被选中"且"只剩全部"',
+      );
+      expect(
+        options.map((o) => o.value).toSet().length,
+        options.length,
+        reason: 'value 必须互不相同，否则去重会把整排筛选项吃掉',
+      );
+    });
+
     test('XML API（type=0）解析 class 与 list', () {
       const xml = '''<?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0">

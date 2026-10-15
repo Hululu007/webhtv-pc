@@ -744,8 +744,47 @@ class VodFilterOption {
     final map = asMap(value);
     final name = asNonEmptyString(map['n']) ?? asNonEmptyString(map['name']);
     if (name == null) return null;
-    return VodFilterOption(name: name, value: asString(map['v']) ?? '');
+    // `v` **缺失**时回退到显示名，而不是回退到空串。
+    //
+    // 为什么这条回退是必须的（真实缺陷，用户反馈 2026-10-11）：
+    // 原实现是 `asString(map['v']) ?? ''`，于是一旦站点不提供 `v`，
+    // **该维度下所有选项的 value 全变成空串**。后果分两层：
+    // 1. 每个 chip 都满足 `selectedValue.isEmpty` → **整排看起来全是选中态**，
+    //    点任何一个都只是"清空该维度"，看起来像"点了没反应"；
+    // 2. 按 value 去重时它们又塌成一项，整排只剩「全部」。
+    // 用户两次反馈（"全是选中状态、点击没反应" → "只剩全部"）是**同一个根因**的
+    // 两种表现，去重只是把它暴露出来。
+    //
+    // 回退到 `n` 是对的：这类站点的筛选值本来就是显示名
+    // （`{"n":"国产剧","v":"国产剧"}` 与 `{"n":"国产剧"}` 等价）。
+    // 注意 `v` **存在且为空串**时仍然保留空串——那是「全部」的合法语义
+    // （表示清除该维度），不能也被回退掉。
+    final raw = asString(map['v']);
+    return VodFilterOption(name: name, value: raw ?? name);
   }
+}
+
+/// 把多组筛选维度合并成一组，**按维度 `key` 去重**。
+///
+/// 为什么需要去重（真实缺陷，用户反馈 2026-10-13）：站点把 filters 按 `type_id`
+/// 分组，当某个分类拿不到自己那一组时会退化成"合并全部键"；而各键下往往都有
+/// `剧情 / 地区 / 时间 / 字母 / 排序` 这些**同名维度**，合并后整条筛选栏会把同一批
+/// 维度画好几遍（木偶[盘] 的 `115臻享` 实测画了三遍）。
+///
+/// 保留**先出现的那个**：入参顺序即站点给的顺序，第一组是站点认为最相关的。
+/// 合并的本意是"宁多不少"（宁可多给维度也别漏），但同一个维度给三遍不是"多"，
+/// 是坏掉。
+///
+/// 抽成公开纯函数而不是留在 UI 私有方法里：这样它才能被**直接**测到。
+/// 第一版把它内联在 UI 里，测试只能照抄一遍同样的逻辑再断言——
+/// 那种测试测的是测试自己，把去重删掉它照样通过（实测如此）。
+List<VodFilterGroup> mergeFilterGroups(Iterable<List<VodFilterGroup>> groups) {
+  final merged = <VodFilterGroup>[];
+  final seenKeys = <String>{};
+  for (final group in groups.expand((list) => list)) {
+    if (seenKeys.add(group.key)) merged.add(group);
+  }
+  return merged;
 }
 
 class VodFilterGroup {

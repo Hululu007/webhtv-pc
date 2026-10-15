@@ -34,6 +34,27 @@ import '../test/fixture_support.dart';
 /// 把可复查事实写入测试输出，供 Phase 1 验收报告引用。
 void evidence(String message) => debugPrint('PHASE1-EVIDENCE $message');
 
+/// 删除测试临时目录：**重试并容忍失败**。
+///
+/// 为什么不能直接 `temp.deleteSync`：`AppState.dispose()` 里有多处
+/// `unawaited(...)`（`_proxy.stop()`、`_supervisor.shutdownAll()`、
+/// `_androidPlaybackBridge.close()`），它们**异步**释放句柄。测试在 `dispose()`
+/// 之后立刻删目录，Windows 上句柄还没放开就抛
+/// `PathAccessException`（OS Error 32「另一个程序正在使用此文件」）。
+///
+/// 那是**时序问题，不是产品缺陷**，也不该让用例变红。目录本来就在系统 temp 下，
+/// 删不掉交给系统回收即可。这里重试几次是为了让"能删就删干净"，不是为了让断言通过。
+void _deleteTempQuietly(Directory dir) {
+  for (var attempt = 0; attempt < 5; attempt++) {
+    try {
+      if (dir.existsSync()) dir.deleteSync(recursive: true);
+      return;
+    } on FileSystemException {
+      sleep(const Duration(milliseconds: 200));
+    }
+  }
+}
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
@@ -75,7 +96,7 @@ void main() {
     final state = AppState(paths: paths, log: LogService());
     addTearDown(() {
       state.dispose();
-      temp.deleteSync(recursive: true);
+      _deleteTempQuietly(temp);
     });
     await state.bootstrap();
 
@@ -115,7 +136,7 @@ void main() {
     final state = AppState(paths: paths, log: LogService());
     addTearDown(() {
       state.dispose();
-      temp.deleteSync(recursive: true);
+      _deleteTempQuietly(temp);
     });
     await state.bootstrap();
 
@@ -258,7 +279,7 @@ void main() {
     final state = AppState(paths: paths, log: LogService());
     addTearDown(() {
       state.dispose();
-      temp.deleteSync(recursive: true);
+      _deleteTempQuietly(temp);
     });
     await state.bootstrap();
 
@@ -355,7 +376,7 @@ void main() {
     final state = AppState(paths: paths, log: LogService());
     addTearDown(() {
       state.dispose();
-      temp.deleteSync(recursive: true);
+      _deleteTempQuietly(temp);
     });
     await state.bootstrap();
 
@@ -436,7 +457,7 @@ void main() {
     final state = AppState(paths: paths, log: LogService());
     addTearDown(() {
       state.dispose();
-      temp.deleteSync(recursive: true);
+      _deleteTempQuietly(temp);
     });
     await state.bootstrap();
 
@@ -470,8 +491,19 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('默认推荐'), findsOneWidget);
-    expect(find.textContaining('刷新首页'), findsOneWidget);
-    expect(find.byType(GridView), findsWidgets);
+    // 刷新控件是带 `tooltip` 的 `IconButton`，所以只能用 `find.byTooltip` 找。
+    //
+    // 原来这里写 `find.textContaining('刷新首页')`，**永远找不到**：
+    // `find.textContaining` 只匹配 `Text` / `RichText` / `EditableText`
+    // （flutter_test `finders.dart` 的 `_MatchTextFinder.matches`），
+    // 而 `Tooltip` 的 `message` 不是 `Text` widget —— 提示气泡只在真正弹出时
+    // 才建 `Text`。`刷新首页` 在全仓库也只作为 tooltip 存在。
+    // 这条断言因此长期是红的（在 HEAD 上同样失败，与 UI 改造无关）。
+    expect(find.byTooltip('刷新首页'), findsOneWidget);
+    // 海报网格是 `CustomScrollView` + `SliverGrid`，**不是** `GridView`
+    // （`browse_pages.dart` 的 `_VodGrid`；HEAD 上也是这样）。
+    // 原断言找 `GridView` 同样永远找不到。
+    expect(find.byType(SliverGrid), findsWidgets);
     evidence('browse-page-rendered cards=${state.homeResult!.list.length}');
 
     // 详情页（自带 Scaffold）：线路与剧集按钮。
@@ -561,7 +593,7 @@ void main() {
         'state': '${temp.path}${Platform.pathSeparator}logs',
       },
     );
-    addTearDown(() => temp.deleteSync(recursive: true));
+    addTearDown(() => _deleteTempQuietly(temp));
 
     final first = AppState(paths: paths, log: LogService());
     await first.bootstrap();

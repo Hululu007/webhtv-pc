@@ -36,6 +36,8 @@ import '../core/protocol.dart';
 import '../core/tmdb_media.dart';
 import '../services/tmdb_service.dart';
 import 'app.dart' show PosterImage;
+import 'common.dart';
+import 'tokens.dart';
 import 'tmdb_widgets.dart' show TmdbLoadPhase, TmdbVideoTile;
 
 /// 动态背景轮播（`04` §3.1：用剧集海报/剧照当动态背景）。
@@ -48,13 +50,44 @@ class TmdbBackdropSlideshow extends StatefulWidget {
     super.key,
     required this.urls,
     this.height = 320,
+    this.contentBand,
+    this.paintImage = true,
+    this.scrim = TmdbBackdropScrim.hero,
     this.interval = TmdbBackdropRotation.interval,
     this.fallbackUrl,
     this.child,
   });
 
   final List<String> urls;
+
+  /// **图片框**的高度。
+  ///
+  /// 取整个视口高度（用户反馈 2026-10-13：「我要的是全屏」）。这不只是观感问题，
+  /// 它直接决定原图能显示多大：`BoxFit.contain` 下图片尺寸由**框的短边**决定——
+  /// 427px 高、1312 宽的框（约 3.07:1）里，16:9 的原图只能按高度适配，
+  /// 结果只有 759px 宽（两侧各留 276px 空白）；换成整屏 1312x791（约 1.66:1）
+  /// 才能按宽度适配，得到 **1312x738 的完整原图、零裁切、几乎不放大**。
   final double height;
+
+  /// **内容带**的高度（标题/简介/按钮所占的那一块），默认与 [height] 相同。
+  ///
+  /// 为什么与图片框分开：内容不能跟着图片一起变高。
+  /// 早先为了让「简介、播放入口、线路更早进入首屏」，内容带被定在视口约 54%
+  /// （见 [TmdbDetailHeader.resolveHeight]）——那是**内容**的诉求，与图片该多大无关。
+  /// 混在一起时只能二选一：要么图片被裁，要么内容被推下去。拆开之后两者各自成立：
+  /// 图片铺满整屏，内容仍待在原来的高度位置（`phase4_tmdb_detail_hero_test` 锁着它）。
+  final double? contentBand;
+
+  /// 是否绘制背景图本身（图片、遮罩、轮播指示点）。
+  ///
+  /// 传 `false` 用于**页面级固定背景**：那种场景下图片由页面底层的
+  /// [TmdbDetailPageBackdrop] 负责，头部只负责内容。两处都画会重复解码，
+  /// 而且两张同图不同框比会在交界处错位。
+  final bool paintImage;
+
+  /// 遮罩力度（见 [TmdbBackdropScrim]）。
+  final TmdbBackdropScrim scrim;
+
   final Duration interval;
 
   /// 无背景图时使用的兜底图（通常是海报）。
@@ -126,6 +159,13 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
     });
   }
 
+  /// 图片框比内容带高出来的那一段（≥0）。
+  double get _bandOffset {
+    final band = widget.contentBand ?? widget.height;
+    final offset = widget.height - band;
+    return offset > 0 ? offset : 0;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -133,7 +173,14 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
     final index = TmdbBackdropRotation.clamp(_index, urls.length);
     final current = index < 0 ? null : urls[index];
     return SizedBox(
-      key: const ValueKey('tmdb-backdrop-slideshow'),
+      // 键名如实反映"这块是什么"：画图时它是**背景轮播**；只画内容时
+      // （页面级固定背景接管了图片）它是**头部内容块**。
+      //
+      // 必须分开：两种用法会同时出现在同一棵树上（页面背景 + 头部），
+      // 共用一个 key 会让 `findsOneWidget` / `getRect` 直接失败。
+      key: ValueKey(
+        widget.paintImage ? 'tmdb-backdrop-slideshow' : 'tmdb-detail-hero',
+      ),
       height: widget.height,
       width: double.infinity,
       child: Stack(
@@ -144,7 +191,8 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
           // 必须用 `SizedBox.expand` 包住：`AnimatedSwitcher` 以**宽松约束**
           // 布局子节点，`Image.network` 在宽高均为 null 时会退回图片固有尺寸
           // （实测 160x160 的小方块居中，背景不铺满）。
-          AnimatedSwitcher(
+          if (widget.paintImage)
+            AnimatedSwitcher(
             duration: const Duration(milliseconds: 600),
             child: current == null
                 ? SizedBox.expand(
@@ -156,6 +204,19 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
                   )
                 : SizedBox.expand(
                     key: ValueKey('tmdb-backdrop-$index'),
+                    // V1（用户选型 2026-10-13）：`cover` 铺满 + 渐变遮罩。
+                    //
+                    // 为什么回到单层 `cover`，而不是"模糊垫底 + contain 主体"：
+                    // 那个方案即使把色洗修对，锐利图与背景**缩放比不同**，
+                    // 交界处就必然有一道可见的竖直分界——几何上消不掉。
+                    // 而 `cover` 永远"看起来是有意的"：背景图被裁边是照片式的
+                    // 自然结果，Emby / Jellyfin / Netflix 都这么做。
+                    //
+                    // 当初"裁切很丑"的真正原因是**框太扁**：hero 只有 427px 高
+                    // （3.07:1），16:9 素材被迫纵向裁掉约 42%，把人的头顶从脸中间
+                    // 切掉。现在图片框是**整个视口**（见 [TmdbBackdropSlideshow.height]），
+                    // 用户的 2.35:1 窗口下只裁约 24%、16:9 窗口下只裁约 7%。
+                    // 同一个 `cover`，框比不同，观感完全不同。
                     child: PosterImage(url: current, fit: BoxFit.cover),
                   ),
           ),
@@ -165,26 +226,44 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
           // 背景」，遮罩太厚就把背景彻底洗成一片纯色，等于没有背景。
           // 下半部压到接近不透明：hero 改成**满屏**后，标题/海报落在屏幕底部，
           // 那里必须够暗才能保证白字可读。
-          DecoratedBox(
+          if (widget.paintImage)
+            DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
-                colors: [
-                  theme.colorScheme.surface.withValues(alpha: 0.42),
-                  theme.colorScheme.surface.withValues(alpha: 0.40),
-                  theme.colorScheme.surface.withValues(alpha: 0.78),
-                  theme.colorScheme.surface,
-                ],
+                // 两种力度见 [TmdbBackdropScrim]：头部要压到不透明保证标题可读；
+                // 页面级背景必须**轻且大体均匀**，否则正文滚到下半屏时图片就没了。
+                colors: widget.scrim == TmdbBackdropScrim.hero
+                    ? [
+                        theme.colorScheme.surface.withValues(alpha: 0.42),
+                        theme.colorScheme.surface.withValues(alpha: 0.40),
+                        theme.colorScheme.surface.withValues(alpha: 0.78),
+                        theme.colorScheme.surface,
+                      ]
+                    : [
+                        theme.colorScheme.surface.withValues(alpha: 0.62),
+                        theme.colorScheme.surface.withValues(alpha: 0.66),
+                        theme.colorScheme.surface.withValues(alpha: 0.74),
+                        theme.colorScheme.surface.withValues(alpha: 0.84),
+                      ],
                 stops: const [0, 0.45, 0.78, 1],
               ),
             ),
           ),
           if (widget.child != null)
             Padding(
-              // 底部留出较多空间：hero 满屏后内容是屏幕最下方那一块，
-              // 贴边会显得被截断（用户截图里内容本来就靠底）。
-              padding: const EdgeInsets.fromLTRB(24, 24, 24, 44),
+              // 内容贴在**内容带**的底部，而不是图片框的底部。
+              //
+              // 图片框现在是整屏高，内容带仍是约 54% 视口；两者之差就是这段底部
+              // 内边距——内容因此停在原来的高度，图片在它下面继续铺满整屏
+              // （用户要的「全屏」），且不影响「简介/播放入口更早可见」那条既有结论。
+              padding: EdgeInsets.fromLTRB(
+                24,
+                24,
+                24,
+                44 + _bandOffset,
+              ),
               // 内容贴底对齐：动态背景在上方露出更多画面，
               // 标题/海报靠近信息区，视觉上不会出现「背景里飘着一小块内容」。
               child: Align(
@@ -192,25 +271,30 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
                 child: widget.child,
               ),
             ),
-          if (TmdbBackdropRotation.shouldRotate(urls.length))
-            Positioned(
-              right: 16,
-              // 抬高到内容区之上：满屏 hero 后内容占屏幕底部，
-              // 指示器留在 bottom:10 会压在标题/标签行上。
-              bottom: 12,
-              top: null,
-              child: Row(
-                key: const ValueKey('tmdb-backdrop-dots'),
-                children: [
-                  for (var i = 0; i < urls.length; i++)
-                    Container(
-                      width: 6,
-                      height: 6,
-                      margin: const EdgeInsets.only(left: 4),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: i == index
-                            ? theme.colorScheme.primary
+            // 指示点放在**图片框底部**，不是内容带底部。
+            //
+            // 原来放在内容带底部（`_bandOffset + 12`）＝视口约 54% 处，
+            // 也就是**屏幕正中间**——用户反馈「跑马灯的小点点显示在中间区域
+            // 不好看」（2026-10-13）。图片框现在铺满整屏，底部是纯图片区，
+            // 指示点落在那儿才是常规位置。
+            if (widget.paintImage &&
+                TmdbBackdropRotation.shouldRotate(urls.length))
+              Positioned(
+                right: 20,
+                bottom: 16,
+                top: null,
+                child: Row(
+                  key: const ValueKey('tmdb-backdrop-dots'),
+                  children: [
+                    for (var i = 0; i < urls.length; i++)
+                      Container(
+                        width: 6,
+                        height: 6,
+                        margin: const EdgeInsets.only(left: 4),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: i == index
+                              ? theme.colorScheme.primary
                             : theme.colorScheme.onSurface.withValues(
                                 alpha: 0.3,
                               ),
@@ -225,6 +309,50 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
   }
 }
 
+/// 背景遮罩力度。
+enum TmdbBackdropScrim {
+  /// 头部背景：底部要压到接近不透明，保证标题/简介在任意图上都读得清。
+  hero,
+
+  /// 页面级固定背景：**整页内容都浮在图上**，遮罩必须轻且大体均匀。
+  ///
+  /// 用 [hero] 的重遮罩会把下半屏压成不透明，正文滚到那里图片就消失了——
+  /// 实测正是如此（2026-10-13 第一次接页面级背景时，图片只在屏幕顶部约 20%
+  /// 可见，用户要的「后续内容也显示在图片上」等于没做到）。
+  page,
+}
+
+/// 详情页的**页面级固定背景**：整页内容都浮在它上面。
+///
+/// 为什么单独一个组件（用户反馈 2026-10-13：「后续内容也应该显示在图片上」）：
+/// 背景原先长在头部里，于是它的高度＝头部的高度，图片只覆盖首屏；往下滚动，
+/// 正文就落回纯色页面底色，像是"图片没铺完"。
+/// 这里由调用方放进 `Stack` 的 `Positioned.fill` ——**脱离滚动**，
+/// 因此图片固定不动，正文在它上面滚过去。
+///
+/// 尺寸取整个视口：`Positioned.fill` 给的是紧约束，但
+/// [TmdbBackdropSlideshow] 需要一个显式高度来决定内容带位置，所以这里传视口高。
+class TmdbDetailBackdrop extends StatelessWidget {
+  const TmdbDetailBackdrop({
+    super.key,
+    required this.urls,
+    this.fallbackUrl,
+  });
+
+  final List<String> urls;
+
+  /// 无背景图时的兜底（通常是海报）。
+  final String? fallbackUrl;
+
+  @override
+  Widget build(BuildContext context) => TmdbBackdropSlideshow(
+    urls: urls,
+    fallbackUrl: fallbackUrl,
+    height: MediaQuery.sizeOf(context).height,
+    scrim: TmdbBackdropScrim.page,
+  );
+}
+
 /// 详情页头部：动态背景（剧集海报/剧照轮播）+ 标题/评分/导演/简介。
 ///
 /// 站点详情页与纯 TMDB 详情页共用；[statusBar] 用于插入站点页的 TMDB 6 态状态条。
@@ -237,6 +365,7 @@ class TmdbDetailHeader extends StatelessWidget {
     this.height,
     this.heroOverview,
     this.heroActions,
+    this.paintImage = true,
   });
 
   final TmdbDetailData data;
@@ -249,24 +378,33 @@ class TmdbDetailHeader extends StatelessWidget {
   /// 首屏主动作（例如“播放第一集”）。
   final Widget? heroActions;
 
+  /// 是否由本头部绘制背景图，默认 `true`。
+  ///
+  /// 传 `false` 用于**页面级固定背景**（见 [TmdbDetailBackdrop]）：那时图片由页面
+  /// 底层负责，头部只留内容。两处都画会重复解码，且同图不同框比会在交界处错位。
+  final bool paintImage;
+
   /// 背景高度；为 `null` 时按视口自适应（见 [resolveHeight]）。
   final double? height;
 
-  /// 实际使用的背景高度（**仅按视口**）。
+  /// **内容带**的高度：标题/简介/按钮所占的那一块（**仅按视口**）。
   ///
-  /// **铺满整个视口**（用户反馈 2026-10-10：「背景海报我想要全屏的效果」）。
-  /// 早先是视口 52%（夹 340~560），在大窗口下只占屏幕一半，离「全屏」还有距离。
+  /// 主流媒体库详情页把内容控制在首屏约一半，简介和播放入口可见，
+  /// 线路/分集不必被推到第二屏之后（用户反馈 2026-10-10 之后的既有结论，
+  /// `phase4_tmdb_detail_hero_test` 锁着）。
   ///
-  /// 为什么取视口高度：详情页是 `ListView`，hero 是它的第一个子项；取视口高度
-  /// 就能「首屏全是背景图」，正文从第二屏开始，滚动时内容盖上来。
+  /// **它不再是图片框的高度。** 早先二者是同一个值，于是「内容要多早出现」与
+  /// 「图片能显示多大」被迫二选一：内容带定在 54% 视口（1312x427 ≈ 3.07:1）时，
+  /// 16:9 的原图在 `BoxFit.contain` 下只能按高度适配、降成 759px 宽，
+  /// 用 `cover` 则要纵向裁掉约 42%（用户反馈 2026-10-13：「上面部分被截掉了」）。
+  /// 现在图片框取整屏（见 [TmdbBackdropSlideshow.height]），内容带保持此值，
+  /// 两条诉求各自成立。
   ///
   /// 注意：本函数**不知道父级约束**。若调用方把 header 放进有界高度（如
   /// `SizedBox(height: 400)`，测试与内嵌场景会这么用），需由 [build] 里的
   /// `LayoutBuilder` 再夹一道，否则内容会溢出（实测 `overflowed by 200 pixels`）。
   static double resolveHeight(BuildContext context) {
     final height = MediaQuery.sizeOf(context).height;
-    // 主流媒体库详情页把 Hero 控制在首屏约一半，简介和播放入口可见，
-    // 线路/分集不必被推到第二屏之后。
     return (height * 0.54).clamp(360.0, 500.0);
   }
 
@@ -280,11 +418,15 @@ class TmdbDetailHeader extends StatelessWidget {
       // 实测：不夹的话在 400px 高的容器里会 `overflowed by 200 pixels`。
       LayoutBuilder(
         builder: (context, constraints) {
-          final viewport = height ?? resolveHeight(context);
+          // 图片框 = **整屏**（用户反馈 2026-10-13：「我要的是全屏」）。
+          // 这同时是"原图能显示多大"的前提，见 [TmdbBackdropSlideshow.height]。
+          final screen = MediaQuery.sizeOf(context).height;
           final available = constraints.maxHeight;
-          final resolved = available.isFinite && available < viewport
+          final frame = available.isFinite && available < screen
               ? available
-              : viewport;
+              : screen;
+          // 内容带 = 既有结论（约 54% 视口），且不能超过图片框。
+          final band = (height ?? resolveHeight(context)).clamp(0.0, frame);
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -292,7 +434,9 @@ class TmdbDetailHeader extends StatelessWidget {
               TmdbBackdropSlideshow(
                 urls: data.backdropUrls,
                 fallbackUrl: data.posterUrl,
-                height: resolved,
+                height: frame,
+                contentBand: band,
+                paintImage: paintImage,
                 child: _HeaderContent(
                   data: data,
                   metadataBadge: metadataBadge,
@@ -335,7 +479,7 @@ class TmdbDetailSections extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (data.photoUrls.isNotEmpty) ...[
-          _SectionHeader(
+          SectionHeader(
             title: '剧照（${data.photoUrls.length}）',
             keyValue: 'tmdb-section-photos',
           ),
@@ -345,7 +489,7 @@ class TmdbDetailSections extends StatelessWidget {
         // 海报墙（对齐上游 `@id/tmdbPosters` 的 Posters 区块）。
         // 与剧照是**不同语义**的两组图：剧照是剧中画面，海报是宣发图。
         if (data.posterUrls.length > 1) ...[
-          _SectionHeader(
+          SectionHeader(
             title: '海报（${data.posterUrls.length}）',
             keyValue: 'tmdb-section-posters',
           ),
@@ -360,7 +504,7 @@ class TmdbDetailSections extends StatelessWidget {
           const SizedBox(height: 16),
         ],
         if (data.allPeople.isNotEmpty || data.directors.isNotEmpty) ...[
-          _SectionHeader(
+          SectionHeader(
             title: '演职人员（${data.allPeople.length}）',
             keyValue: 'tmdb-section-people',
           ),
@@ -375,7 +519,7 @@ class TmdbDetailSections extends StatelessWidget {
         // `castTitle`（演员）→ `creatorTitle`（制作团队）→ `relatedTitle`（相关推荐）。
         // 原先它排在相关视频之后，被两个大区块隔开，用户要滚很久才看得到。
         if (data.creatorTeam.isNotEmpty) ...[
-          _SectionHeader(
+          SectionHeader(
             title: '制作团队（${data.creatorTeam.length}）',
             keyValue: 'tmdb-section-crew',
           ),
@@ -388,7 +532,7 @@ class TmdbDetailSections extends StatelessWidget {
           const SizedBox(height: 16),
         ],
         if (recommendations.isNotEmpty) ...[
-          _SectionHeader(
+          SectionHeader(
             title: '相关推荐（${recommendations.length}）',
             keyValue: 'tmdb-section-recommendations',
           ),
@@ -399,7 +543,7 @@ class TmdbDetailSections extends StatelessWidget {
           const SizedBox(height: 16),
         ],
         if (videos.isNotEmpty) ...[
-          _SectionHeader(
+          SectionHeader(
             title: '相关视频（${videos.length}）',
             keyValue: 'tmdb-section-videos',
           ),
@@ -725,6 +869,7 @@ class TmdbDetailView extends StatelessWidget {
     this.onCopyVideo,
     this.statusBar,
     this.metadataBadge,
+    this.paintBackdrop = true,
     this.padding = const EdgeInsets.all(16),
     this.infoRows = const [],
     this.reversed = false,
@@ -735,6 +880,14 @@ class TmdbDetailView extends StatelessWidget {
   });
 
   final TmdbDetailData data;
+
+  /// 是否由本视图绘制背景图，默认 `true`。
+  ///
+  /// 传 `false` 用于**页面级固定背景**：调用方把本视图放进
+  /// `Stack([Positioned.fill(背景), SingleChildScrollView(本视图)])`，
+  /// 背景因此是视口大小且不随内容滚动（见 `tmdb_detail_page.dart` 的 `_buildContent`）。
+  final bool paintBackdrop;
+
   final List<TmdbEpisodeCard> episodeCards;
   final List<TmdbItem> recommendations;
   final List<TmdbVideo> videos;
@@ -786,11 +939,12 @@ class TmdbDetailView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         TmdbDetailHeader(
+          // 页面级固定背景接管时传 `false`（见 `paintBackdrop` 的说明）。
+          paintImage: paintBackdrop,
           data: data,
           statusBar: statusBar,
           metadataBadge: metadataBadge,
@@ -803,7 +957,7 @@ class TmdbDetailView extends StatelessWidget {
             children: [
               if (_seasonSectionVisible) ...[
                 const SizedBox(height: 16),
-                _SectionHeader(
+                SectionHeader(
                   title: '季度',
                   keyValue: 'tmdb-section-seasons',
                   trailing: selectedSeason < 0 && onSelectSeason != null
@@ -844,11 +998,18 @@ class TmdbDetailView extends StatelessWidget {
                 TmdbInfoTable(rows: infoRows),
               ],
               const SizedBox(height: 16),
+              if (episodeCards.isNotEmpty)
+                EpisodeDurationStrip(cards: episodeCards),
               if (episodeCards.isEmpty)
-                Text(
-                  '没有可展示的剧集',
-                  key: const ValueKey('tmdb-episodes-empty'),
-                  style: theme.textTheme.bodyMedium,
+                // 与其他页面的空态同一套结构（图标 + 标题），而不是一行裸文本。
+                // 这是详情页截图里唯一看出来的不一致。
+                const SizedBox(
+                  width: double.infinity,
+                  child: EmptyState(
+                    key: ValueKey('tmdb-episodes-empty'),
+                    icon: Icons.playlist_remove_outlined,
+                    title: '没有可展示的剧集',
+                  ),
                 )
               else
                 TmdbEpisodeSection(
@@ -1091,26 +1252,11 @@ class _Chip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      key: ValueKey(keyValue),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: emphasized
-            ? theme.colorScheme.primaryContainer
-            : theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (icon != null) ...[
-            Icon(icon, size: 14, color: theme.colorScheme.primary),
-            const SizedBox(width: 4),
-          ],
-          Text(label, style: theme.textTheme.bodySmall),
-        ],
-      ),
+    return TagChip(
+      keyValue: keyValue,
+      label: label,
+      icon: icon,
+      emphasized: emphasized,
     );
   }
 }
@@ -1216,37 +1362,6 @@ class _InfoCell extends StatelessWidget {
   }
 }
 
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({
-    required this.title,
-    required this.keyValue,
-    this.trailing,
-  });
-
-  final String title;
-  final String keyValue;
-  final Widget? trailing;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      key: ValueKey(keyValue),
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        children: [
-          Text(
-            title,
-            style: Theme.of(context).textTheme.titleMedium
-                ?.copyWith(fontWeight: FontWeight.w600),
-          ),
-          const Spacer(),
-          ?trailing,
-        ],
-      ),
-    );
-  }
-}
-
 // ---------------------------------------------------------------------------
 // 季度卡片
 // ---------------------------------------------------------------------------
@@ -1324,6 +1439,123 @@ class _SeasonCard extends StatelessWidget {
 /// 使用 [OutlinedButton] 作为外壳：既有集成门禁按
 /// `OutlinedButton` + `episode-<flag>-<index>` 计数（不得补集），
 /// 换成裸 `InkWell` 会让那条门禁失效。
+/// 线路时长预算 + **按真实时长成比例**的剧集条。
+///
+/// 这是方向契约里从 Labanotation 借来的那条纪律「长度编码时长」——
+/// 剧集不是等宽胶囊，条宽按真实时长成比例，"哪几集更长"一眼看得出来。
+///
+/// **位置是翻译过的**：契约原文写「右侧 348px」栏，但详情页 hero 的几何被测试
+/// 锁死（背景必须铺满整窗宽，1200 视口下 `rect.width == 1200`），整页加右栏会
+/// 直接打破它。所以这条纪律落在内容区、紧贴剧集区上方，而不是右栏。
+///
+/// 数据来自 [TmdbEpisodeCard.runtime]（分钟）。**`runtime == 0` 时如实显示
+/// 「时长未知」**，不按平均值假装——编造比例就是编造数据。
+class EpisodeDurationStrip extends StatelessWidget {
+  const EpisodeDurationStrip({super.key, required this.cards});
+
+  final List<TmdbEpisodeCard> cards;
+
+  static String _formatTotal(int minutes) {
+    final hours = minutes ~/ 60;
+    final rest = minutes % 60;
+    return hours > 0 ? '${hours}h ${rest}m' : '${rest}m';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final known = cards.where((card) => card.runtime > 0).toList();
+    if (known.isEmpty) {
+      return Row(
+        children: [
+          Icon(
+            Icons.timelapse_outlined,
+            size: 15,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: AppSpace.sm),
+          Text(
+            '各集时长未知',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      );
+    }
+
+    var maxRuntime = 0;
+    var totalMinutes = 0;
+    for (final card in known) {
+      if (card.runtime > maxRuntime) maxRuntime = card.runtime;
+      totalMinutes += card.runtime;
+    }
+    final unknownCount = cards.length - known.length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text(
+              '时长分布',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(width: AppSpace.sm),
+            Text(
+              '本线路共 ${_formatTotal(totalMinutes)}',
+              style: tabular(
+                theme.textTheme.bodySmall!.copyWith(color: scheme.onSurface),
+              ),
+            ),
+            if (unknownCount > 0) ...[
+              const SizedBox(width: AppSpace.sm),
+              Text(
+                '（$unknownCount 集时长未知）',
+                style: theme.textTheme.labelSmall,
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: AppSpace.sm),
+        // 条宽 = 该集时长 / 最长集：比例是真实的，不是均分。
+        Wrap(
+          spacing: 4,
+          runSpacing: 4,
+          children: [
+            for (final card in cards)
+              Tooltip(
+                message: card.runtime > 0
+                    ? 'E${card.number} · ${card.runtime} 分钟'
+                    : 'E${card.number} · 时长未知',
+                waitDuration: const Duration(milliseconds: 300),
+                child: Container(
+                  width: card.runtime > 0
+                      ? 18 + (card.runtime / maxRuntime) * 62
+                      : 8,
+                  height: 18,
+                  decoration: BoxDecoration(
+                    // 中性数据墨色，**不用星等琥珀**：琥珀在本系统里只表示
+                    // "星等/选中"（唯一强调色规则）。时长是数据，不是选中态——
+                    // 给数据也上强调色会稀释强调色本身的含义。
+                    // 未知集靠"更窄 + 更暗"区分，不靠颜色。
+                    color: card.runtime > 0
+                        ? scheme.onSurfaceVariant.withValues(alpha: 0.5)
+                        : scheme.surfaceContainerHighest,
+                    borderRadius: AppRadius.smAll,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
 class TmdbEpisodeCardTile extends StatelessWidget {
   const TmdbEpisodeCardTile({
     super.key,
@@ -2157,9 +2389,7 @@ class _TmdbPersonPageState extends State<TmdbPersonPage> {
       key: const ValueKey('tmdb-person-page'),
       appBar: AppBar(title: Text(person.name)),
       body: switch (_phase) {
-        TmdbLoadPhase.idle || TmdbLoadPhase.loading => const Center(
-          child: CircularProgressIndicator(),
-        ),
+        TmdbLoadPhase.idle || TmdbLoadPhase.loading => const LoadingBlock(),
         TmdbLoadPhase.disabled => Center(
           child: Text('未配置 TMDB（不影响站源浏览与播放）', style: theme.textTheme.bodyLarge),
         ),

@@ -27,6 +27,7 @@ import '../core/playback.dart';
 import '../core/playback_diagnostics.dart';
 import '../core/protocol.dart';
 import '../core/proxy_policy.dart';
+import '../core/site_group.dart';
 import '../core/tmdb_config.dart';
 import '../core/tmdb_identity.dart';
 import '../core/tmdb_playback.dart';
@@ -40,6 +41,7 @@ import '../services/epg_service.dart';
 import '../services/log_service.dart';
 import '../services/live_service.dart';
 import '../services/proxy_server.dart';
+import '../services/search_suggest_service.dart';
 import '../services/site_service.dart';
 import '../services/spider_process.dart';
 import '../services/spider_registry.dart';
@@ -136,13 +138,17 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     /// 测试注入的站点 HTTP 客户端（widget/单测不可做真实 socket I/O）。
     /// 与 [liveService]/[epgService] 同一模式：只为可测性开一个口子。
     http.Client? httpClient,
+
+    /// 测试注入的联想/热搜服务（避免单测打真实外网）。
+    SearchSuggestService? searchSuggestService,
   }) : paths = paths ?? AppPaths.resolve(),
        log = log ?? LogService(),
        _injectedLiveService = liveService,
        _injectedEpgService = epgService,
        _injectedBridgeService = androidBridgeService,
        _injectedSyncClient = syncClient,
-       _injectedSyncServerFactory = syncServerFactory {
+       _injectedSyncServerFactory = syncServerFactory,
+       _injectedSearchSuggestService = searchSuggestService {
     if (httpClient != null) _httpClient = HttpApiClient(client: httpClient);
     final cacheDir = this.paths.cacheDir;
     _supervisor = SpiderHostSupervisor(
@@ -323,6 +329,38 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   MultiSiteSearchOutcome? _activeSearch;
   List<String> _searchHistory = const [];
 
+  /// 分页状态：站点 key → 已加载页数 / 总页数 / 已见页指纹（§14.1 分页搜索）。
+  ///
+  /// 单个实例跨站点统一管理（上游 `SearchPageState` 同样的形态）：页码与
+  /// 「内容重复即耗尽」的判定需要按站点隔离，但生命周期与搜索批次一致。
+  final SearchPagingState _searchPaging = SearchPagingState();
+
+  /// 测试注入的联想/热搜服务；null 时懒构造真实实例。
+  final SearchSuggestService? _injectedSearchSuggestService;
+
+  /// 联想/热搜服务：首次访问时构造，缓存目录与站点缓存同域。
+  SearchSuggestService? _searchSuggestService;
+
+  /// 联想/热搜服务（懒构造，测试可注入）。
+  SearchSuggestService get searchSuggestService =>
+      _searchSuggestService ??= _injectedSearchSuggestService ??
+      SearchSuggestService(
+        log: log,
+        cacheDir: p.join(paths.cacheDir, 'search'),
+      );
+
+  /// 当前生效的搜索相似度阈值（0~100；0 = 不过滤）。
+  ///
+  /// 默认取 UI 偏好里存的值（未设置时 30，对齐上游安卓）；测试注入也不受影响。
+  int get searchSimilarity => _uiPreferences?.searchSimilarity ?? 30;
+
+  /// 当前生效的**搜索并发线程数**（1~100）。
+  ///
+  /// 对齐上游安卓 `Setting.getSearchThread()`（默认 20，夹在 1~100）：
+  /// 并发度直接决定「搜一轮要等多久」，但太高会打满对端或触发限流，
+  /// 所以做成设置项而不是写死。
+  int get searchThread => _uiPreferences?.searchThread ?? 20;
+
   /// 最近一次播放决策，供播放器页与日志页展示。
   PlaybackDecision? _lastDecision;
 
@@ -456,6 +494,41 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     );
   }
 
+  /// 主题模式（`dark` / `light` / `system`）。
+  ///
+  /// 这一层只暴露原始字符串、不暴露 Flutter 的 `ThemeMode`：状态层目前只依赖
+  /// `foundation`，不为一个枚举把 `material` 拉进来。映射放在 `app.dart`。
+  ///
+  /// `_uiPreferences` 为 null（未 bootstrap）时退回默认暗色，不让主题失败。
+  String get themeMode => _uiPreferences?.themeMode ?? UiThemeMode.dark;
+
+  /// 用户是否**显式选过**主题。设置页据此区分"跟随系统"与"从未选过"。
+  bool get hasExplicitThemeMode =>
+      _uiPreferences?.hasExplicitThemeMode ?? false;
+
+  /// 持久化主题模式。
+  ///
+  /// 写盘失败不影响当前会话（内存里已生效），但无论如何都通知 UI 重建——
+  /// 用户刚点了开关，界面必须立刻反映选择。
+  Future<bool> setThemeMode(String mode) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberThemeMode(mode);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 测试口子：不经 bootstrap 直接装配 UI 偏好 store。
+  ///
+  /// 与 `_uiPreferences` 可空的原因相同（见字段注释）：单测不调 bootstrap。
+  /// 生产代码不得调用；bootstrap 是唯一的正规装配点。
+  @visibleForTesting
+  void attachUiPreferences(UiPreferencesStore store) {
+    _uiPreferences = store;
+    // 搜索历史与偏好同源（bootstrap 里同此逻辑）。
+    _searchHistory = store.searchKeywords;
+  }
+
   bool get hasConfig => _config != null && _config!.sites.isNotEmpty;
 
   /// 站点列表(含运行时可用性),隐藏 `hide=1` 的站点。
@@ -476,6 +549,22 @@ class AppState extends ChangeNotifier implements SyncStateHost {
           ),
         )
         .toList();
+  }
+
+  /// 当前配置里可用于**搜索范围限定**的分组（按站点顺序去重）。
+  ///
+  /// 与结果页的分组筛选不同：范围选择发生在搜索**之前**，因此分组来源必须是
+  /// 整个配置（上游 `Site.getGroups(VodConfig.get().getSites())`），不能只从
+  /// 上次结果里推导。只统计可搜索且未隐藏的站点。
+  List<String> get searchScopeGroups {
+    final seen = <String>[];
+    for (final item in siteItems) {
+      if (!item.site.searchable) continue;
+      for (final group in siteGroupsOf(item.site.name)) {
+        if (!seen.contains(group)) seen.add(group);
+      }
+    }
+    return seen;
   }
 
   /// 启动：目录、日志、数据库、上一个配置。
@@ -505,6 +594,9 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     );
     await uiPreferences.load();
     _uiPreferences = uiPreferences;
+    // 搜索历史与偏好同源：启动时从磁盘恢复（上游安卓每次进搜索页都读
+    // `Setting.getKeyword()`；PC 端在 bootstrap 恢复一次，后续增删走 store）。
+    _searchHistory = uiPreferences.searchKeywords;
 
     final openResult = AppDatabase.open(paths.databasePath);
     _database = openResult.database;
@@ -1618,20 +1710,32 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// 多站点并发搜索（§14.1、§14.3）。
   ///
   /// 行为约束：
-  /// - 并发数不超过 [maxConcurrency]，避免一次性打满网络与对端限流（§14.3）；
+  /// - 并发数不超过 [maxConcurrency]（默认取用户的「搜索线程」设置，
+  ///   对齐上游 `Setting.getSearchThread`），避免一次性打满网络与对端限流（§14.3）；
   /// - 单站点失败只把该站点标为失败，**不阻塞**其他站点；
   /// - 新查询会让旧查询的在途结果**不再投递**（靠 runId 与 [_activeSearch] 判定）；
   /// - 取消后不再投递任何结果（含在途结果），只保留取消前已发布的快照；
   /// - 结果按配置中的站点顺序稳定排序，重复搜索不改变顺序。
+  ///
+  /// [siteKey] / [group] 限定搜索范围（对齐上游 SearchFragment 的
+  /// 「全部 / 当前站点 / 某分组」）：范围外的站点**既不参与也不算跳过**。
   Future<MultiSiteSearchOutcome> searchAll(
     String keyword, {
-    int maxConcurrency = 4,
+    String? siteKey,
+    String? group,
+    int? maxConcurrency,
     Duration timeout = const Duration(seconds: 20),
     bool quick = false,
   }) async {
     final service = _siteService;
     final runId = ++_searchRunId;
-    final allItems = siteItems;
+    final concurrency = maxConcurrency ?? searchThread;
+    final scopeSiteKey = siteKey?.trim() ?? '';
+    final scopeGroup = group?.trim() ?? '';
+    final allItems = [
+      for (final item in siteItems)
+        if (_inSearchScope(item.site, scopeSiteKey, scopeGroup)) item,
+    ];
     final sites = allItems
         .where((item) => item.availability.available && item.site.searchable)
         .map((item) => item.site)
@@ -1640,6 +1744,8 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       runId: runId,
       keyword: keyword,
       results: const [],
+      siteKey: scopeSiteKey,
+      group: scopeGroup,
       skippedUnsupported: allItems
           .where((item) => !item.availability.available)
           .length,
@@ -1647,11 +1753,22 @@ class AppState extends ChangeNotifier implements SyncStateHost {
           .where((item) => item.availability.available && !item.site.searchable)
           .length,
     );
+    // 新批次从第 1 页开始：分页状态必须清空，否则会沿用上一批次的页码。
+    _searchPaging.clear();
     _activeSearch = outcome;
     _searchHistory = [
       keyword,
       ..._searchHistory.where((item) => item != keyword),
     ].take(20).toList();
+    // 持久化搜索历史（上游安卓 `RecordAdapter.add` 落 `Setting.putKeyword`）。
+    // 写盘失败不影响当前会话；未 bootstrap（测试路径）时安静跳过。
+    unawaited(
+      _uiPreferences
+              ?.rememberSearchKeyword(keyword)
+              .then((_) => null)
+              .catchError((_) => null) ??
+          Future<void>.value(),
+    );
     notifyListeners();
 
     if (service == null || sites.isEmpty) {
@@ -1675,13 +1792,26 @@ class AppState extends ChangeNotifier implements SyncStateHost {
           final value = await service
               .search(site, keyword: keyword, quick: quick, useCache: true)
               .timeout(timeout);
+          // 记录初始页的页数与内容指纹（上游 CollectFragment 的
+          // `mPaging.recordInitial`）。批次已被取代时不得污染新批次的
+          // 分页状态——`_searchPaging` 是跨批次共享的。
+          if (!outcome.cancelled && identical(_activeSearch, outcome)) {
+            _searchPaging.recordInitial(
+              site.key,
+              value.value.pageCount ?? 0,
+              SearchPagingState.pageTokenOf(value.value.list),
+            );
+          }
           entries.add(
             SiteSearchEntry(
               siteKey: site.key,
               siteName: site.name,
+              groups: siteGroupsOf(site.name),
               result: value.value,
               latency: value.latency,
               fromCache: value.fromCache,
+              pageCount: value.value.pageCount ?? 0,
+              hasMore: _searchPaging.canLoadMore(site.key),
             ),
           );
         } catch (error) {
@@ -1692,6 +1822,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
             SiteSearchEntry(
               siteKey: site.key,
               siteName: site.name,
+              groups: siteGroupsOf(site.name),
               error: failure,
             ),
           );
@@ -1709,10 +1840,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       }
     }
 
-    final workerCount = sites.length < maxConcurrency
+    final concurrencyApplied = sites.length < concurrency
         ? sites.length
-        : maxConcurrency;
-    await Future.wait(List.generate(workerCount, (_) => worker()));
+        : concurrency;
+    await Future.wait(List.generate(concurrencyApplied, (_) => worker()));
 
     if (outcome.cancelled) {
       log.info(
@@ -1737,6 +1868,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     outcome.totalElapsed = stopwatch.elapsed;
     log.info(
       '并发搜索完成 run=$runId wd=$keyword sites=${sites.length} '
+      'concurrency=$concurrencyApplied '
       'ok=${entries.where((item) => item.succeeded).length} '
       'failed=${entries.where((item) => !item.succeeded).length} '
       'elapsed=${stopwatch.elapsedMilliseconds}ms',
@@ -1756,6 +1888,214 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     active.cancelled = true;
     active.finished = true;
     log.info('并发搜索已取消 run=${active.runId}', scope: 'search');
+    notifyListeners();
+  }
+
+  /// 清空当前搜索结果，回到「未搜索」状态。
+  ///
+  /// 为什么需要它（用户 2026-10-14：「搜索之后貌似没办法返回到搜索页面
+  /// 默认状态——就是能看到推荐的那些，切换到其他页面再切回来也不行」）：
+  /// [_activeSearch] 是**跨页面存活**的（搜索页销毁重建后仍在），而搜索页
+  /// 靠它判断要不要显示结果区——于是搜过一次就再也回不到推荐落地页了。
+  ///
+  /// 与 [cancelSearch] 的区别：后者只把在途批次标为已取消（UI 显示「搜索已
+  /// 取消」），而这里把批次整个丢掉，回到干净的未搜索状态。
+  void clearSearch() {
+    if (_activeSearch == null && !_searchPaging.hasPending) return;
+    // 递增运行号：在途批次的结果即便返回也不再投递（否则清空后又被写回）。
+    _searchRunId++;
+    final runId = _activeSearch?.runId;
+    _activeSearch = null;
+    _searchPaging.clear();
+    log.info('已清空搜索结果 run=${runId ?? "-"}', scope: 'search');
+    notifyListeners();
+  }
+
+  /// 站点是否落在本次搜索范围内（空条件 = 不限定）。
+  bool _inSearchScope(Site site, String siteKey, String group) {
+    if (siteKey.isNotEmpty && site.key != siteKey) return false;
+    if (group.isNotEmpty && !siteInGroup(site.name, group)) return false;
+    return true;
+  }
+
+  /// 按 key 取站点（加载更多需要重新拿到站点对象才能发请求）。
+  ///
+  /// 复用既有的静态 [`_siteByKey`]（它已包含 hide 与名称兜底规则）。
+  Site? _searchSiteByKey(String key) {
+    final config = _config;
+    return config == null ? null : _siteByKey(config, key);
+  }
+
+  /// 加载某站点的下一页结果（§14.1「分页搜索」）。
+  ///
+  /// 对齐上游 `CollectFragment.onLoadMore` + `SearchPageState`：
+  /// - 只有当前批次还有效、且该站点已成功且有条目时才允许翻页；
+  /// - 同一时刻只允许一个在途翻页（[SearchPagingState.begin] 拒绝重入）；
+  /// - **内容与已见过的页重复即判定该站点耗尽**——上游站点常见「越界页码
+  ///   返回末页内容」，只看 `page < pageCount` 会永远翻下去；
+  /// - 上游未声明总页数（pageCount = 0）时允许一直翻，同样靠内容重复兜底。
+  ///
+  /// 返回：这次翻页是否**被接受并追加了条目**。UI 用它判断要不要在「相似度
+  /// 过滤把整页都滤掉」时自动续翻下一页（上游 `shouldContinue`）。
+  Future<bool> loadMoreSearch(
+    String siteKey, {
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    final outcome = _activeSearch;
+    final service = _siteService;
+    if (outcome == null || service == null || outcome.cancelled) return false;
+    final entry = outcome.entryOf(siteKey);
+    if (entry == null || !entry.succeeded || entry.itemCount == 0) return false;
+
+    final requestedPage = _searchPaging.pageOf(siteKey) + 1;
+    if (!_searchPaging.begin(siteKey, requestedPage)) return false;
+    final site = _searchSiteByKey(siteKey);
+    if (site == null) {
+      _searchPaging.cancelPending();
+      return false;
+    }
+
+    outcome.replaceEntry(entry.copyWith(loadingMore: true));
+    notifyListeners();
+
+    try {
+      final value = await service
+          .search(
+            site,
+            keyword: outcome.keyword,
+            page: requestedPage,
+            useCache: true,
+            // 分页请求**不得**参与 `(关键词, 站点)` 搜索缓存：那个键只代表第 1 页。
+            // 走缓存时实测两个真缺陷：命中第 1 页缓存 → 内容指纹重复被误判
+            // 「已耗尽」；以及把第 N 页结果写进第 1 页的缓存键。
+            cache: false,
+          )
+          .timeout(timeout);
+      // 批次被取代 / 取消：丢弃结果，但**必须**把在途登记清掉，
+      // 否则该站点永远被当成「有在途请求」而无法再翻页。
+      if (outcome.cancelled || !identical(_activeSearch, outcome)) {
+        _searchPaging.cancelPending();
+        return false;
+      }
+      final completion = _searchPaging.complete(
+        hasItems: value.value.list.isNotEmpty,
+        pageCount: value.value.pageCount ?? 0,
+        pageToken: SearchPagingState.pageTokenOf(value.value.list),
+      );
+      if (!completion.handled) return false;
+
+      final current = outcome.entryOf(siteKey) ?? entry;
+      final hasMore = _searchPaging.canLoadMore(siteKey);
+      if (!completion.accepted) {
+        // 空页 / 重复页：结果不变，只结束加载态（重复页已在 paging 里标耗尽）。
+        outcome.replaceEntry(
+          current.copyWith(loadingMore: false, hasMore: hasMore),
+        );
+        log.info(
+          '搜索翻页未追加 site=$siteKey page=$requestedPage '
+          'repeated=${completion.repeated} items=${value.value.list.length} '
+          'hasMore=$hasMore',
+          scope: 'search',
+        );
+        notifyListeners();
+        return false;
+      }
+
+      // 追加到已有条目（保留 classes/filters 等无关字段，只换 list 与页码）。
+      final merged = (current.result ?? const SiteResult()).copyWith(
+        list: [...?current.result?.list, ...value.value.list],
+        page: completion.page,
+        pageCount: value.value.pageCount ?? current.result?.pageCount,
+      );
+      outcome.replaceEntry(
+        current.copyWith(
+          result: merged,
+          page: completion.page,
+          pageCount: value.value.pageCount ?? current.pageCount,
+          loadingMore: false,
+          hasMore: hasMore,
+        ),
+      );
+      log.info(
+        '搜索翻页成功 site=$siteKey page=${completion.page}'
+        '/${value.value.pageCount ?? "?"} added=${value.value.list.length} '
+        'total=${merged.list.length} hasMore=$hasMore',
+        scope: 'search',
+      );
+      notifyListeners();
+      return true;
+    } catch (error) {
+      _searchPaging.cancelPending();
+      final failure = error is AppError
+          ? error
+          : AppError(AppErrorKind.unknown, '$error', cause: error);
+      final current = outcome.entryOf(siteKey) ?? entry;
+      outcome.replaceEntry(current.copyWith(loadingMore: false));
+      log.warning(
+        '搜索翻页失败 site=$siteKey page=$requestedPage ${failure.logLine}',
+        scope: 'search',
+      );
+      notifyListeners();
+      return false;
+    }
+  }
+
+  /// 某站点当前已加载的页数（UI 显示「第 N/M 页」）。
+  int searchPageOf(String siteKey) => _searchPaging.pageOf(siteKey);
+
+  // ---------------------------------------------------------------- 搜索辅助
+  //
+  // 联想 / 热门推荐 / 历史管理（对齐上游安卓默影视 SearchFragment）。UI 只经
+  // 这里访问，不直接持 SearchSuggestService。
+
+  /// 搜索联想：输入过程调用，结果含两个上游（爱奇艺 + 腾讯）合并去重。
+  Future<List<SearchSuggestItem>> searchSuggest(String keyword) =>
+      searchSuggestService.suggest(keyword);
+
+  /// 热门推荐榜单（360kan 电影/剧集/综艺）。
+  Future<List<SearchSuggestItem>> searchHotRank(HotRankCategory category) =>
+      searchSuggestService.hotRank(category);
+
+  /// 删除单条搜索历史（未 bootstrap 时安静跳过）。
+  ///
+  /// 先通知、后落盘（乐观更新）：内存是唯一真相，写盘只影响下次启动。
+  /// 若把 `notifyListeners` 放在 `await` 之后，落盘一慢/一阻塞 UI 就不更新
+  /// （widget 测试里直接表现为删除后 chip 仍在）。
+  Future<void> removeSearchKeyword(String keyword) async {
+    _searchHistory = [
+      for (final item in _searchHistory)
+        if (item != keyword) item,
+    ];
+    notifyListeners();
+    final store = _uiPreferences;
+    if (store != null) await store.removeSearchKeyword(keyword);
+  }
+
+  /// 清空搜索历史。同样先通知、后落盘。
+  Future<void> clearSearchHistory() async {
+    _searchHistory = const [];
+    notifyListeners();
+    final store = _uiPreferences;
+    if (store != null) await store.clearSearchKeywords();
+  }
+
+  /// 设置搜索相似度阈值（0~100）。持久化失败不影响当前会话。
+  Future<void> setSearchSimilarity(int value) async {
+    final store = _uiPreferences;
+    if (store == null) return;
+    await store.rememberSearchSimilarity(value);
+    notifyListeners();
+  }
+
+  /// 设置搜索并发线程数（夹到 1~100）。持久化失败不影响当前会话。
+  ///
+  /// 下一次搜索立即生效（[searchAll] 每次读 [searchThread]）；
+  /// 已经在跑的批次不受影响——中途改并发会让「同一轮搜索」的节流语义变得
+  /// 不可预测，也会让日志里那一行 concurrency 失去意义。
+  Future<void> setSearchThread(int value) async {
+    final store = _uiPreferences;
+    if (store == null) return;
+    await store.rememberSearchThread(value);
     notifyListeners();
   }
 
@@ -2432,6 +2772,8 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     _liveService?.close();
     _epgService?.close();
     _tmdbService.close();
+    // 联想/热搜的 HTTP 客户端同样要释放。
+    _searchSuggestService?.close();
     // §22.2:退出后 sidecar 与代理端口全部释放。
     unawaited(_supervisor.shutdownAll());
     unawaited(_androidPlaybackBridge.close());

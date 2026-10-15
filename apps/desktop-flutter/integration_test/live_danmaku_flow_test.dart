@@ -159,11 +159,22 @@ void main() {
 
     // 关闭弹幕 → 不再渲染上屏（AppBar 弹幕按钮）。
     await tester.tap(find.byTooltip('弹幕（开启）'));
-    await tester.pumpAndSettle(const Duration(seconds: 1));
-    final off = tester.widget<DanmakuOverlay>(
+    // 等的是**状态条件**（弹幕已关闭），不是「界面安静下来」。
+    //
+    // 这里**不能用 `pumpAndSettle`**：直播弹幕的重绘由 `Timer.periodic(250ms)`
+    // 驱动（`player_page.dart` 的 `_liveTicker`，作用是让屏幕上已有的弹幕在
+    // 没有新消息时也能继续移动、到期消失）。周期定时器一直存在，就永远有
+    // 待处理帧，`pumpAndSettle` 不可能 settle —— 实测会耗满 **10 分钟**默认
+    // 超时后抛 `pumpAndSettle timed out`。这条用例因此长期是红的，
+    // 而且掩盖了它真正要断言的东西。
+    var off = tester.widget<DanmakuOverlay>(
       find.byType(DanmakuOverlay).first,
     );
-    expect(off.style.enabled, isFalse);
+    for (var attempt = 0; attempt < 40 && off.style.enabled; attempt++) {
+      await tester.pump(const Duration(milliseconds: 250));
+      off = tester.widget<DanmakuOverlay>(find.byType(DanmakuOverlay).first);
+    }
+    expect(off.style.enabled, isFalse, reason: '点击弹幕按钮后应关闭弹幕');
     evidence('live-danmaku-off enabled=${off.style.enabled}');
 
     // 视频仍在播。

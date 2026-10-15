@@ -12,6 +12,7 @@ import '../services/tmdb_history.dart';
 import '../state/app_state.dart';
 import '../core/protocol.dart';
 import 'app.dart';
+import 'common.dart';
 import 'player_page.dart';
 
 class HistoryPage extends StatefulWidget {
@@ -193,7 +194,11 @@ class _HistoryPageState extends State<HistoryPage> {
         ],
         Expanded(
           child: items.isEmpty
-              ? const Center(child: Text('暂无播放记录。播放任意剧集后会自动记录进度。'))
+              ? const EmptyState(
+                  icon: Icons.history_outlined,
+                  title: '暂无播放记录',
+                  message: '播放任意剧集后会自动记录进度。',
+                )
               : ListView.builder(
                   itemCount: items.length,
                   itemBuilder: (context, index) {
@@ -389,7 +394,11 @@ class FavoritesPage extends StatelessWidget {
         const Divider(height: 1),
         Expanded(
           child: items.isEmpty
-              ? const Center(child: Text('暂无收藏。在详情页右上角可以收藏影片。'))
+              ? const EmptyState(
+                  icon: Icons.bookmark_border,
+                  title: '暂无收藏',
+                  message: '在详情页右上角可以收藏影片。',
+                )
               : ListView.builder(
                   itemCount: items.length,
                   itemBuilder: (context, index) {

@@ -22,8 +22,10 @@ import '../services/danmaku_service.dart';
 import '../services/live_danmaku_session.dart';
 import '../state/app_state.dart';
 import 'app.dart';
+import 'common.dart';
 import 'danmaku_overlay.dart';
 import 'player_controller.dart';
+import 'tokens.dart';
 
 /// 一次播放请求（由详情页或命令行构造）。
 class PlaybackRequest {
@@ -1168,15 +1170,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                     overflow: TextOverflow.ellipsis,
                   ),
                   actions: [
+                    // 播放中真正会**反复碰**的三个留在外面：
+                    // 字幕轨、弹幕开关、全屏。
                     IconButton(
                       tooltip: '字幕轨',
                       icon: const Icon(Icons.subtitles_outlined),
                       onPressed: _showSubtitleMenu,
-                    ),
-                    IconButton(
-                      tooltip: '字幕样式',
-                      icon: const Icon(Icons.format_color_text_outlined),
-                      onPressed: _showSubtitleStyleSettings,
                     ),
                     IconButton(
                       tooltip: _danmakuStyle.enabled ? '弹幕（开启）' : '弹幕（关闭）',
@@ -1187,32 +1186,75 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                       ),
                       onPressed: _toggleDanmaku,
                     ),
-                    IconButton(
-                      tooltip: '画面比例与缩放',
-                      icon: const Icon(Icons.aspect_ratio_outlined),
-                      onPressed: _showVideoFitSettings,
-                    ),
-                    IconButton(
-                      tooltip: '媒体信息',
-                      icon: const Icon(Icons.info_outline),
-                      onPressed: _showMediaInfo,
-                    ),
-                    IconButton(
-                      tooltip: '播放诊断',
-                      icon: const Icon(Icons.monitor_heart_outlined),
-                      onPressed: _diagnostics == null ? null : _showDiagnostics,
-                    ),
-                    IconButton(
-                      tooltip: '快捷键说明',
-                      icon: const Icon(Icons.keyboard),
-                      onPressed: _showShortcutHelp,
-                    ),
-                    IconButton(
-                      tooltip: _fullscreen ? '退出全屏' : '全屏',
-                      icon: Icon(
-                        _fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                      ),
-                      onPressed: _toggleFullscreen,
+                    // 全屏**不在这里**：它归底部控制条（一个动作只有一个家）。
+                    // 顶栏常驻、底部栏会随不活动隐藏，所以把「轨道类」留在顶栏、
+                    // 「播放/显示类」放底部栏——两边不再重复同一个动作。
+                    // 其余五个是**设一次**或**出问题时才用**的，收进溢出菜单。
+                    //
+                    // 原来这 8 个图标同尺寸、同字重、平铺成一行，扫视时找不到落点
+                    // （用户反馈 2026-10-11：「图标也处理吧」）。分组依据是**使用
+                    // 时机**，不是功能相似度：播放中要碰的留在外面，配置与诊断收进去。
+                    //
+                    // 注意：字幕轨与弹幕的 tooltip 被集成测试按**精确串**查找并直接
+                    // `tap`（`subtitle_flow_test.dart`、`danmaku_flow_test.dart`），
+                    // 所以它们**不能**被收进菜单——收进去测试就点不到了。
+                    PopupMenuButton<_PlayerMenuAction>(
+                      tooltip: '更多',
+                      icon: const Icon(Icons.more_vert),
+                      onSelected: (action) {
+                        switch (action) {
+                          case _PlayerMenuAction.subtitleStyle:
+                            _showSubtitleStyleSettings();
+                          case _PlayerMenuAction.danmakuSettings:
+                            _showDanmakuSettings();
+                          case _PlayerMenuAction.videoFit:
+                            _showVideoFitSettings();
+                          case _PlayerMenuAction.mediaInfo:
+                            _showMediaInfo();
+                          case _PlayerMenuAction.diagnostics:
+                            _showDiagnostics();
+                          case _PlayerMenuAction.shortcuts:
+                            _showShortcutHelp();
+                        }
+                      },
+                      itemBuilder: (context) => [
+                        _menuItem(
+                          _PlayerMenuAction.subtitleStyle,
+                          Icons.format_color_text_outlined,
+                          '字幕样式',
+                        ),
+                        _menuItem(
+                          _PlayerMenuAction.danmakuSettings,
+                          Icons.comment_outlined,
+                          '弹幕设置',
+                        ),
+                        _menuItem(
+                          _PlayerMenuAction.videoFit,
+                          Icons.aspect_ratio_outlined,
+                          '画面比例与缩放',
+                        ),
+                        _menuItem(
+                          _PlayerMenuAction.mediaInfo,
+                          Icons.info_outline,
+                          '媒体信息',
+                        ),
+                        // 诊断只有在真的拿到了诊断数据时才有意义；
+                        // 没有数据时**灰掉而不是隐藏**——隐藏会让用户以为功能没了。
+                        PopupMenuItem<_PlayerMenuAction>(
+                          value: _PlayerMenuAction.diagnostics,
+                          enabled: _diagnostics != null,
+                          child: _menuRow(
+                            Icons.monitor_heart_outlined,
+                            '播放诊断',
+                            enabled: _diagnostics != null,
+                          ),
+                        ),
+                        _menuItem(
+                          _PlayerMenuAction.shortcuts,
+                          Icons.keyboard,
+                          '快捷键说明',
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -1251,7 +1293,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                       ),
                       if (_controller.isLoading)
                         const Positioned.fill(
-                          child: Center(child: CircularProgressIndicator()),
+                          child: LoadingBlock(),
                         ),
                       if (_loadError != null)
                         Positioned.fill(
@@ -1284,14 +1326,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                     onNext: _playNext,
                     onSelectEpisode: (index) => _playEpisode(index),
                     onSelectLine: (flag) => _playEpisode(0, overrideFlag: flag),
-                    onSelectSubtitle: _showSubtitleMenu,
-                    onSelectSubtitleStyle: _showSubtitleStyleSettings,
-                    onSelectDanmaku: _showDanmakuSettings,
                     liveStatus: _liveStatus,
                     liveOnline: _liveOnline,
-                    videoFitMode: _videoFitMode,
-                    onSelectVideoFit: _showVideoFitSettings,
-                    onShowMediaInfo: _showMediaInfo,
                   ),
                 ),
             ],
@@ -1683,6 +1719,56 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   }
 }
 
+/// 播放器顶栏**溢出菜单**的动作。
+///
+/// 这些是「设一次」或「出问题时才用」的能力，与播放中反复碰的字幕/弹幕/全屏
+/// 分开——分组依据是**使用时机**。
+enum _PlayerMenuAction {
+  subtitleStyle,
+  danmakuSettings,
+  videoFit,
+  mediaInfo,
+  diagnostics,
+  shortcuts,
+}
+
+/// 溢出菜单里的一行（图标 + 文字）。
+Widget _menuRow(IconData icon, String label, {bool enabled = true}) {
+  return Row(
+    children: [
+      Icon(icon, size: 18),
+      const SizedBox(width: AppSpace.md),
+      Text(label),
+    ],
+  );
+}
+
+PopupMenuItem<_PlayerMenuAction> _menuItem(
+  _PlayerMenuAction value,
+  IconData icon,
+  String label,
+) {
+  return PopupMenuItem<_PlayerMenuAction>(
+    value: value,
+    child: _menuRow(icon, label),
+  );
+}
+
+/// 底部控制条的分组线。
+///
+/// 控制条是一整排同尺寸图标，没有分组时扫视找不到落点。一条发丝竖线比
+/// 加间距更有效——间距只说明"隔开了"，线说明"这是另一组"。
+Widget _controlBarDivider(BuildContext context) {
+  return Padding(
+    padding: const EdgeInsets.symmetric(horizontal: AppSpace.xs),
+    child: Container(
+      width: 1,
+      height: 20,
+      color: Theme.of(context).dividerColor,
+    ),
+  );
+}
+
 class _PlayerErrorOverlay extends StatelessWidget {
   const _PlayerErrorOverlay({
     required this.message,
@@ -1700,14 +1786,19 @@ class _PlayerErrorOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final semantic = context.semanticColors;
     return Container(
       constraints: const BoxConstraints(maxWidth: 520),
-      margin: const EdgeInsets.all(24),
-      padding: const EdgeInsets.all(20),
+      margin: const EdgeInsets.all(AppSpace.xl),
+      padding: const EdgeInsets.all(AppSpace.lg),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.85),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Theme.of(context).colorScheme.error),
+        // 这是盖在**视频画面**上的浮层，必须始终够暗才读得清——
+        // 但用设计系统的夜空底（带色相）而不是裸 `Colors.black`：
+        // 纯黑会从整个世界（深靛夜空）里掉出来。
+        color: AppPalette.nightGround.withValues(alpha: 0.92),
+        borderRadius: AppRadius.mdAll,
+        border: Border.all(color: semantic.statusFailed),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1715,25 +1806,36 @@ class _PlayerErrorOverlay extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(
-                Icons.error_outline,
-                color: Theme.of(context).colorScheme.error,
-              ),
-              const SizedBox(width: 8),
-              const Text(
+              Icon(Icons.error_outline, color: semantic.statusFailed),
+              const SizedBox(width: AppSpace.sm),
+              Text(
                 '播放失败',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                // 用真实存在的 w700，不用 w600：雅黑没有真 Medium，
+                // w600 会走合成加粗（笔画粘连、小字号发糊）。
+                // 这是全站统一修过的同一类缺陷，浮层这里漏了。
+                style: theme.textTheme.titleMedium?.copyWith(
+                  color: AppPalette.nightInk,
+                  fontWeight: AppWeight.title,
+                ),
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          Text(message),
-          const SizedBox(height: 8),
+          const SizedBox(height: AppSpace.md),
+          Text(
+            message,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: AppPalette.nightInk,
+            ),
+          ),
+          const SizedBox(height: AppSpace.sm),
           SelectableText(
             '地址：${redactUrl(url)}',
-            style: const TextStyle(fontSize: 12, color: Colors.white70),
+            style: theme.textTheme.bodySmall?.copyWith(
+              // 从底色色相染出的副文本，不是 `Colors.white70`。
+              color: AppPalette.nightInkMuted,
+            ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: AppSpace.lg),
           Row(
             children: [
               OutlinedButton.icon(
@@ -1741,7 +1843,7 @@ class _PlayerErrorOverlay extends StatelessWidget {
                 icon: const Icon(Icons.refresh, size: 18),
                 label: const Text('重试一次'),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: AppSpace.sm),
               if (canGoNext)
                 OutlinedButton.icon(
                   onPressed: onNext,
@@ -1765,14 +1867,8 @@ class _ControlBar extends StatelessWidget {
     required this.onNext,
     required this.onSelectEpisode,
     required this.onSelectLine,
-    required this.onSelectSubtitle,
-    required this.onSelectSubtitleStyle,
-    required this.onSelectDanmaku,
     this.liveStatus,
     this.liveOnline,
-    this.videoFitMode = PlayerVideoFitMode.contain,
-    this.onSelectVideoFit,
-    this.onShowMediaInfo,
   });
 
   final PlayerController controller;
@@ -1782,18 +1878,12 @@ class _ControlBar extends StatelessWidget {
   final VoidCallback onNext;
   final ValueChanged<int> onSelectEpisode;
   final ValueChanged<String> onSelectLine;
-  final VoidCallback onSelectSubtitle;
-  final VoidCallback onSelectSubtitleStyle;
-  final VoidCallback onSelectDanmaku;
 
   /// 直播弹幕连接状态（仅直播弹幕时非空）。
   final String? liveStatus;
 
   /// 直播弹幕在线人数（收到 `online` 帧后非空）。
   final int? liveOnline;
-  final PlayerVideoFitMode videoFitMode;
-  final VoidCallback? onSelectVideoFit;
-  final VoidCallback? onShowMediaInfo;
 
   String _formatDuration(Duration value) {
     final total = value.inSeconds;
@@ -1845,14 +1935,30 @@ class _ControlBar extends StatelessWidget {
     }();
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      color: Theme.of(context).colorScheme.surface,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpace.md,
+        vertical: AppSpace.sm,
+      ),
+      // 控制条用**主题底色的半透明纱**，不是不透明面：
+      // 播放器是全幅视频表面，控制条压住画面底部会显得很重；
+      // 半透明让画面透出来，同时文字仍然落在可控的底色上（对比度成立）。
+      //
+      // 为什么不做成"永远深色"：播放器背景是视频、不是应用底色，所以
+      // 深色纱对亮画面对比度最好——但那样在亮色主题下，主题给的深色图标
+      // 会压在深色纱上（实测约 3.5:1，不足）。要做对需要在播放器页整体
+      // 套一层暗色 Theme 作用域，那是一次独立改动，不夹在这里半做。
+      color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.88),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Row(
             children: [
-              Text(_formatDuration(controller.position)),
+              // 时间必须用**等宽字形**：比例字形下秒数每跳一次，整行时间
+              // 就会左右抖动，读进度时很难受。
+              Text(
+                _formatDuration(controller.position),
+                style: tabular(Theme.of(context).textTheme.bodyMedium!),
+              ),
               Expanded(
                 child: Slider(
                   value: value,
@@ -1864,7 +1970,10 @@ class _ControlBar extends StatelessWidget {
                         ),
                 ),
               ),
-              Text(_formatDuration(duration)),
+              Text(
+                _formatDuration(duration),
+                style: tabular(Theme.of(context).textTheme.bodyMedium!),
+              ),
             ],
           ),
           Wrap(
@@ -1889,6 +1998,9 @@ class _ControlBar extends StatelessWidget {
                 onPressed: onNext,
                 icon: const Icon(Icons.skip_next),
               ),
+              // 分组：传输 → 音量 → 速率/线路 → 显示 → 状态。
+              // 十几个同尺寸图标平铺时，分组线是唯一能让眼睛停下来的东西。
+              _controlBarDivider(context),
               IconButton(
                 tooltip: controller.muted || controller.volume == 0
                     ? '取消静音（M）'
@@ -1908,8 +2020,13 @@ class _ControlBar extends StatelessWidget {
                   onChanged: controller.setVolume,
                 ),
               ),
+              _controlBarDivider(context),
               const Text('倍速'),
               DropdownButton<double>(
+                // 去掉框架默认下划线：那是 Material 2 的遗留装饰，
+                // 在已经设计过的深色纱上像一条莫名的横线。
+                // craft-floor 点名的正是这一类"你没画的那些部分也在承载设计"。
+                underline: const SizedBox.shrink(),
                 value: _nearestRate(controller.rate),
                 items: const [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
                     .map(
@@ -1925,6 +2042,7 @@ class _ControlBar extends StatelessWidget {
               ),
               if (request.playLines.length > 1)
                 DropdownButton<String>(
+                  underline: const SizedBox.shrink(),
                   value: request.flag,
                   hint: const Text('线路'),
                   items: request.playLines
@@ -1945,40 +2063,15 @@ class _ControlBar extends StatelessWidget {
                   icon: const Icon(Icons.list, size: 18),
                   label: Text('剧集（${episodes.length}）'),
                 ),
-              IconButton(
-                tooltip: controller.hasSubtitles
-                    ? '字幕轨（${controller.selectedSubtitle?.label ?? '未选择'}）'
-                    : '字幕轨（无可选字幕轨）',
-                onPressed: onSelectSubtitle,
-                icon: Icon(
-                  controller.selectedSubtitle == null ||
-                          controller.selectedSubtitle?.id ==
-                              SubtitleOption.offId
-                      ? Icons.subtitles_off_outlined
-                      : Icons.subtitles_outlined,
-                ),
-              ),
-              IconButton(
-                tooltip: '字幕样式',
-                onPressed: onSelectSubtitleStyle,
-                icon: const Icon(Icons.format_color_text_outlined),
-              ),
-              // 弹幕设置（§21 Phase 3）；开关本身在 AppBar 与设置面板内。
-              IconButton(
-                tooltip: '弹幕设置',
-                onPressed: onSelectDanmaku,
-                icon: const Icon(Icons.comment_outlined),
-              ),
-              IconButton(
-                tooltip: '画面比例与缩放（${videoFitMode.label}）',
-                onPressed: onSelectVideoFit,
-                icon: const Icon(Icons.aspect_ratio_outlined),
-              ),
-              IconButton(
-                tooltip: '媒体信息',
-                onPressed: onShowMediaInfo,
-                icon: const Icon(Icons.info_outline),
-              ),
+              // 轨道与显示类控件**不在这里**：它们归顶栏（字幕轨、弹幕开关，
+              // 顶栏常驻所以更易够到）与顶栏的「更多」菜单（字幕样式 / 弹幕设置 /
+              // 画面比例与缩放 / 媒体信息）。
+              //
+              // 原来这两条栏有 **5 个动作重复**（字幕轨、字幕样式、弹幕设置、
+              // 画面比例、媒体信息），加上各自十几个同尺寸图标，用户扫视时
+              // 找不到落点（用户反馈 2026-10-11「接着处理底部控制条」）。
+              // 原则是**一个动作只有一个家**：底部栏只做「播放中要碰的」。
+              _controlBarDivider(context),
               IconButton(
                 tooltip: '全屏（F11）',
                 onPressed: onToggleFullscreen,

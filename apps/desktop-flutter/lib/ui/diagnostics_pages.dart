@@ -10,7 +10,10 @@ import '../services/storage.dart';
 import '../state/app_state.dart';
 import '../state/sync_state.dart';
 import 'app.dart';
+import 'common.dart';
 import 'config_pages.dart';
+import 'source_field.dart';
+import 'tokens.dart';
 
 /// 设置页：TMDB、运行信息、目录、缓存维护、合规说明。
 class SettingsPage extends StatelessWidget {
@@ -23,8 +26,85 @@ class SettingsPage extends StatelessWidget {
     final info = state.startupInfo;
     final tmdb = state.tmdbConfig;
     final sync = state.syncState;
-    return ListView(      padding: const EdgeInsets.all(16),
+    // 设置页是**表单**：收进限宽内容列。
+    //
+    // 不这么做的话，1440px 窗口下 `SwitchListTile` 会把开关钉到最右边，
+    // 与它的标签相距约 1300px——"启用 TMDB 增强"和那个开关的关联就断了
+    // （截图复核时发现，2026-10-11）。内容网格与播放器**不用**这个约束。
+    return ListView(
+      padding: formPagePadding(context),
       children: [
+        // 外观：主题模式。
+        //
+        // 星等星表以**暗色为主身份**（夜间、坐在电脑前的使用场景），
+        // 亮色是独立设计的「昼间星表」，不是暗色的自动反转。
+        //
+        // 本次改造之前这里根本没有开关：`app.dart` 曾硬编码
+        // `themeMode: ThemeMode.dark`，亮色主题对用户**完全不可达**。
+        Text('外观', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        SegmentedButton<ThemeMode>(
+          key: const ValueKey('settings-theme-mode'),
+          segments: const [
+            ButtonSegment<ThemeMode>(
+              value: ThemeMode.dark,
+              icon: Icon(Icons.dark_mode_outlined, size: 18),
+              label: Text('暗色'),
+            ),
+            ButtonSegment<ThemeMode>(
+              value: ThemeMode.light,
+              icon: Icon(Icons.light_mode_outlined, size: 18),
+              label: Text('亮色'),
+            ),
+            ButtonSegment<ThemeMode>(
+              value: ThemeMode.system,
+              icon: Icon(Icons.brightness_auto_outlined, size: 18),
+              label: Text('跟随系统'),
+            ),
+          ],
+          selected: {themeModeOf(state.themeMode)},
+          onSelectionChanged: (selection) {
+            state.setThemeMode(themeModeName(selection.first));
+          },
+        ),
+        const Divider(height: 32),
+        // 搜索区块。
+        //
+        // 为什么放在设置页而不是搜索页：搜索页顶部那排筛选是**每次搜索临时调**
+        // 的（分组/相似度），而「并发线程数」是**一次定好、长期生效**的容量设置，
+        // 和主题一样属于配置项；上游也把它放在设置里
+        // （`Setting.getSearchThread()`，label「搜索线程」）。
+        Text('搜索', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          '并发线程：${state.searchThread}'
+          '（同时搜索的站点数上限，1~100；默认 20）',
+          key: const ValueKey('settings-search-thread-summary'),
+        ),
+        const SizedBox(height: 12),
+        FilledButton.tonalIcon(
+          key: const ValueKey('settings-search-thread'),
+          onPressed: () async {
+            final value = await showNumberSliderDialog(
+              context,
+              title: '搜索线程',
+              current: state.searchThread,
+              minValue: 1,
+              maxValue: 100,
+              hint: '同时搜索的站点数量上限。调高更快，但更容易触发上游限流',
+              keyPrefix: 'search-thread',
+            );
+            if (value != null) await state.setSearchThread(value);
+          },
+          icon: const Icon(Icons.speed_outlined),
+          label: const Text('调整搜索线程'),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '下一次搜索立即生效；已经在跑的搜索不受影响。',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const Divider(height: 32),
         // TMDB 区块（`04` §10.3）：设置页必须有独立入口。
         // 只靠详情页状态条会形成死锁——未配置时详情页也可能没有区块，
         // 用户就永远进不来（发布包实测缺陷）。
@@ -139,11 +219,39 @@ class SettingsPage extends StatelessWidget {
           '• 自动更新：不更新站源，仅更新应用本体',
         ),
         const Divider(height: 32),
+        // 站点健康：**独立页面**，不在这里铺开。
+        //
+        // 为什么搬出去（用户反馈 2026-10-12）：这块原本直接铺在设置页底部，
+        // 而它是一张 7 列的宽表，把设置页挤得又长又杂；同时它和「外观 / TMDB /
+        // 安卓接入」这些**设置项**语义不同——它是**诊断读数**，不是配置项。
+        // 现在按 TMDB / 安卓接入同样的模式给一个入口，进独立页看。
         Text('站点健康', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
-        _HealthTable(items: state.siteHealth()),
+        Text(_healthSummary(state)),
+        const SizedBox(height: 12),
+        FilledButton.tonalIcon(
+          key: const ValueKey('settings-site-health-open'),
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => SiteHealthPage(state: state),
+            ),
+          ),
+          icon: const Icon(Icons.monitor_heart_outlined),
+          label: const Text('打开站点健康'),
+        ),
       ],
     );
+  }
+
+  /// 站点健康摘要：只给一行结论，细节进独立页。
+  String _healthSummary(AppState state) {
+    final records = state.siteHealth();
+    final sites = state.siteItems;
+    if (sites.isEmpty) return '当前配置没有站点';
+    if (records.isEmpty) {
+      return '${sites.length} 个站点 · 尚无实测记录（浏览、搜索或播放后开始累计）';
+    }
+    return '${sites.length} 个站点 · 已有 ${records.length} 个站点的实测记录';
   }
 
   /// 安卓接入状态摘要。
@@ -173,6 +281,61 @@ class SettingsPage extends StatelessWidget {
       buffer.write('，同步服务已开启');
     }
     return buffer.toString();
+  }
+}
+
+/// 站点健康：源场点阵 + 逐站实测明细。
+///
+/// 为什么单独一页（用户反馈 2026-10-12）：源场原本放在**首页内容区第一块**，
+/// 意图是"先回答哪个源能用，再谈看什么"。真实配置下这个前提不成立——
+/// 实测 170 个站源里 **160 个没有采样记录**，于是一大片灰点占了首屏近三分之一
+/// 高度，既没有信息量又把海报内容挤了下去。健康度是**按需查看的诊断信息**，
+/// 不是每次打开都要读的首页主角。
+class SiteHealthPage extends StatelessWidget {
+  const SiteHealthPage({super.key, required this.state});
+
+  final AppState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final records = state.siteHealth();
+    final magnitudes = buildMagnitudes(
+      items: state.siteItems,
+      health: {for (final record in records) record.siteKey: record},
+    );
+    final unknown = magnitudes
+        .where((item) => item.status == SourceStatus.unknown)
+        .length;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('站点健康')),
+      body: ListView(
+        padding: const EdgeInsets.all(AppSpace.lg),
+        children: [
+          if (magnitudes.isNotEmpty) ...[
+            SourceField(magnitudes: magnitudes),
+            const SizedBox(height: AppSpace.lg),
+          ],
+          if (unknown > 0)
+            // 未知占比高时把原因说清楚：不是"这些源坏了"，而是**还没用过**。
+            // 不解释的话，一大片灰点会被读成"我的源全挂了"。
+            Padding(
+              padding: const EdgeInsets.only(bottom: AppSpace.lg),
+              child: Text(
+                '其中 $unknown 个站点尚无实测记录：它们是还没调用过的站点，'
+                '不代表不可用。浏览、搜索或播放之后会开始累计成功率。',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          Text('逐站明细', style: theme.textTheme.titleMedium),
+          const SizedBox(height: AppSpace.md),
+          _HealthTable(items: records),
+        ],
+      ),
+    );
   }
 }
 
@@ -264,6 +427,7 @@ class _LogsPageState extends State<LogsPage> {
               const Text('级别过滤：'),
               const SizedBox(width: 8),
               DropdownButton<LogLevel?>(
+                underline: const SizedBox.shrink(),
                 value: _filter,
                 items: [
                   const DropdownMenuItem(value: null, child: Text('全部')),
@@ -298,7 +462,10 @@ class _LogsPageState extends State<LogsPage> {
         const Divider(height: 1),
         Expanded(
           child: entries.isEmpty
-              ? const Center(child: Text('暂无日志。'))
+              ? const EmptyState(
+                  icon: Icons.receipt_long_outlined,
+                  title: '暂无日志',
+                )
               : ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   itemCount: entries.length,

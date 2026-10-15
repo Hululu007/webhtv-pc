@@ -252,7 +252,19 @@ void main() {
       vodId: 'vod-1',
       mode: 'cover',
     );
-    await Future<void>.delayed(const Duration(milliseconds: 100));
+    // 落盘是 fire-and-forget（内存即时生效、磁盘异步写）：原先的固定 100ms sleep
+    // 在多个测试文件并行争 I/O 时偶发不够（实测与本文件无关的 3 个测试文件并行
+    // 就会失败）。改为**有界轮询磁盘**，之后仍走「重建 AppState + bootstrap」
+    // 的完整恢复路径——断言强度不变，也不再依赖机器负载。
+    final settings = File(paths.settingsPath);
+    final deadline = DateTime.now().add(const Duration(seconds: 10));
+    while (DateTime.now().isBefore(deadline)) {
+      if (settings.existsSync() &&
+          settings.readAsStringSync().contains('cover')) {
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+    }
     final reopened = build();
     addTearDown(reopened.dispose);
     await reopened.bootstrap();

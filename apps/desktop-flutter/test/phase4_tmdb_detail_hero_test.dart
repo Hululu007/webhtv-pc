@@ -103,8 +103,23 @@ void main() {
       );
       expect(
         rect.height,
-        height * 0.54,
-        reason: 'Hero 应保留背景氛围，同时让简介、播放入口和线路更早进入首屏',
+        height,
+        reason: '图片框必须铺满整个视口高度（用户反馈 2026-10-13：「我要的是全屏」）；'
+            '而且这直接决定原图能显示多大——3.07:1 的横带里 16:9 原图只能按高度适配，'
+            '降成约 58% 宽，用 cover 则要纵向裁掉约 42%',
+      );
+      // 图片变大**不能**把内容推下去：内容带仍是既有结论（约 54% 视口），
+      // 简介/播放入口仍在首屏。两者现在是分开的两个量。
+      final ctx = tester.element(slideshow);
+      expect(
+        TmdbDetailHeader.resolveHeight(ctx),
+        closeTo(height * 0.54, 0.1),
+        reason: '内容带高度必须保持不变（它才是「简介/播放入口多早可见」的决定量）',
+      );
+      expect(
+        rect.height,
+        greaterThan(TmdbDetailHeader.resolveHeight(ctx)),
+        reason: '图片框必须比内容带高——否则内容就会跟着被裁的那一版一起缩回去',
       );
     });
   });
@@ -166,7 +181,9 @@ void main() {
         reason: 'app bar 必须透明，否则会盖住背景海报',
       );
       final rect = tester.getRect(
-        find.byKey(const ValueKey('tmdb-backdrop-slideshow')),
+        // 真实 `DetailPage` 里图片由**页面级固定背景**负责，头部只画内容，
+        // 所以头部那块现在是 `tmdb-detail-hero`（见 TmdbBackdropSlideshow.build）。
+        find.byKey(const ValueKey('tmdb-detail-hero')),
       );
       expect(
         rect.width,
@@ -180,8 +197,8 @@ void main() {
       );
       expect(
         rect.height,
-        closeTo(486, 0.1),
-        reason: 'Hero 高度为视口 54%，简介和播放入口应在首屏可见',
+        closeTo(900, 0.1),
+        reason: '图片框为整个视口高度（全屏）；内容带仍是 54% 视口，两者已解耦',
       );
     });
 
@@ -203,16 +220,20 @@ void main() {
       await tester.pump();
 
       final heroRect = tester.getRect(
-        find.byKey(const ValueKey('tmdb-backdrop-slideshow')),
+        find.byKey(const ValueKey('tmdb-detail-hero')),
       );
       expect(
         heroRect.height,
-        closeTo(486, 0.1),
-        reason: 'hero 应占首屏约一半',
+        closeTo(900, 0.1),
+        reason: '图片框占满首屏（全屏）；内容带仍是 54% 视口',
       );
 
-      // 详情信息应紧跟 Hero，首屏就能看到一部分；继续滚动仍可完整查看。
-      expect(find.byType(TmdbInfoTable), findsOneWidget);
+      // 正文在 hero 之下。
+      //
+      // 注意「首屏就能看到一部分」这句已经不成立，**这是全屏 hero 的必然结果**：
+      // 图片框占满整个视口后，信息表落在折叠线以下，而 `ListView` 是懒构建的，
+      // 滚动之前它**根本还没被创建**。所以这里改成先滚动、再断言，
+      // 断言的意图（正文存在、且在 hero 之下、没被挤没）一条不少。
       await tester.drag(
         find.byType(Scrollable).first,
         const Offset(0, -900),
@@ -221,11 +242,11 @@ void main() {
       expect(
         find.byType(TmdbInfoTable),
         findsOneWidget,
-        reason: '向下滚动后仍能看到正文（内容没有被 Hero 挤没）',
+        reason: '向下滚动后必须能看到正文（内容没有被全屏 hero 挤没）',
       );
       // hero 会随列表一起滚动，因此比较**滚动后**的实时位置。
       final heroAfter = tester.getRect(
-        find.byKey(const ValueKey('tmdb-backdrop-slideshow')),
+        find.byKey(const ValueKey('tmdb-detail-hero')),
       );
       expect(
         tester.getRect(find.byType(TmdbInfoTable)).top,

@@ -141,7 +141,7 @@ void main() {
     );
 
     // 2) 关闭：字幕菜单 →「关闭字幕」。
-    await tester.tap(find.byTooltip('字幕'));
+    await tester.tap(find.byTooltip('字幕轨'));
     await tester.pumpAndSettle();
     expect(find.text('关闭字幕'), findsOneWidget);
     await tester.tap(find.text('关闭字幕'));
@@ -150,7 +150,7 @@ void main() {
     evidence('subtitle-off id=${player.state.track.subtitle.id}');
 
     // 3) 重新开启：同一菜单选回外挂字幕。
-    await tester.tap(find.byTooltip('字幕'));
+    await tester.tap(find.byTooltip('字幕轨'));
     await tester.pumpAndSettle();
     final externalLabel = find.textContaining('简体中文');
     expect(externalLabel, findsWidgets);

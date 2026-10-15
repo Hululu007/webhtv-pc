@@ -151,6 +151,10 @@ Widget _host(Widget child) => MaterialApp(
 );
 
 /// 取某个 key 对应的 [PosterImage] 的 URL（证明「真的渲染了图片」）。
+///
+/// 需要拆掉 [ResizeImage] 包装：背景模糊垫底层带了 `cacheWidth`，
+/// 而 `Image.network(..., cacheWidth:)` 会把 provider 包成
+/// `ResizeImage(NetworkImage)`，直接判 `is NetworkImage` 会漏掉它。
 String? _posterUrlOf(WidgetTester tester, Key key) {
   final finder = find.descendant(
     of: find.byKey(key),
@@ -159,7 +163,11 @@ String? _posterUrlOf(WidgetTester tester, Key key) {
   );
   if (finder.evaluate().isEmpty) return null;
   final image = tester.widget<Image>(finder.first);
-  final provider = image.image;
+  return _networkUrlOf(image.image);
+}
+
+String? _networkUrlOf(ImageProvider? provider) {
+  if (provider is ResizeImage) return _networkUrlOf(provider.imageProvider);
   return provider is NetworkImage ? provider.url : null;
 }
 
@@ -214,6 +222,42 @@ void main() {
       expect(find.byKey(const ValueKey('tmdb-backdrop-dots')), findsNothing);
       await tester.pump(const Duration(seconds: 30));
       expect(find.byKey(const ValueKey('tmdb-backdrop-0')), findsOneWidget);
+    });
+
+    testWidgets('背景用单层 cover 铺满（V1 选型），不再叠 contain 主体', (tester) async {
+      // 历史（用户反馈 2026-10-13，两轮）：
+      // 1) 原实现是单层 `cover`，但**图片框只有 427px 高**（3.07:1），
+      //    16:9 素材被迫纵向裁掉约 42%，把人的头顶从脸中间切掉 —— 用户报「上面被截」。
+      // 2) 我改成「模糊垫底 + contain 主体」，并在 1440x900（1.6:1）验证后交付。
+      //    用户窗口是 2.35:1，两侧各空 324px；而且那个方案的锐利图与背景
+      //    **缩放比不同**，交界处必然有一道竖直硬边 —— 用户报「怎么这么丑」。
+      //    更要命的是：`PosterImage` 自带**不透明**全框底色，上层把下层整块盖住，
+      //    模糊层**从来没渲染过**；当时只断言 `fit` 的测试根本拦不住。
+      // 3) 最终选型：回到单层 `cover` + 渐变遮罩（Emby / Jellyfin / Netflix 同做法）。
+      //    裁切变小的真正原因是**图片框改成整个视口**（见 hero 高度那条测试）。
+      await tester.pumpWidget(
+        _host(const TmdbBackdropSlideshow(urls: ['https://img/a.jpg'])),
+      );
+      await tester.pump();
+
+      final layer = find.byKey(const ValueKey('tmdb-backdrop-0'));
+      expect(layer, findsOneWidget);
+
+      final images = find.descendant(
+        of: layer,
+        matching: find.byType(Image),
+        matchRoot: true,
+      );
+      expect(
+        images,
+        findsOneWidget,
+        reason: '只应有一层图：叠层方案会在交界处留下消不掉的竖直硬边',
+      );
+      expect(
+        tester.widget<Image>(images.first).fit,
+        BoxFit.cover,
+        reason: '必须 cover 铺满，左右不留空隙',
+      );
     });
 
     testWidgets('无背景图时回退海报（不留白）', (tester) async {

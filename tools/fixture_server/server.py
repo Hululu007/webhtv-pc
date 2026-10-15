@@ -602,6 +602,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
         """
         digest = hashlib.sha256(relative.encode("utf-8")).digest()
         size = _image_size_for(relative)
+
+        # `wide*` 前缀 → 16:9 横图，且**上下各有一条纯色标记带**。
+        #
+        # 为什么需要（2026-10-13）：详情页背景原先是单层 `BoxFit.cover`，
+        # 在比素材更扁的框里会纵向裁切；而原有 fixture 全是 1:1 方图，
+        # **截图里根本看不出裁没裁**。这条标记带让裁切变成肉眼可见的事实：
+        # 红色顶带或蓝色底带缺了，就是被裁了。
+        if relative.split("/")[-1].startswith("wide"):
+            return self._send_wide_backdrop(size)
+
         # 主色由哈希决定；叠加对角亮带与竖向渐变，使图片不是纯色块
         # （纯色块在截图里与占位图难以区分）。
         base = (60 + digest[0] % 120, 60 + digest[1] % 120, 60 + digest[2] % 120)
@@ -626,6 +636,40 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 rows.extend(min(255, channel) for channel in color)
         payload = _encode_png(size, size, bytes(rows))
         self._send_bytes(payload, "image/png")
+
+    def _send_wide_backdrop(self, size: int) -> None:
+        """16:9 横图 + 上下标记带，用来**目视证明背景有没有被裁切**。
+
+        红顶带 / 蓝底带各占高度 10%。`BoxFit.cover` 在更扁的框里会切掉它们；
+        两层铺法（模糊垫底 + `contain` 主体）必须两条都完整可见。
+
+        固定 640x360 而不是跟着 `size` 走：这样框比**恰好是真实素材的 16:9**
+        （TMDB 后景就是 16:9），截图才有代表性；640 宽也够看清标记带与网格线。
+        """
+        width, height = 640, 360
+        band = max(4, height // 10)
+        rows = bytearray()
+        for y in range(height):
+            rows.append(0)  # PNG filter type 0
+            if y < band:
+                color = (220, 40, 40)  # 顶带：红
+            elif y >= height - band:
+                color = (40, 80, 220)  # 底带：蓝
+            else:
+                # 中段：竖向渐变 + 细网格，便于判断缩放比例
+                shade = 0.55 + 0.45 * (y / max(1, height - 1))
+                color = (
+                    int(150 * shade),
+                    int(170 * shade),
+                    int(120 * shade),
+                )
+            grid = band <= y < height - band
+            for x in range(width):
+                if grid and x % 80 < 2:
+                    rows.extend((240, 240, 240))  # 白色竖网格线
+                else:
+                    rows.extend(color)
+        self._send_bytes(_encode_png(width, height, bytes(rows)), "image/png")
 
     # ------------------------------------------------------------ 请求解析
 
@@ -816,7 +860,17 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
 
         route = path.rstrip("/")
-        if route in ("/api/type0", "/api/type1", "/api/type2", "/api/type4"):
+        if route in (
+            "/api/type0",
+            "/api/type1",
+            "/api/type2",
+            "/api/type4",
+            # 分页/空结果样本（搜索分页门禁与会验用，§14.1）。
+            # 与 type1 共用 `_send_api` 分派，仅 `wd` 分支的响应不同，
+            # 保持与 Dart 侧 `test/support/test_fixture_server.dart` 一致（§19）。
+            "/api/paged",
+            "/api/empty",
+        ):
             self._send_api(route, self._parameters())
             return
 
@@ -856,6 +910,45 @@ class FixtureHandler(BaseHTTPRequestHandler):
         # 真实服务端契约与 Android `SiteApi.playerContent` 的 `type==4` 分支一致。
         if route == "/api/type4" and params.get("play") is not None:
             self._send_type4_play(params)
+            return
+        # 空结果样本：站点成功但零条目（验证「零结果站点不允许翻页」）。
+        if route == "/api/empty":
+            self._send_json({
+                "page": 1,
+                "pagecount": 1,
+                "limit": 20,
+                "total": 0,
+                "list": [],
+            })
+            return
+        # 分页样本（§14.1）：`pg` 决定内容，`pagecount` 声明总页数，
+        # `repeatAfterFirst=true` 时第 2 页起重复第 1 页内容——上游站点在
+        # 「越界页码」时常返回末页内容，分页逻辑必须靠内容重复判耗尽。
+        if route == "/api/paged":
+            try:
+                page = max(1, int(params.get("pg") or 1))
+            except ValueError:
+                page = 1
+            try:
+                pagecount = max(0, int(params.get("pageCount") or 0))
+            except ValueError:
+                pagecount = 0
+            repeat = params.get("repeatAfterFirst") == "true"
+            effective = 1 if repeat else page
+            self._send_json({
+                "page": page,
+                "pagecount": pagecount,
+                "limit": 20,
+                "total": 0,
+                "list": [
+                    {
+                        "vod_id": f"paged-{effective}",
+                        "vod_name": f"分页条目{effective}",
+                        "vod_pic": "",
+                        "vod_remarks": f"第 {effective} 页",
+                    }
+                ],
+            })
             return
         if params.get("wd"):
             self._send_json_bytes(_json("category.json"))

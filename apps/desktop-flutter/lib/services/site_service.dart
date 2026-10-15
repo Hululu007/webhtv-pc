@@ -241,15 +241,27 @@ class SiteService {
   }
 
   /// 搜索（§14.1）。
+  ///
+  /// [cache] 控制是否**参与搜索响应缓存**（读写双向）。
+  ///
+  /// 为什么需要它与 [useCache] 分开：缓存键只有 `(关键词, 站点)`
+  /// （`AppDatabase.readSearchCache`），语义上只代表**第 1 页**。
+  /// 分页请求若走缓存会出现两个真缺陷（实测）：
+  /// 1. 翻第 2 页时命中第 1 页的缓存 → 内容指纹与第 1 页相同 → 被分页逻辑
+  ///    误判为「该站点内容重复、已耗尽」，用户看到「已全部加载（1 页）」；
+  /// 2. 第 2 页的结果会被写进 `(关键词, 站点)` 这个键 → 之后重新搜同一关键词
+  ///    时，第 1 页位置显示的是第 2 页内容。
+  /// 因此 `page > 1` 的请求必须传 [cache] = false。
   Future<SiteCallResult<SiteResult>> search(
     Site site, {
     required String keyword,
     int page = 1,
     bool quick = false,
     bool useCache = true,
+    bool cache = true,
   }) async {
     final database = _database;
-    if (useCache && database != null) {
+    if (cache && useCache && database != null) {
       try {
         final cached = database.readSearchCache(
           keyword: keyword,
@@ -277,7 +289,7 @@ class SiteService {
       HealthAction.home,
       () => runtime.search(site, keyword: keyword, page: page, quick: quick),
     );
-    if (database != null) {
+    if (cache && database != null) {
       try {
         database.cacheSearch(
           keyword: keyword,

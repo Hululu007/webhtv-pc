@@ -179,7 +179,15 @@ void main() {
   /// 真实文件/网络 I/O 的完成回调不会被 `pumpAndSettle` 推进；而有些 I/O 又是在
   /// 弹窗关闭、下一帧之后才**开始**的（例如"开启服务端"要先关确认框）。
   /// 只给一次 `runAsync` 窗口会在这种情形下漏掉后续 I/O，测试就挂住。
-  Future<void> settleIo(WidgetTester tester, {int rounds = 25}) async {
+  ///
+  /// 轮数为什么从 25 提到 90：`UiPreferencesStore._persist` 现在是**串行队列**
+  /// （它修复了一个真实数据丢失缺陷：并发写盘会在同一个 `.tmp` 上互相删除/改名，
+  /// 把整个 `settings.json` 弄丢）。串行化后一次偏好写入可能要排在前面若干次
+  /// 写入之后，25 轮 × 16ms ≈ 400ms 的预算在高负载下不再够用，这些用例会以
+  /// 「受控 IO 泵没推进到」的形式偶发失败（实测 3 次里挂 1 次）。
+  /// 90 轮 ≈ 1.4s 只是放宽等待预算，**没有放松任何断言**；
+  /// 不能靠回退串行化来解决——那会重新引入丢设置文件的缺陷。
+  Future<void> settleIo(WidgetTester tester, {int rounds = 90}) async {
     for (var round = 0; round < rounds; round++) {
       await tester.pump(const Duration(milliseconds: 16));
       await tester.runAsync(
@@ -191,6 +199,15 @@ void main() {
 
   /// 点一个会触发**真实 I/O** 的控件并等它落地。
   Future<void> tapIo(WidgetTester tester, Finder finder) async {
+    // **先滚到可见再点。**
+    //
+    // 设置页在宽窗口下被收进限宽内容列（`formPagePadding`），内容变窄 →
+    // 文字换行变多 → 整页变高。固定视口里靠后的控件会落到可视区外，
+    // `tap` 打空但**不报错**，错误推迟到"找不到本该弹出的对话框按钮"才炸。
+    //
+    // 这里是**共用的**点击助手，所以一处修好，所有调用点都稳。
+    await tester.ensureVisible(finder);
+    await tester.pumpAndSettle();
     await tester.tap(finder);
     await settleIo(tester);
   }
@@ -198,7 +215,7 @@ void main() {
   /// 执行会触发真实 I/O 的状态操作（授权、开关、导入、推送）。
   Future<T> runIo<T>(WidgetTester tester, Future<T> Function() action) async {
     final result = await tester.runAsync(action);
-    await settleIo(tester, rounds: 2);
+    await settleIo(tester, rounds: 8);
     return result as T;
   }
 

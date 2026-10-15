@@ -23,6 +23,7 @@ import '../core/tmdb_media.dart';
 import '../core/tmdb_season.dart';
 import '../state/tmdb_state.dart';
 import 'app.dart' show PosterImage;
+import 'common.dart';
 
 /// 季度绑定的语义化选择类型定义在纯逻辑层（`lib/core/tmdb_season.dart`），
 /// 此处重导出，使 UI 层与既有门禁用例只需依赖一个模块。
@@ -165,7 +166,7 @@ class TmdbStatusBar extends StatelessWidget {
           SizedBox(
             width: 18,
             height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
+            child: LoadingBlock(center: false, size: 18),
           ),
         ];
       case TmdbLoadPhase.failed:
@@ -464,7 +465,7 @@ class _TmdbMatchDialogState extends State<TmdbMatchDialog> {
                   const SizedBox(
                     width: 18,
                     height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: LoadingBlock(center: false, size: 18),
                   ),
               ],
             ),

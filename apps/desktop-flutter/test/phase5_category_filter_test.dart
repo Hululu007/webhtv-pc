@@ -21,6 +21,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:webhtv_pc/core/http_api.dart';
+import 'package:webhtv_pc/core/protocol.dart';
 import 'package:webhtv_pc/services/app_paths.dart';
 import 'package:webhtv_pc/services/log_service.dart';
 import 'package:webhtv_pc/state/app_state.dart';
@@ -512,6 +513,95 @@ void main() {
         groups.first.options.map((o) => o.value).toList(),
         ['', '分类专属2'],
       );
+    });
+
+    test('多组且无一组对应当前 type_id 时，合并结果按维度 key 去重（真实缺陷回归锁）', () async {
+      // 背景（用户反馈 2026-10-13）：木偶[盘] 的 `115臻享`（t=25）拿不到自己的
+      // 那一组，于是走"合并全部"分支；而各键下都有 `剧情/地区/时间/字母/排序`
+      // 这些**同名维度**，合并后整条筛选栏把同一批维度画了三遍
+      // （用户截图里 5 组维度重复出现 3 次）。
+      await boot(
+        handler: (uri, _) => uri.queryParameters.containsKey('t')
+            ? _categoryPayload(uri.queryParameters['t']!)
+            : {
+                'class': [
+                  {'type_id': '25', 'type_name': '115臻享'},
+                ],
+                // 三个键，都**不含** '25'，且各有同名维度。
+                'filters': {
+                  '1': [
+                    {
+                      'key': 'class',
+                      'name': '剧情',
+                      'value': [
+                        {'n': '全部', 'v': ''},
+                        {'n': '喜剧', 'v': '喜剧'},
+                      ],
+                    },
+                    {
+                      'key': 'area',
+                      'name': '地区',
+                      'value': [
+                        {'n': '全部', 'v': ''},
+                        {'n': '大陆', 'v': '大陆'},
+                      ],
+                    },
+                  ],
+                  '2': [
+                    {
+                      'key': 'class',
+                      'name': '剧情',
+                      'value': [
+                        {'n': '全部', 'v': ''},
+                        {'n': '科幻', 'v': '科幻'},
+                      ],
+                    },
+                    {
+                      'key': 'year',
+                      'name': '时间',
+                      'value': [
+                        {'n': '全部', 'v': ''},
+                        {'n': '2026', 'v': '2026'},
+                      ],
+                    },
+                  ],
+                  '3': [
+                    {
+                      'key': 'class',
+                      'name': '剧情',
+                      'value': [
+                        {'n': '全部', 'v': ''},
+                        {'n': '悬疑', 'v': '悬疑'},
+                      ],
+                    },
+                  ],
+                },
+                'list': [
+                  {'vod_id': 'v1', 'vod_name': '影片一'},
+                ],
+              },
+      );
+
+      // 前置条件：三个键都不含 25，所以一定会走"合并全部"那条分支。
+      final filters = state.homeResult!.filters;
+      expect(filters.length, 3, reason: '前置条件：三个键都不含 25');
+
+      // 直接调用**生产代码**（`mergeFilterGroups`），不照抄逻辑。
+      // 第一版照抄了一遍同样的去重再断言——那种测试测的是测试自己：
+      // 把生产代码里的去重删掉，它照样通过（实测如此，已修正）。
+      final merged = mergeFilterGroups(filters.values);
+      expect(
+        merged.map((g) => g.key).toList(),
+        ['class', 'area', 'year'],
+        reason: '同名维度只应出现一次；重复会让整条筛选栏画三遍',
+      );
+      expect(
+        merged.map((g) => g.key).toSet().length,
+        merged.length,
+        reason: '维度 key 必须互不相同',
+      );
+      // 保留先出现的那个：'1' 的 class 是站点给的第一组。
+      expect(merged.first.options.map((o) => o.name).toList(), ['全部', '喜剧']);
     });
 
     test('首页 filters 缺少当前 type_id 时回退到唯一那一组（宁多不少）', () async {

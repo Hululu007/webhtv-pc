@@ -18,7 +18,9 @@ import '../core/epg.dart';
 import '../core/protocol.dart';
 import '../services/live_service.dart';
 import '../state/app_state.dart';
+import 'common.dart';
 import 'player_page.dart';
+import 'tokens.dart';
 
 class LivePage extends StatefulWidget {
   const LivePage({super.key, required this.state, this.clock});
@@ -268,9 +270,9 @@ class _LivePageState extends State<LivePage> {
         const VerticalDivider(width: 1),
         Expanded(
           child: switch (state) {
-            null => const Center(child: CircularProgressIndicator()),
+            null => const LoadingBlock(),
             _SourceState(loading: true) =>
-              const Center(child: CircularProgressIndicator()),
+              const LoadingBlock(),
             _SourceState(error: final error?) => _LiveErrorView(
               error: error,
               onRetry: () => unawaitedLoad(selected, refresh: true),
@@ -362,7 +364,7 @@ class _SourceList extends StatelessWidget {
                     ? const SizedBox(
                         width: 14,
                         height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                        child: LoadingBlock(center: false),
                       )
                     : null,
                 onTap: () => onSelect(source),
@@ -429,7 +431,10 @@ class _PlaylistView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (playlist.groups.isEmpty) {
-      return const Center(child: Text('该直播源没有解析出任何频道'));
+      return const EmptyState(
+        icon: Icons.tv_off_outlined,
+        title: '该直播源没有解析出任何频道',
+      );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -539,7 +544,7 @@ class _EpgStatusBar extends StatelessWidget {
             const SizedBox(
               width: 14,
               height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2),
+              child: LoadingBlock(center: false),
             )
           else
             IconButton(
@@ -811,16 +816,28 @@ class _LiveErrorView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(AppSpace.xl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.error_outline, size: 32),
-            const SizedBox(height: 12),
-            Text(error.userMessage, textAlign: TextAlign.center),
-            const SizedBox(height: 12),
+            // 错误图标必须承载**错误色相**：原来不给颜色，走框架默认的
+            // `onSurface`，于是错误态看起来和普通空态一样，
+            // 看不出"这里出事了"（与 `_EmptyHint` 曾经用框架灰是同类问题）。
+            Icon(
+              Icons.error_outline,
+              size: 32,
+              color: context.semanticColors.statusFailed,
+            ),
+            const SizedBox(height: AppSpace.md),
+            Text(
+              error.userMessage,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium,
+            ),
+            const SizedBox(height: AppSpace.md),
             FilledButton.icon(
               onPressed: onRetry,
               icon: const Icon(Icons.refresh),
@@ -838,26 +855,10 @@ class _LiveEmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.live_tv_outlined, size: 36),
-            const SizedBox(height: 12),
-            Text(
-              '当前配置没有直播源',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              '在配置里添加 lives 字段（M3U/TXT/JSON），或导入包含直播源的配置。',
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
-      ),
+    return const EmptyState(
+      icon: Icons.live_tv_outlined,
+      title: '当前配置没有直播源',
+      message: '在配置里添加 lives 字段（M3U/TXT/JSON），或导入包含直播源的配置。',
     );
   }
 }
