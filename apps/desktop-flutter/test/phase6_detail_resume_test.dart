@@ -299,6 +299,7 @@ void main() {
       required Vod vod,
       String historyFlag = '',
       String historyEpisodeId = '',
+      Vod? foreignDetailVod,
     }) async {
       tester.view.physicalSize = const Size(1400, 2000);
       tester.view.devicePixelRatio = 1.0;
@@ -314,7 +315,10 @@ void main() {
       // `loadDetail` 在没有站点服务时提前返回（`app_state.dart` 的
       // `service == null || site == null`），所以这份注入不会被页面自身的
       // 详情请求清掉——与 `phase3_detail_page_test` 的做法一致。
-      state.seedDetailForTest(vod: vod);
+      //
+      // 传 `foreignDetailVod` 则注入**别的影片**的详情，用来造
+      // `belongs == false`（详情未到达 / 残留）——见「不切线路」那个用例。
+      state.seedDetailForTest(vod: foreignDetailVod ?? vod);
       await tester.pumpWidget(
         MaterialApp(
           home: DetailPage(
@@ -416,6 +420,40 @@ void main() {
         find.byKey(const ValueKey('tmdb-line-线路一')),
       );
       expect(first.selected, isTrue);
+    });
+
+    testWidgets('详情未到达（残留的别的影片详情）→ 不切线路', (tester) async {
+      // **这是 `belongs` 守卫的唯一钉子。**
+      //
+      // 为什么必须单独有它：上面 5 个用例全部走 `belongs == true`。
+      // 若只删掉守卫的 `belongs &&`（回到 `lines.isNotEmpty`），
+      // 那 5 个用例照样全过——本用例才会失败。
+      //
+      // 关键设计：注入的详情属于**别的影片**，因此 `belongs == false`
+      // 但 `vod` 回退到 `widget.vod`、其 `lines` 是**完整**的两条线路。
+      // 于是历史能解析出 `matched == true`（线路二 + 集 URL 命中）——
+      // 此时**仍然不得**切线路，因为本页详情尚未到达。
+      await pumpDetail(
+        tester,
+        vod: twoLineVod,
+        historyFlag: '线路二',
+        historyEpisodeId: 'http://y/e1',
+        foreignDetailVod: Vod(
+          vodId: 'other-999',
+          vodName: '另一部剧',
+          vodPlayFrom: '线路X',
+          vodPlayUrl: '第1集\$http://z/e1',
+        ),
+      );
+
+      final first = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路一')),
+      );
+      expect(first.selected, isTrue, reason: '详情未到达时不得切线路');
+      final second = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路二')),
+      );
+      expect(second.selected, isFalse);
     });
   });
 }
