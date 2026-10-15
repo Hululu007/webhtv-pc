@@ -4192,6 +4192,31 @@ void main() {
       isTrue,
       reason: 'TMDB 必须匹配成功，否则 AI 分析没有季集数输入',
     );
+    await revealEpisodeSection(tester);
+  }
+
+  /// 滚过满屏 hero，直到底部的剧集/季度区块挂载。
+  ///
+  /// **为什么必须滚**：`DetailPage` 的背景 hero 是满屏的，正文从第二屏开始，
+  /// 而正文是懒加载 `ListView`——不滚过去，正文里的 key
+  /// （`ai-season-progress` 等）根本没挂载，`findsOneWidget` 会失败。
+  ///
+  /// 这是 `DetailPage` **全页** widget 测试的普遍前置条件：
+  /// `phase3_detail_page_test.dart` 用 `scrollPastHero`、
+  /// `plans/02` 的 Task 3–6 用同样的「找不到就继续拖」循环。
+  /// 只 pump **子组件**（`TmdbDetailView` / `TmdbSeasonSelector` /
+  /// `TmdbEpisodeStrip`）的测试**不需要**它——那些测试没有 hero。
+  Future<void> revealEpisodeSection(WidgetTester tester) async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      if (find
+          .byKey(const ValueKey('tmdb-season-context'))
+          .evaluate()
+          .isNotEmpty) {
+        return;
+      }
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
+      await tester.pump();
+    }
   }
 
   /// 直接跑一次 AI 分析（绕开需要点开弹窗的步骤）。
