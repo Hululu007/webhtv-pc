@@ -961,8 +961,13 @@ git commit -m "新增：DetailPage 接受历史参数并自动选历史线路（
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `test/phase6_detail_resume_test.dart` 追加（import 区加
-`import 'package:webhtv_pc/ui/player_page.dart';`）：
+在 `test/phase6_detail_resume_test.dart` 追加（**无需新增任何 import**——
+该文件已有 `dart:io` / `material` / `app_paths` / `log_service` / `app_state` /
+`browse_pages` / `history_view` / `protocol` / `flutter_test`，本任务的用例只用这些；
+**不要**加 `player_page.dart`，本任务的用例不引用播放器页）：
+
+> **为什么复用局部 `setUp`**：Dart 的 `group` 不共享 `setUp` 变量，
+> 所以这一组要自己声明一套（与上一组结构相同）。
 
 ```dart
   group('首屏按钮接历史（design/02 §3）', () {
@@ -1007,7 +1012,22 @@ git commit -m "新增：DetailPage 接受历史参数并自动选历史线路（
         MaterialApp(home: DetailPage(state: appState, vod: vod)),
       );
       await tester.pump();
+      // **注入「本页详情已到达」**：否则 `state.detailResult` 为 null
+      // （fake-async 区 HTTP 固定失败），`belongs` 恒为 false。
+      //
+      // 注：hero 按钮**本身**不依赖它（渲染条件只有 `lines.isNotEmpty`，
+      // 而 `widget.vod` 自带两集），但本任务断言的是 `design/02` §3 描述的
+      // 「详情到达后用历史决定文案」路径——不注入就是在测另一条路。
+      // 依据：`loadDetail` 在无站点服务时**提前返回**（`app_state.dart:2116`，
+      // 早于 `_detailResult = null`），注入不会被页面自身请求清掉。
+      appState.seedDetailForTest(vod: vod);
+      await tester.pump();
     }
+
+    // **不要滚过 hero**：hero 按钮在**首屏**（`heroActions` 是 hero 的一部分），
+    // `phase3_detail_page_test.dart` 也是先断言 `detail-hero-play` 存在、
+    // **再** `scrollPastHero`。滚动反而会让懒加载列表销毁 hero，
+    // 使 `findsOneWidget` 失败。
 
     testWidgets('无历史 → 文案「播放第一集」', (tester) async {
       await pump(tester);
@@ -1046,6 +1066,49 @@ git commit -m "新增：DetailPage 接受历史参数并自动选历史线路（
       await pump(tester);
       expect(find.text('播放第一集'), findsOneWidget);
       expect(find.textContaining('继续播放'), findsNothing);
+    });
+
+    testWidgets('点击 hero 播的是历史那一集，不是第 0 集', (tester) async {
+      // **这是 §3.2「点击目标」的唯一钉子。**
+      //
+      // 为什么必须单独有它：上面 3 个用例只断言**渲染的文案**，
+      // 没有一个真的点下去。变异测试实测：把 `onPressed` 里的
+      // `target.episodeIndex` 改回硬编码 `0`（文案保持正确），
+      // 上面 3 个用例**全部照过**——§3.2 的要求一个钉子都没有。
+      //
+      // 探针原理：测试环境无站点服务 → `resolvePlayback` 返回 null →
+      // `_play` 抛 `playbackUrlMissing`，其 `detail` 含
+      // `episode=<集名>`（`browse_pages.dart` 的 `_play` 里），
+      // 经 `userMessage` 渲染成 SnackBar。断言它含 `第2集`。
+      //
+      // 正确实现：`episodeIndex == 1` → detail 含 `第2集` → 通过。
+      // 变异实现（改回 `0`）：detail 含 `第1集` → **失败**。
+      appState.database!.upsertHistory(
+        siteKey: appState.selectedSite?.key ?? '',
+        vodId: 'demo-1',
+        vodName: '剧集甲',
+        flag: '线路一',
+        episodeName: '第2集',
+        episodeId: 'http://x/e2',
+        positionMs: 30000,
+        durationMs: 100000,
+      );
+      await pump(tester);
+
+      await tester.tap(find.byKey(const ValueKey('detail-hero-play')));
+      await tester.pump(); // 让 async 的 _play 跑到抛错
+      await tester.pump(const Duration(milliseconds: 100)); // 让 SnackBar 出现
+
+      expect(
+        find.textContaining('第2集'),
+        findsWidgets,
+        reason: '§3.2：点击必须播历史命中那一集，不是第 0 集',
+      );
+      expect(
+        find.textContaining('第1集'),
+        findsNothing,
+        reason: '变异实现（硬编码 0）会在这里失败',
+      );
     });
   });
 ```
@@ -1105,9 +1168,12 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 
 ```dart
   /// 首屏按钮文案（`docs/phase6/design/02` §3.1）。
+  ///
+  /// **不要**加 `if (!target.matched) return '播放第一集';` 这样的提前返回：
+  /// `historyPlayLabel` 内部已按 `matched` 判断（`!matched` 时必定回落 `fallback`），
+  /// 再加一次是「两处判断会漂移」（§3.1 的原文理由），而且白白多一次 DB 点查。
   String _heroPlayLabel(List<VodPlayLine> lines, Vod vod) {
     final target = _resumeTarget(lines);
-    if (!target.matched) return '播放第一集';
     // 续播位置用既有判定：它已把 completed 与"位置过短"一起处理。
     final resume = widget.state.resumePositionFor(
       siteKey: widget.state.selectedSite?.key ?? '',
@@ -1126,7 +1192,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（25 个用例：Task 1–3 的 22 + 本任务 3）。
+预期：`All tests passed!`（26 个用例：Task 1–3 的 22 + 本任务 4）。
 
 - [ ] **Step 5: 提交**
 
@@ -1332,7 +1398,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（27 个用例：Task 1–4 的 25 + 本任务 2）。
+预期：`All tests passed!`（28 个用例：Task 1–4 的 26 + 本任务 2）。
 
 确认没打破线路 chip 的既有门禁：
 
@@ -1656,7 +1722,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（29 个用例：Task 1–5 的 27 + 本任务 2）。
+预期：`All tests passed!`（30 个用例：Task 1–5 的 28 + 本任务 2）。
 
 确认没打破剧集卡门禁：
 
