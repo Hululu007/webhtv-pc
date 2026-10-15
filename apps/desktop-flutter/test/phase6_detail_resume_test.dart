@@ -1,0 +1,184 @@
+/// 详情页从历史恢复播放的解析（`docs/phase6/design/02` §2）。
+///
+/// 纯逻辑，无 Flutter 依赖：线路三级匹配与"歧义就不猜"是本轮最容易写错的
+/// 语义，必须在无窗口环境下锁死。
+library;
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:webhtv_pc/core/history_view.dart';
+import 'package:webhtv_pc/core/protocol.dart';
+
+void main() {
+  VodPlayLine lineOf(
+    String flag,
+    List<(String, String)> episodes, {
+    String? sourceFlag,
+  }) => VodPlayLine(
+    flag: flag,
+    sourceFlag: sourceFlag,
+    episodes: [
+      for (final (name, url) in episodes) VodEpisode(name: name, url: url),
+    ],
+  );
+
+  /// 调用助手：默认是「没有历史」（三个字段全空）。
+  HistoryResumeTarget resolve({
+    String flag = '',
+    String episodeId = '',
+    String episodeName = '',
+    required List<VodPlayLine> lines,
+  }) => resolveHistoryTarget(
+    historyFlag: flag,
+    historyEpisodeId: episodeId,
+    historyEpisodeName: episodeName,
+    lines: lines,
+  );
+
+  final twoLines = [
+    lineOf('线路一', [('第1集', 'http://x/e1'), ('第2集', 'http://x/e2')]),
+    lineOf('线路二', [('第1集', 'http://y/e1'), ('第2集', 'http://y/e2')]),
+  ];
+
+  group('无历史', () {
+    test('返回第一条线路第 0 集，matched=false', () {
+      final target = resolve(lines: twoLines);
+      expect(target.flag, '线路一');
+      expect(target.episodeIndex, 0);
+      expect(target.matched, isFalse);
+    });
+
+    test('没有线路时返回空目标，不抛异常', () {
+      final target = resolve(lines: const []);
+      expect(target.flag, '');
+      expect(target.episodeIndex, 0);
+      expect(target.matched, isFalse);
+    });
+  });
+
+  group('第一级：flag 精确命中', () {
+    test('flag 与集 URL 都对上 → 命中', () {
+      final target = resolve(
+        flag: '线路二',
+        episodeId: 'http://y/e2',
+        lines: twoLines,
+      );
+      expect(target.flag, '线路二');
+      expect(target.episodeIndex, 1);
+      expect(target.episodeName, '第2集');
+      expect(target.matched, isTrue);
+    });
+
+    test('flag 命中但该线路不含这一集 → 降级到第二级', () {
+      // 线路二不含 z/e9，但线路一也不含 → 最终退回第一条线路。
+      final target = resolve(
+        flag: '线路二',
+        episodeId: 'http://z/e9',
+        lines: twoLines,
+      );
+      expect(target.flag, '线路一');
+      expect(target.episodeIndex, 0);
+      expect(target.matched, isFalse);
+    });
+
+    test('playbackFlag（sourceFlag）也能命中', () {
+      final lines = [
+        lineOf('线路一', [('第1集', 'http://x/e1')]),
+        lineOf('合并线路', [('第1集', 'http://y/e1')], sourceFlag: '原始flag'),
+      ];
+      final target = resolve(
+        flag: '原始flag',
+        episodeId: 'http://y/e1',
+        lines: lines,
+      );
+      expect(target.flag, '合并线路', reason: '按 playbackFlag 匹配，返回展示 flag');
+      expect(target.matched, isTrue);
+    });
+  });
+
+  group('第二级：集 URL 唯一命中', () {
+    test('flag 不认识但集 URL 唯一 → 命中那条线路', () {
+      final target = resolve(
+        flag: '已不存在的线路',
+        episodeId: 'http://y/e2',
+        lines: twoLines,
+      );
+      expect(target.flag, '线路二');
+      expect(target.episodeIndex, 1);
+      expect(target.matched, isTrue);
+    });
+
+    test('集 URL 在多条线路里都出现 → 歧义，不猜', () {
+      final ambiguous = [
+        lineOf('线路一', [('第1集', 'http://same/e1')]),
+        lineOf('线路二', [('第1集', 'http://same/e1')]),
+      ];
+      final target = resolve(
+        flag: '不存在的线路',
+        episodeId: 'http://same/e1',
+        lines: ambiguous,
+      );
+      expect(target.flag, '线路一', reason: '歧义时退回第一条，不猜');
+      expect(target.matched, isFalse);
+    });
+  });
+
+  group('第三级：线路名命中', () {
+    test('flag 命中但集对不上 → 线路命中、不算完整命中', () {
+      // 历史 episodeId 是空串（旧数据）→ 第一级因"不含该集"失败，
+      // 第二级因 URL 为空无法匹配，第三级按 flag 命中。
+      final target = resolve(flag: '线路二', lines: twoLines);
+      expect(target.flag, '线路二');
+      expect(target.episodeIndex, 0, reason: '集匹配不上时取第 0 集');
+      expect(target.matched, isFalse, reason: '线路命中但集没命中 → 不算完整命中');
+    });
+  });
+
+  group('集匹配', () {
+    test('URL 优先于集名', () {
+      final lines = [
+        lineOf('线路一', [('第9集', 'http://x/e1'), ('第2集', 'http://x/e2')]),
+      ];
+      final target = resolve(
+        flag: '线路一',
+        episodeId: 'http://x/e2',
+        episodeName: '第9集',
+        lines: lines,
+      );
+      expect(target.episodeIndex, 1, reason: 'URL 精确匹配优先于集名');
+    });
+
+    test('URL 匹配不上时退回集名', () {
+      final lines = [
+        lineOf('线路一', [('第1集', 'http://x/e1'), ('第2集', 'http://x/e2')]),
+      ];
+      final target = resolve(
+        flag: '线路一',
+        episodeId: 'http://stale/old',
+        episodeName: '第2集',
+        lines: lines,
+      );
+      expect(target.episodeIndex, 1, reason: '集名兜底');
+    });
+
+    test('都不匹配时取第 0 集且 matched=false', () {
+      final target = resolve(
+        flag: '线路一',
+        episodeId: 'http://stale/old',
+        episodeName: '第99集',
+        lines: twoLines,
+      );
+      expect(target.flag, '线路一');
+      expect(target.episodeIndex, 0);
+      expect(target.matched, isFalse);
+    });
+  });
+
+  group('firstEpisodeOf', () {
+    test('有线路时返回第一条线路第 0 集', () {
+      final target = HistoryResumeTarget.firstEpisodeOf(twoLines);
+      expect(target.flag, '线路一');
+      expect(target.episodeIndex, 0);
+      expect(target.matched, isFalse);
+    });
+  });
+}
