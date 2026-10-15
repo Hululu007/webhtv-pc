@@ -7,6 +7,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../core/app_error.dart';
+import '../core/history_view.dart';
 import '../core/poster_badge.dart';
 import '../core/protocol.dart';
 import '../core/tmdb_detail_model.dart';
@@ -15,6 +16,7 @@ import '../core/tmdb_media.dart';
 import '../core/tmdb_playback.dart';
 import '../core/tmdb_title.dart';
 import '../services/spider_router.dart';
+import '../services/storage.dart';
 import '../state/app_state.dart';
 import '../state/tmdb_state.dart';
 import 'app.dart';
@@ -962,10 +964,26 @@ class _ScrollFooter extends StatelessWidget {
 
 /// 详情页（§17.2 详情页）。
 class DetailPage extends StatefulWidget {
-  const DetailPage({super.key, required this.state, required this.vod});
+  const DetailPage({
+    super.key,
+    required this.state,
+    required this.vod,
+    this.historyFlag = '',
+    this.historyEpisodeId = '',
+  });
 
   final AppState state;
   final Vod vod;
+
+  /// 历史命中的线路 flag（空串 = 未传入）。
+  ///
+  /// 由历史页传入**用户点的那一条**记录，优先于页面自己查到的"最近一条"：
+  /// 同一部剧有多条历史时，点旧记录却续新记录是错的
+  /// （`docs/phase6/design/02` §7.1）。
+  final String historyFlag;
+
+  /// 历史命中的集入口目标（空串 = 未传入）。
+  final String historyEpisodeId;
 
   @override
   State<DetailPage> createState() => _DetailPageState();
@@ -1079,6 +1097,48 @@ class _DetailPageState extends State<DetailPage> {
     await state.reloadTmdb();
   }
 
+  /// 本页要用的历史记录。
+  ///
+  /// 优先级：**构造参数 > 自己查**（`docs/phase6/design/02` §7.1）。
+  PlaybackHistory? get _history {
+    if (widget.historyFlag.isNotEmpty || widget.historyEpisodeId.isNotEmpty) {
+      return PlaybackHistory(
+        id: 0,
+        siteKey: widget.state.selectedSite?.key ?? '',
+        vodId: widget.vod.vodId,
+        vodName: widget.vod.vodName,
+        vodPic: widget.vod.vodPic,
+        flag: widget.historyFlag,
+        episodeName: '',
+        episodeId: widget.historyEpisodeId,
+        positionMs: 0,
+        durationMs: 0,
+        updatedAt: 0,
+      );
+    }
+    return widget.state.findHistory(
+      siteKey: widget.state.selectedSite?.key ?? '',
+      vodId: widget.vod.vodId,
+    );
+  }
+
+  /// 本页的续播目标（线路 + 集下标）。
+  ///
+  /// 在详情到达后才解析：`_activeLine` 依赖 `lines`，而 `lines` 在详情请求
+  /// 返回前可能是列表页传入的残缺数据，在残缺数据上解析会得出错误线路。
+  ///
+  /// 传三个标量而不是 `PlaybackHistory`：`resolveHistoryTarget` 在纯逻辑层
+  /// （`core/`），不得依赖 `services/storage.dart`。
+  HistoryResumeTarget _resumeTarget(List<VodPlayLine> lines) {
+    final history = _history;
+    return resolveHistoryTarget(
+      historyFlag: history?.flag ?? '',
+      historyEpisodeId: history?.episodeId ?? '',
+      historyEpisodeName: history?.episodeName ?? '',
+      lines: lines,
+    );
+  }
+
   Vod? get _currentVod {
     final result = widget.state.detailResult;
     if (result != null &&
@@ -1188,6 +1248,27 @@ class _DetailPageState extends State<DetailPage> {
         result.list.first.vodId == widget.vod.vodId;
     final vod = belongs ? result.list.first : widget.vod;
     final lines = state.playLinesOf(vod);
+    // 详情到达后自动切到历史线路（`docs/phase6/design/02` §4、§4.1）。
+    //
+    // 为什么在 build 里而不是 initState：详情请求在页面挂载后才完成，
+    // initState 时 lines 还是残缺的。
+    //
+    // **只有 `matched == true` 才切**（`design/02` §4.1）：`matched == false`
+    // 涵盖「无历史」「历史线路在但那一集已消失」两种情形，它们都不该改变
+    // 用户的线路选择——切过去也没有那一集。
+    if (lines.isNotEmpty) {
+      final target = _resumeTarget(lines);
+      // 只在「用户还没手动选过」时应用（`_selectedLineFlag` 为空）。
+      // 用户手动切过线路后，历史不得把选择抢回去。
+      if (target.matched && _selectedLineFlag.isEmpty) {
+        _selectedLineFlag = target.flag;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          state.tmdb.selectLine(target.flag);
+          unawaited(state.reloadTmdb());
+        });
+      }
+    }
     final loading = state.detailPhase == LoadPhase.loading;
     final tmdb = state.tmdb;
     // 头部补位（`04` §3.2）：**仅补位不覆盖**来源已有字段。

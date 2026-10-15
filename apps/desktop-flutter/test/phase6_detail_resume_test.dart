@@ -4,9 +4,16 @@
 /// 语义，必须在无窗口环境下锁死。
 library;
 
+import 'dart:io';
+
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webhtv_pc/core/history_view.dart';
 import 'package:webhtv_pc/core/protocol.dart';
+import 'package:webhtv_pc/services/app_paths.dart';
+import 'package:webhtv_pc/services/log_service.dart';
+import 'package:webhtv_pc/state/app_state.dart';
+import 'package:webhtv_pc/ui/browse_pages.dart';
 
 void main() {
   VodPlayLine lineOf(
@@ -244,6 +251,159 @@ void main() {
         '播放第一集',
         reason: '没有集名就无法表达"继续播放哪一集"',
       );
+    });
+  });
+
+  group('DetailPage 自动选历史线路（design/02 §4）', () {
+    late Directory tempDir;
+    late AppState state;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('webhtv-detail-resume');
+      state = AppState(
+        paths: AppPaths.resolve(
+          overrides: {'roaming': tempDir.path, 'local': tempDir.path},
+        ),
+        log: LogService(),
+      );
+      await state.bootstrap();
+    });
+
+    tearDown(() async {
+      state.dispose();
+      try {
+        await tempDir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    /// 把线路条滚进视口。
+    ///
+    /// `DetailPage` 的背景 hero 是**满屏**的（`TmdbDetailHeader` 实测占满整个
+    /// 视口，与 `phase3_detail_page_test` 的 `scrollPastHero` 同一成因），正文
+    /// 因此从第二屏开始。正文是懒加载 `ListView`，不滚动就不会挂载线路条，
+    /// `find.byKey` 会报 `Bad state: No element`。
+    Future<void> revealLineSelector(WidgetTester tester) async {
+      final selector = find.byKey(const ValueKey('tmdb-line-selector'));
+      for (var attempt = 0; attempt < 20; attempt++) {
+        if (selector.evaluate().isNotEmpty) return;
+        await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
+        await tester.pump();
+      }
+    }
+
+    Future<void> pumpDetail(
+      WidgetTester tester, {
+      required Vod vod,
+      String historyFlag = '',
+      String historyEpisodeId = '',
+    }) async {
+      tester.view.physicalSize = const Size(1400, 2000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: DetailPage(
+            state: state,
+            vod: vod,
+            historyFlag: historyFlag,
+            historyEpisodeId: historyEpisodeId,
+          ),
+        ),
+      );
+      await tester.pump();
+      await revealLineSelector(tester);
+    }
+
+    final twoLineVod = Vod(
+      vodId: 'demo-1',
+      vodName: '剧集甲',
+      vodPlayFrom: '线路一\$\$\$线路二',
+      vodPlayUrl:
+          '第1集\$http://x/e1#第2集\$http://x/e2'
+          '\$\$\$'
+          '第1集\$http://y/e1#第2集\$http://y/e2',
+    );
+
+    testWidgets('传入 historyFlag 时选中该线路的 chip', (tester) async {
+      await pumpDetail(
+        tester,
+        vod: twoLineVod,
+        historyFlag: '线路二',
+        historyEpisodeId: 'http://y/e1',
+      );
+
+      final chip = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路二')),
+      );
+      expect(chip.selected, isTrue);
+      final first = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路一')),
+      );
+      expect(first.selected, isFalse);
+    });
+
+    testWidgets('历史线路已不存在时退回第一条线路，不报错', (tester) async {
+      await pumpDetail(
+        tester,
+        vod: twoLineVod,
+        historyFlag: '已不存在的线路',
+        historyEpisodeId: 'http://nowhere/e1',
+      );
+
+      final first = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路一')),
+      );
+      expect(first.selected, isTrue);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('历史线路在但那一集已消失 → 不切线路（design/02 §4.1）', (tester) async {
+      // 线路二存在，但 http://stale/gone 不在任何线路上 →
+      // §2.1 第 1 级降级、第 2 级因 URL 非空且无命中而止步、第 3 级被前提挡住
+      // → matched == false → **不得**把用户切到线路二（切过去也没有那一集）。
+      await pumpDetail(
+        tester,
+        vod: twoLineVod,
+        historyFlag: '线路二',
+        historyEpisodeId: 'http://stale/gone',
+      );
+
+      final first = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路一')),
+      );
+      expect(first.selected, isTrue, reason: 'matched=false 时保持第一条线路');
+      final second = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路二')),
+      );
+      expect(second.selected, isFalse);
+    });
+
+    testWidgets('旧数据（无集入口）按线路名命中但集未对上 → 不切线路', (tester) async {
+      // historyFlag='线路二' 且 historyEpisodeId=''（旧数据，没有集入口）
+      // → §2.1 第三级按线路名命中 → flag='线路二' 但 matched=false。
+      // 正确实现（target.matched）：**不**切，仍选线路一。
+      // 错误实现（target.flag.isNotEmpty）：会切到线路二 → 本用例失败。
+      await pumpDetail(tester, vod: twoLineVod, historyFlag: '线路二');
+
+      final first = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路一')),
+      );
+      expect(first.selected, isTrue, reason: 'matched=false 时保持第一条线路');
+      final second = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路二')),
+      );
+      expect(second.selected, isFalse);
+    });
+
+    testWidgets('不传历史参数时行为不变（第一条线路）', (tester) async {
+      await pumpDetail(tester, vod: twoLineVod);
+      final first = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路一')),
+      );
+      expect(first.selected, isTrue);
     });
   });
 }
