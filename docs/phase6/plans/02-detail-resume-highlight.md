@@ -1375,7 +1375,9 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
                               key: ValueKey('tmdb-line-recent-${line.flag}'),
                               size: 14,
                             ),
-                            const SizedBox(width: 4),
+                            // **必须用 `AppSpace.xs`（= 4），不要写字面量 `4`**：
+                            // 绑定约束是「间距只用 `AppSpace`，不引入新散值」。
+                            const SizedBox(width: AppSpace.xs),
                           ],
                           Text(
                             episodeCounts.containsKey(line.flag)
@@ -1416,7 +1418,17 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（28 个用例：Task 1–4 的 26 + 本任务 2）。
+预期：`All tests passed!`（29 个用例：Task 1–4 的 26 + 本任务 3）。
+
+> **为什么是 3 个而不是 2 个**：brief 原本只写 2 个用例，但实现阶段做**变异自检**
+> 发现：去掉 `matched` 守卫（`recentFlag: _resumeTarget(lines).flag`）后，
+> 那 2 个用例**全部照过**——因为它们都走 `matched == true`。
+> 于是「`matched == false` 时不得标记」这条要求**一个钉子都没有**。
+> 补的第 3 个用例（「历史线路在但那一集已消失 → 不标」）在变异下会失败。
+>
+> **教训（已第三次出现）**：用例要覆盖判据的**肯定面与否定面**。
+> Task 3（`belongs` 守卫）、Task 4（点击目标）、Task 5（`matched` 守卫）
+> 都是同一个模式：只写肯定路径 → 守卫的反实现照样全绿。
 
 确认没打破线路 chip 的既有门禁：
 
@@ -1740,7 +1752,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（30 个用例：Task 1–5 的 28 + 本任务 2）。
+预期：`All tests passed!`（31 个用例：Task 1–5 的 29 + 本任务 2）。
 
 确认没打破剧集卡门禁：
 
