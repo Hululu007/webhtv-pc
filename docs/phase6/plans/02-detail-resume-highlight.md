@@ -1709,7 +1709,16 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 
 (c) 在 `TmdbEpisodeStrip` 的卡片 key 上补 recent key。因为
 `buttonKey` 必须留给 `OutlinedButton`（门禁要求），recent 标记用
-**剧照的 `stillKey` 派生 key**。在 `_buildEpisodes` 的调用处生成：
+**由渲染下标派生的 key**（`ValueKey('$keyPrefix-recent-$index')`）——
+**不是**从剧照的 `stillKey` 派生。
+
+> **为什么必须用渲染下标、不能用 `stillKey`**（本节原写「用 `stillKey` 派生」，
+> 与 (a) 及测试断言矛盾，**是错的**）：`stillKey` 的形状是
+> `'<keyPrefix>-still-<集号>'`，而集号可能缺失或重复；测试按
+> `'<keyPrefix>-recent-<渲染下标>'` 定位，下标才是稳定唯一的。
+> 派生 key 会让测试断言与实现不一致。
+
+在 `_buildEpisodes` 的调用处生成：
 
 `lib/ui/browse_pages.dart` 的 `_buildEpisodes` 里，把 `TmdbEpisodeStrip(...)`
 改为：
@@ -1726,7 +1735,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
           actionLabel: '播放',
           cardWidth: _episodeCardWidth(context, episodes.length),
           gridMode: _episodeGridMode,
-          recentIndex: _recentRenderedIndex(vod, rawLine, line, ordered),
+          recentIndex: _recentRenderedIndex(vod, rawLine, ordered),
           onTap: (index, _) =>
               _playEpisodeAt(vod, rawLine, line, ordered, index),
         ),
@@ -1739,10 +1748,12 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
   ///
   /// 走「原始下标 → 渲染下标」的换算：`resolveHistoryTarget` 给的是线路
   /// 原始下标，而卡片是按 `ordered`（已季度过滤 + 已倒序）渲染的。
+  ///
+  /// **只收三个参数**：原签名里的 `enrichedLine` 从未被用到（方法体只用
+  /// `rawLine` 与 `ordered`），留着会触发「未使用的参数」这类噪音。
   int _recentRenderedIndex(
     Vod vod,
     VodPlayLine rawLine,
-    VodPlayLine enrichedLine,
     List<VodEpisode> ordered,
   ) {
     final lines = widget.state.playLinesOf(vod);
@@ -1770,7 +1781,23 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（31 个用例：Task 1–5 的 29 + 本任务 2）。
+预期：`All tests passed!`（33 个用例：Task 1–5 的 29 + 本任务 4）。
+
+> **为什么是 4 个而不是 2 个**：brief 原本只写 2 个用例，但实现阶段的
+> **变异自检**发现**两颗守卫都能存活**：
+>
+> | 变异 | 原 2 个用例的结果 | 补的钉子 |
+> | --- | --- | --- |
+> | **B**：删 `!target.matched` 守卫 | 全过 | 「历史线路在但那一集已消失 → 不标」 |
+> | **B2**：删 `rawLine.flag != target.flag` 守卫 | 全过 | 「切到别的线路后不误标」（brief 未提到） |
+>
+> B2 是 brief **没有预见**的缺口：切线路后，历史命中的 `flag` 与当前
+> `rawLine.flag` 不再相等，若不守这一条，选集卡片会把「另一条线路的历史」
+> 标到当前线路上。
+>
+> **教训（第四次出现）**：用例要覆盖判据的**每一个合取项**。
+> Task 3（`belongs`）、Task 4（点击目标）、Task 5（`matched`）、
+> Task 6（`matched` + `rawLine.flag`）都是同一模式。
 
 确认没打破剧集卡门禁：
 

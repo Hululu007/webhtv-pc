@@ -1773,17 +1773,16 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
     final lines = widget.state.playLinesOf(_currentVod ?? widget.vod);
     if (lines.isEmpty) return 0;
     final active = _activeLine(lines);
-    final recent = _recentRenderedIndex(
-      widget.vod,
-      active,
-      widget.state.tmdb.applyEpisodesToLine(active).line,
-      ordered,
-    );
+    // **三个参数**：`_recentRenderedIndex` 在计划 2 Task 6 落地时定为
+    // `(Vod vod, VodPlayLine rawLine, List<VodEpisode> ordered)` ——
+    // 原设计的 `enrichedLine` 参数从未被用到，已被删除（实现时发现）。
+    final recent = _recentRenderedIndex(widget.vod, active, ordered);
     return recent < 0 ? 0 : recent;
   }
 ```
 
-> **硬前置**：`_recentRenderedIndex` 由**计划 2 的 Task 6** 提供。
+> **硬前置**：`_recentRenderedIndex` 由**计划 2 的 Task 6** 提供，
+> 签名是 `(Vod, VodPlayLine, List<VodEpisode>)`（三参）。
 > 本任务必须在计划 2 Task 6 完成之后执行，否则编译失败。
 
 (f) 区间标签用**真实集号**修正（`docs/phase6/design/03` §4.2）。在

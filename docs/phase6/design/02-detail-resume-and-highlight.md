@@ -214,14 +214,37 @@ const TmdbEpisodeCardTile({
 命中时的视觉：
 
 - 卡片外壳（`OutlinedButton`）的 `side` 换成 `primary` 2px 描边；
-- 剧照左上角原有的 `E<n>` 角标**旁边**加一个「上次看到这里」角标
-  （`Icons.history` + 文字，`labelSmall`，底 `primaryContainer`）。
+- 剧照**左下角**加一个「上次看到这里」角标
+  （`Icons.history` + 文字，底 `primaryContainer`）。
+
+> **位置修订（2026-10-14，实现时发现）**：本节原写「剧照左上角原有的 `E<n>`
+> 角标**旁边**」，实现改为**左下角**。理由：左上角已有 `E<n>`、右下角已有评分角标，
+> **左下是唯一空角**；若按原文把新角标挤到 `E<n>` 旁边，两个角标并排的宽度
+> 在窄卡片（约 150px）下会溢出。三个角标因此各占一角，互不重叠。
+>
+> 角标的具体尺寸**跟随相邻两个角标的既有写法**（`left/right: 6`、
+> `top/bottom: 6`、`EdgeInsets.symmetric(horizontal: 6, vertical: 2)`、
+> `BorderRadius.circular(4)`），**不用** `AppSpace`/`AppRadius` token——
+> 那会让同一个 `Stack` 里三个角标的圆角明显不同步。
+> （既有两角标本就用字面量，属**先于本轮**的 `DESIGN.md` 偏差，已记入
+> Phase 6 ledger 交最终审查，不在本任务修。）
 
 **外壳必须仍是 `OutlinedButton`**：既有集成门禁按
 `widget is OutlinedButton && widget.key is ValueKey<String> && key.startsWith('episode-<flag>-')`
 计数来断言「不补集」。换成裸 `InkWell` 会让那条门禁失效。
 
-**剧照必须仍是 16:9**（`DESIGN.md` 的固定比例纪律，测试断言 ±0.1）。
+**角标的 key 挂在 `Container` 上，不是 `OutlinedButton` 上**：
+`ValueKey('tmdb-episode-card-<flag>-recent-<渲染下标>')`。
+它同样 `startsWith('tmdb-episode-card-<flag>-')`，但门禁谓词要求
+`widget is OutlinedButton`，故不误匹配。**这是必须核实的点**。
+
+> **剧照比例（修订）**：本节原写「剧照必须仍是 16:9」。实测
+> `TmdbEpisodeCardTile` 的剧照是 `SizedBox(height: 110)`，**宽度随列宽变化**
+> （150–300），因此**本来就不是** 16:9——这是 `DESIGN.md` 固定比例纪律的
+> 一处**既有偏差**，与本轮标记无关。
+> 修它要同时改卡片高度与网格 `mainAxisExtent`，否则溢出；
+> 而 `DESIGN.md` 的 Metric-Neutral Rule 明确警告净高度变化会把控件挤出
+> 800×600 测试视口。**本轮不修**，记入 ledger 交最终审查。
 
 ---
 
