@@ -10,7 +10,10 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:webhtv_pc/core/history_view.dart';
+import 'package:webhtv_pc/services/app_paths.dart';
+import 'package:webhtv_pc/services/log_service.dart';
 import 'package:webhtv_pc/services/ui_preferences_store.dart';
+import 'package:webhtv_pc/state/app_state.dart';
 
 void main() {
   group('删除模式状态机', () {
@@ -307,6 +310,113 @@ void main() {
       final ui = raw['ui']! as Map<String, Object?>;
       expect(ui['historyClickAction'], UiHistoryClickAction.play,
           reason: '写回的是归一化后的值，不是原样的空白/大写');
+    });
+  });
+
+  group('AppState 暴露点击行为', () {
+    late Directory dir;
+    late AppState state;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('webhtv-history-action');
+      state = AppState(
+        paths: AppPaths.resolve(
+          overrides: {'roaming': dir.path, 'local': dir.path},
+        ),
+        log: LogService(),
+      );
+      await state.bootstrap();
+    });
+
+    tearDown(() async {
+      state.dispose();
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    AppState freshState() => AppState(
+      paths: AppPaths.resolve(
+        overrides: {'roaming': dir.path, 'local': dir.path},
+      ),
+      log: LogService(),
+    );
+
+    test('未 bootstrap 的默认值是 detail', () {
+      final fresh = freshState();
+      expect(fresh.historyClickAction, UiHistoryClickAction.detail);
+      fresh.dispose();
+    });
+
+    test('设置后 getter 立刻反映（不依赖写盘成功）', () async {
+      await state.setHistoryClickAction(UiHistoryClickAction.play);
+      expect(state.historyClickAction, UiHistoryClickAction.play);
+    });
+
+    test('设置会通知监听者', () async {
+      var notified = 0;
+      state.addListener(() => notified++);
+      await state.setHistoryClickAction(UiHistoryClickAction.play);
+      expect(notified, greaterThan(0));
+    });
+
+    // 由 mutant 自检补入：把 notifyListeners() 挪到 store 写入**之前**仍然全绿。
+    // 但那样监听者在收到通知时读到的是旧值，UI 会拿旧模式重建且不会再有第二次
+    // 通知——用户点了「直接播放」界面却还停在「进详情页」。
+    test('通知发出时 getter 已是新值（UI 重建读到新值）', () async {
+      final seen = <String>[];
+      state.addListener(() => seen.add(state.historyClickAction));
+
+      await state.setHistoryClickAction(UiHistoryClickAction.play);
+
+      expect(seen, isNotEmpty, reason: '至少要通知一次');
+      expect(seen, everyElement(UiHistoryClickAction.play),
+          reason: '通知期间读到的必须是新值，否则 UI 重建渲染旧模式且不再刷新');
+    });
+
+    // 以下用例由 mutant 自检补入：原 brief 三例只覆盖「store 已装配且值合法」，
+    // 「getter 丢掉默认回落」「setter 不做归一化」「通知早于落定」三条实现被改坏
+    // 仍然全绿。
+
+    test('未 bootstrap 时 set 返回 false 且不抛（无 store 可写）', () async {
+      final fresh = freshState();
+      await expectLater(
+        fresh.setHistoryClickAction(UiHistoryClickAction.play),
+        completion(isFalse),
+      );
+      expect(fresh.historyClickAction, UiHistoryClickAction.detail,
+          reason: '没有 store，无法记住任何选择');
+      fresh.dispose();
+    });
+
+    test('setter 传非法值归一到 detail，不把脏值透给 getter', () async {
+      await state.setHistoryClickAction('nonsense');
+      expect(state.historyClickAction, UiHistoryClickAction.detail);
+
+      await state.setHistoryClickAction('  PLAY  ');
+      expect(state.historyClickAction, UiHistoryClickAction.play,
+          reason: '大小写/空白归一化后才是生效值');
+    });
+
+    test('getter 转发的是归一化后的落盘值（重启后仍生效）', () async {
+      final settings = AppPaths.resolve(
+        overrides: {'roaming': dir.path, 'local': dir.path},
+      ).settingsPath;
+      final file = File(settings);
+      await file.create(recursive: true);
+      await file.writeAsString('{"ui":{"historyClickAction":"  PLAY  "}}');
+
+      final restarted = freshState();
+      await restarted.bootstrap();
+      expect(restarted.historyClickAction, UiHistoryClickAction.play);
+      restarted.dispose();
+
+      await file.writeAsString('{"ui":{"historyClickAction":"bogus"}}');
+      final fallback = freshState();
+      await fallback.bootstrap();
+      expect(fallback.historyClickAction, UiHistoryClickAction.detail,
+          reason: '文件里的脏值必须回落默认，不能让历史页拿到无法识别的模式');
+      fallback.dispose();
     });
   });
 }

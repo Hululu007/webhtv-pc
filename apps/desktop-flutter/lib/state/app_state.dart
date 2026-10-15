@@ -22,6 +22,7 @@ import '../core/cat_http.dart';
 import '../core/cat_source.dart';
 import '../core/config_loader.dart';
 import '../core/config_parser.dart';
+import '../core/history_view.dart';
 import '../core/http_api.dart';
 import '../core/playback.dart';
 import '../core/playback_diagnostics.dart';
@@ -514,6 +515,29 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     final store = _uiPreferences;
     if (store == null) return false;
     final ok = await store.rememberThemeMode(mode);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 点击历史记录的行为（`docs/phase6/design/01` §4）：`detail` 进详情页 /
+  /// `play` 直接播放。
+  ///
+  /// 与 [themeMode] 同构：这一层只暴露原始字符串，归一化由 store 负责，
+  /// UI 只依赖 `AppState`。
+  ///
+  /// `_uiPreferences` 为 null（未 bootstrap）时退回默认 `detail`，
+  /// 不让历史页因偏好未装配而崩。
+  String get historyClickAction =>
+      _uiPreferences?.historyClickAction ?? UiHistoryClickAction.detail;
+
+  /// 持久化点击历史行为。
+  ///
+  /// 与 [setThemeMode] 同构：`store` 会把非法值归一到 `detail`，写盘失败不影响
+  /// 当前会话（内存里已生效），但无论如何都通知 UI 重建。
+  Future<bool> setHistoryClickAction(String mode) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberHistoryClickAction(mode);
     notifyListeners();
     return ok;
   }
