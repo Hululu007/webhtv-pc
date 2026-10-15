@@ -574,6 +574,7 @@ class TmdbLineSelector extends StatelessWidget {
     required this.selectedFlag,
     this.episodeCounts = const {},
     this.onChanged,
+    this.recentFlag = '',
   });
 
   /// 全部线路（按详情页顺序）。
@@ -581,6 +582,12 @@ class TmdbLineSelector extends StatelessWidget {
 
   /// 当前线路的 `flag`（空串表示未选中）。
   final String selectedFlag;
+
+  /// 历史命中的线路 `flag`（空串 = 无标记）。
+  ///
+  /// 标记**不抢**选中态：用户手动切走线路后标记仍在，能切回来
+  /// （`docs/phase6/design/02` §5）。
+  final String recentFlag;
 
   /// 每条线路的**渲染集数**（已按当前季度过滤）。
   final Map<String, int> episodeCounts;
@@ -609,17 +616,42 @@ class TmdbLineSelector extends StatelessWidget {
               child: Row(
                 children: [
                   for (final line in lines) ...[
-                    ChoiceChip(
-                      key: ValueKey('tmdb-line-${line.flag}'),
-                      label: Text(
-                        episodeCounts.containsKey(line.flag)
-                            ? '${line.displayName}（${episodeCounts[line.flag]} 集）'
-                            : line.displayName,
+                    Tooltip(
+                      // `message` 是字符串，**不**产生 `Text` widget，
+                      // 因此不会干扰按文本断言的既有门禁。
+                      message: line.flag == recentFlag
+                          ? '最近播放'
+                          : line.displayName,
+                      child: ChoiceChip(
+                        key: ValueKey('tmdb-line-${line.flag}'),
+                        label: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // 「最近播放」标记（`design/02` §5）：在标签**前**加
+                            // 14px 图标。标记**不抢**选中态——用户手动切走后
+                            // 标记仍在，能切回来。key 挂在 `Icon` 上（不是
+                            // `ChoiceChip` 上），既有的 `tmdb-line-*` 门禁
+                            // 按「chip 本身是 ChoiceChip」计数，不受影响。
+                            if (line.flag == recentFlag) ...[
+                              Icon(
+                                Icons.history,
+                                key: ValueKey('tmdb-line-recent-${line.flag}'),
+                                size: 14,
+                              ),
+                              const SizedBox(width: AppSpace.xs),
+                            ],
+                            Text(
+                              episodeCounts.containsKey(line.flag)
+                                  ? '${line.displayName}（${episodeCounts[line.flag]} 集）'
+                                  : line.displayName,
+                            ),
+                          ],
+                        ),
+                        selected: line.flag == selectedFlag,
+                        onSelected: onChanged == null
+                            ? null
+                            : (_) => onChanged!.call(line),
                       ),
-                      selected: line.flag == selectedFlag,
-                      onSelected: onChanged == null
-                          ? null
-                          : (_) => onChanged!.call(line),
                     ),
                     const SizedBox(width: 8),
                   ],

@@ -1530,6 +1530,13 @@ class _DetailPageState extends State<DetailPage> {
                         TmdbLineSelector(
                           lines: lines,
                           selectedFlag: _activeLine(lines).flag,
+                          // 「最近播放」标记（`design/02` §5）：只有
+                          // `matched == true` 才标——`matched == false` 涵盖
+                          // 「无历史」与「历史线路在但那一集已消失」两种情形，
+                          // 后者标出来会把用户引到一条没有那一集的线路上。
+                          recentFlag: _resumeTarget(lines).matched
+                              ? _resumeTarget(lines).flag
+                              : '',
                           episodeCounts: _episodeCountsByLine(lines),
                           onChanged: (line) => _selectLine(line, lines),
                         ),

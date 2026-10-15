@@ -591,4 +591,138 @@ void main() {
       );
     });
   });
+
+  group('线路 chip 的「最近播放」标记（design/02 §5）', () {
+    late Directory dir;
+    late AppState appState;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('webhtv-line-recent');
+      appState = AppState(
+        paths: AppPaths.resolve(
+          overrides: {'roaming': dir.path, 'local': dir.path},
+        ),
+        log: LogService(),
+      );
+      await appState.bootstrap();
+    });
+
+    tearDown(() async {
+      appState.dispose();
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    final vod = Vod(
+      vodId: 'demo-1',
+      vodName: '剧集甲',
+      // **`$$$` 必须转义**：`$` 在 Dart 字符串里是插值前缀，
+      // 写成 `'线路一$$$线路二'` 会编译失败
+      // （`A '$' has special meaning inside a string`）。
+      vodPlayFrom: '线路一\$\$\$线路二',
+      vodPlayUrl: '第1集\$http://x/e1\$\$\$第1集\$http://y/e1',
+    );
+
+    /// 装页面、注入详情、滚到线路条。
+    ///
+    /// **三件事缺一不可**（Task 3–4 的教训）：
+    /// 1. `seedDetailForTest` —— 否则 `detailResult` 为 null、`belongs` 恒为 false，
+    ///    走的不是 `design/02` §4 描述的「详情到达后」路径；
+    /// 2. 放大视口 —— 800×600 下线路条会被挤出可见区；
+    /// 3. **滚过满屏 hero** —— 线路条在正文（第二屏），而正文是懒加载
+    ///    `ListView`，不滚过去 `tmdb-line-selector` 根本没挂载，
+    ///    `tester.widget<ChoiceChip>` 会抛 `Bad state: No element`。
+    Future<void> pumpLineStrip(
+      WidgetTester tester, {
+      String historyFlag = '线路二',
+      String historyEpisodeId = 'http://y/e1',
+    }) async {
+      tester.view.physicalSize = const Size(1400, 2000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: DetailPage(
+            state: appState,
+            vod: vod,
+            historyFlag: historyFlag,
+            historyEpisodeId: historyEpisodeId,
+          ),
+        ),
+      );
+      await tester.pump();
+      appState.seedDetailForTest(vod: vod);
+      await tester.pump();
+      for (var attempt = 0; attempt < 20; attempt++) {
+        if (find
+            .byKey(const ValueKey('tmdb-line-selector'))
+            .evaluate()
+            .isNotEmpty) {
+          return;
+        }
+        await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
+        await tester.pump();
+      }
+    }
+
+    testWidgets('历史线路的 chip 上有标记，其他线路没有', (tester) async {
+      await pumpLineStrip(tester);
+
+      expect(
+        find.byKey(const ValueKey('tmdb-line-recent-线路二')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-line-recent-线路一')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('标记不改变 chip 仍可点击切换', (tester) async {
+      await pumpLineStrip(tester);
+
+      await tester.tap(find.byKey(const ValueKey('tmdb-line-线路一')));
+      await tester.pumpAndSettle();
+
+      final chip = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路一')),
+      );
+      expect(chip.selected, isTrue, reason: '用户手动切走必须生效');
+      expect(
+        find.byKey(const ValueKey('tmdb-line-recent-线路二')),
+        findsOneWidget,
+        reason: '切走后标记仍在，用户能切回来',
+      );
+    });
+
+    testWidgets('历史线路在但那一集已消失 → 不标（design/02 §4.1 + §5）', (tester) async {
+      // **这是 `matched` 守卫的唯一钉子。**
+      //
+      // 为什么必须单独有它：上面 2 个用例都走 `matched == true`（线路二 +
+      // 集 URL 命中）。实测把 `recentFlag` 的守卫从
+      // `matched ? flag : ''` 改成无条件 `flag`，那 2 个用例**全部照过**——
+      // 于是「只标历史真正命中的那条线路」这条要求当时一个钉子都没有。
+      //
+      // 关键设计：线路二存在，但 `http://stale/gone` 不在任何线路上 →
+      // §2.1 第 1 级降级、第 2 级因 URL 非空且无命中而止步、第 3 级被前提挡住
+      // → `matched == false`、但 `target.flag` 仍回落到**线路一**。此时
+      // **不得**标记：标出来会把用户引到一条没有那一集的线路上。
+      await pumpLineStrip(tester, historyEpisodeId: 'http://stale/gone');
+
+      expect(
+        find.byKey(const ValueKey('tmdb-line-recent-线路一')),
+        findsNothing,
+        reason: 'matched=false 时不得标记',
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-line-recent-线路二')),
+        findsNothing,
+        reason: 'matched=false 时不得标记',
+      );
+    });
+  });
 }
