@@ -930,7 +930,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（21 个用例：Task 1–2 的 16 + 本任务 5）。
+预期：`All tests passed!`（22 个用例：Task 1–2 的 16 + 本任务 6）。
 
 确认没打破详情页既有门禁：
 
@@ -1126,7 +1126,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（24 个用例：Task 1–3 的 21 + 本任务 3）。
+预期：`All tests passed!`（25 个用例：Task 1–3 的 22 + 本任务 3）。
 
 - [ ] **Step 5: 提交**
 
@@ -1332,7 +1332,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（26 个用例：Task 1–4 的 24 + 本任务 2）。
+预期：`All tests passed!`（27 个用例：Task 1–4 的 25 + 本任务 2）。
 
 确认没打破线路 chip 的既有门禁：
 
@@ -1656,7 +1656,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（28 个用例：Task 1–5 的 26 + 本任务 2）。
+预期：`All tests passed!`（29 个用例：Task 1–5 的 27 + 本任务 2）。
 
 确认没打破剧集卡门禁：
 
