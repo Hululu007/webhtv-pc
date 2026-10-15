@@ -1512,9 +1512,27 @@ git commit -m "新增：线路 chip「最近播放」标记（design/02 §5）"
         ),
       );
       await tester.pump();
-      // 滚过 hero，让选集区进入视口。
-      await tester.drag(find.byType(Scrollable).first, const Offset(0, -3000));
+      // **必须注入「本页详情已到达」**：否则 `state.detailResult` 为 null、
+      // `belongs` 恒为 false，走的不是 `design/02` §4 描述的路径
+      // （与 Task 4/5 同一要求）。
+      appState.seedDetailForTest(vod: vod);
       await tester.pump();
+      // **滚过 hero，直到选集区挂载**。
+      //
+      // 用「找不到就继续拖」的循环而**不是**一次 `drag(-3000)`：
+      // hero 是满屏的、正文是懒加载 `ListView`，一次固定位移的拖动在
+      // 视口或 hero 高度变化时会拖不够（或拖过头），循环则与具体尺寸无关。
+      // Task 3/5 用的是同一个模式。
+      for (var attempt = 0; attempt < 20; attempt++) {
+        if (find
+            .byKey(const ValueKey('tmdb-episode-card-线路一-0'))
+            .evaluate()
+            .isNotEmpty) {
+          return;
+        }
+        await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
+        await tester.pump();
+      }
     }
 
     testWidgets('命中的集卡片有标记，其他集没有', (tester) async {
