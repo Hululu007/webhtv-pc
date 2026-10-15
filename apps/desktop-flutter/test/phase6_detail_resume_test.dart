@@ -725,4 +725,170 @@ void main() {
       );
     });
   });
+
+  group('选集卡片的「最近播放」标记（design/02 §6）', () {
+    late Directory dir;
+    late AppState appState;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('webhtv-episode-recent');
+      appState = AppState(
+        paths: AppPaths.resolve(
+          overrides: {'roaming': dir.path, 'local': dir.path},
+        ),
+        log: LogService(),
+      );
+      await appState.bootstrap();
+    });
+
+    tearDown(() async {
+      appState.dispose();
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    final vod = Vod(
+      vodId: 'demo-1',
+      vodName: '剧集甲',
+      vodPlayFrom: '线路一',
+      vodPlayUrl: '第1集\$http://x/e1#第2集\$http://x/e2#第3集\$http://x/e3',
+    );
+
+    /// 两条线路，供「历史命中另一条线路」的钉子用。
+    final vodTwoLines = Vod(
+      vodId: 'demo-1',
+      vodName: '剧集甲',
+      vodPlayFrom: '线路一\$\$\$线路二',
+      vodPlayUrl: '第1集\$http://x/e1#第2集\$http://x/e2#第3集\$http://x/e3'
+          '\$\$\$第1集\$http://y/e1#第2集\$http://y/e2#第3集\$http://y/e3',
+    );
+
+    Future<void> pump(
+      WidgetTester tester, {
+      Vod? source,
+      String historyFlag = '线路一',
+      String historyEpisodeId = 'http://x/e2',
+    }) async {
+      tester.view.physicalSize = const Size(1400, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: DetailPage(
+            state: appState,
+            vod: source ?? vod,
+            historyFlag: historyFlag,
+            historyEpisodeId: historyEpisodeId,
+          ),
+        ),
+      );
+      await tester.pump();
+      // **必须注入「本页详情已到达」**：否则 `state.detailResult` 为 null、
+      // `belongs` 恒为 false，走的不是 `design/02` §4 描述的路径
+      // （与 Task 4/5 同一要求）。
+      appState.seedDetailForTest(vod: source ?? vod);
+      await tester.pump();
+      // **滚过 hero，直到选集区挂载**。
+      //
+      // 用「找不到就继续拖」的循环而**不是**一次 `drag(-3000)`：
+      // hero 是满屏的、正文是懒加载 `ListView`，一次固定位移的拖动在
+      // 视口或 hero 高度变化时会拖不够（或拖过头），循环则与具体尺寸无关。
+      // Task 3/5 用的是同一个模式。
+      for (var attempt = 0; attempt < 20; attempt++) {
+        if (find
+            .byKey(const ValueKey('tmdb-episode-card-线路一-0'))
+            .evaluate()
+            .isNotEmpty) {
+          return;
+        }
+        await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
+        await tester.pump();
+      }
+    }
+
+    testWidgets('命中的集卡片有标记，其他集没有', (tester) async {
+      await pump(tester);
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-recent-1')),
+        findsOneWidget,
+        reason: '第2集（下标 1）被标记',
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-recent-0')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('外壳仍是 OutlinedButton（不补集门禁）', (tester) async {
+      await pump(tester);
+      final buttons = find.byWidgetPredicate(
+        (widget) =>
+            widget is OutlinedButton &&
+            widget.key is ValueKey<String> &&
+            (widget.key! as ValueKey<String>).value.startsWith(
+              'tmdb-episode-card-线路一-',
+            ),
+      );
+      expect(
+        buttons,
+        findsNWidgets(3),
+        reason: '3 集就是 3 张卡，不得补集也不得丢集',
+      );
+    });
+
+    testWidgets('matched=false 时任何集卡片都不标（design/02 §4.1 + §6）', (tester) async {
+      // **这是 `matched` 守卫的钉子。**
+      //
+      // 为什么必须单独有它：上面 2 个用例都走 `matched == true`。实测把
+      // `if (!target.matched) return -1;` 删掉，那 2 个用例**全部照过**——
+      // 于是「只标历史真正命中的那一集」这条要求当时一个钉子都没有。
+      //
+      // 关键设计：`http://stale/gone` 一条线路都匹配不上 →
+      // §2.1 第 1 级降级、第 2 级因 URL 非空且无命中而止步、第 3 级被前提挡住
+      // → `matched == false`，但 `target.flag` / `target.episodeIndex` 会回落到
+      // **第一条线路的第 0 集**——与 `rawLine` 完全重合，正是「守卫一旦拿掉就
+      // 立刻误标」的那种重合。标出来会把用户引到一条没有那一集的线路上。
+      await pump(tester, historyEpisodeId: 'http://stale/gone');
+
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-recent-0')),
+        findsNothing,
+        reason: 'matched=false 时不得标记',
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-recent-1')),
+        findsNothing,
+        reason: 'matched=false 时不得标记',
+      );
+    });
+
+    testWidgets('切到非历史线路后不标（design/02 §6）', (tester) async {
+      // **这是「只标历史那条线路」守卫的钉子。**
+      //
+      // 实测把 `if (rawLine.flag != target.flag) return -1;` 删掉后，
+      // 上面 3 个用例全部照过——因为历史命中的线路恰好就是当前渲染的线路。
+      //
+      // 手动切到线路二后，`_resumeTarget` 给的仍是线路一的下标 1；不校验
+      // 线路就会在线路二的第 2 集上打标，而历史根本不在那条线路上。
+      await pump(tester, source: vodTwoLines);
+      await tester.tap(find.byKey(const ValueKey('tmdb-line-线路二')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路二-recent-1')),
+        findsNothing,
+        reason: '历史在线路一，线路二的同下标集不得被标记',
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路二-recent-0')),
+        findsNothing,
+      );
+    });
+
+    // 第三条断言「剧照仍是 16:9」**不写**：见下方 Ruling。
+  });
 }

@@ -1160,6 +1160,45 @@ class _DetailPageState extends State<DetailPage> {
     return historyPlayLabel(target: target, resumePosition: resume);
   }
 
+  /// 历史那一集在**渲染列表**里的下标（-1 = 无，`design/02` §6）。
+  ///
+  /// 为什么需要换算：`resolveHistoryTarget` 给的是**线路原始下标**，而卡片是按
+  /// `ordered`（已套用 TMDB 元数据 + 已季度过滤 + 可能已倒序）渲染的，
+  /// 两个下标在「多季线路」或「倒序」下并不相等。直接把原始下标交给
+  /// [TmdbEpisodeStrip.recentIndex] 会标错集。
+  ///
+  /// 用集 **URL** 而不是集号做桥接：集号可能缺失或重复（`stillKey` 的注释里
+  /// 已记过这个坑），URL 才是「同一集」的稳定身份。
+  ///
+  /// 三道守卫都不可省：
+  /// 1. `matched` —— `matched == false` 涵盖「无历史」与「历史线路在但那一集
+  ///    已消失」（§4.1），标出来会把用户引到一条没有那一集的线路上；
+  /// 2. `rawLine.flag == target.flag` —— 只有历史命中的**那条线路**才标，
+  ///    否则切到别的线路也会看到标记；
+  /// 3. 下标越界 —— `lines` 与 `rawLine` 理论上同源，但越界时必须回落到
+  ///    「无标记」而不是抛异常（详情刷新期间两者可能短暂不同步）。
+  int _recentRenderedIndex(
+    Vod vod,
+    VodPlayLine rawLine,
+    List<VodEpisode> ordered,
+  ) {
+    final lines = widget.state.playLinesOf(vod);
+    final target = _resumeTarget(lines);
+    if (!target.matched) return -1;
+    if (rawLine.flag != target.flag) return -1;
+    if (target.episodeIndex < 0 ||
+        target.episodeIndex >= rawLine.episodes.length) {
+      return -1;
+    }
+    final episode = rawLine.episodes[target.episodeIndex];
+    for (var i = 0; i < ordered.length; i++) {
+      if (identical(ordered[i], episode) || ordered[i].url == episode.url) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   Vod? get _currentVod {
     final result = widget.state.detailResult;
     if (result != null &&
@@ -1738,6 +1777,7 @@ class _DetailPageState extends State<DetailPage> {
           actionLabel: '播放',
           cardWidth: _episodeCardWidth(context, episodes.length),
           gridMode: _episodeGridMode,
+          recentIndex: _recentRenderedIndex(vod, rawLine, ordered),
           onTap: (index, _) =>
               _playEpisodeAt(vod, rawLine, line, ordered, index),
         ),

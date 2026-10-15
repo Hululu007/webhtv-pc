@@ -810,12 +810,19 @@ class TmdbEpisodeStrip extends StatelessWidget {
     this.cardWidth = 260,
     this.height = 196,
     this.gridMode = false,
+    this.recentIndex = -1,
   });
 
   final List<TmdbEpisodeCard> cards;
   final String keyPrefix;
   final String actionLabel;
   final void Function(int index, TmdbEpisodeCard card)? onTap;
+
+  /// 「最近播放」的卡片下标（-1 = 无）。
+  ///
+  /// 注意是**渲染下标**：调用方已把线路原始下标换算过
+  /// （`docs/phase6/design/02` §6）。
+  final int recentIndex;
 
   /// 单卡宽度。
   ///
@@ -850,6 +857,8 @@ class TmdbEpisodeStrip extends StatelessWidget {
           stillKey: ValueKey('$keyPrefix-still-${cards[index].number}'),
           card: cards[index],
           actionLabel: actionLabel,
+          isRecent: index == recentIndex,
+          recentKey: ValueKey('$keyPrefix-recent-$index'),
           onTap: onTap == null ? null : () => onTap!.call(index, cards[index]),
         ),
       );
@@ -868,6 +877,8 @@ class TmdbEpisodeStrip extends StatelessWidget {
             stillKey: ValueKey('$keyPrefix-still-${cards[index].number}'),
             card: cards[index],
             actionLabel: actionLabel,
+            isRecent: index == recentIndex,
+            recentKey: ValueKey('$keyPrefix-recent-$index'),
             onTap: onTap == null
                 ? null
                 : () => onTap!.call(index, cards[index]),
@@ -1593,9 +1604,11 @@ class TmdbEpisodeCardTile extends StatelessWidget {
     super.key,
     this.buttonKey,
     this.stillKey,
+    this.recentKey,
     required this.card,
     this.actionLabel = '播放',
     this.onTap,
+    this.isRecent = false,
   });
 
   /// 剧照图片的 key。
@@ -1611,6 +1624,19 @@ class TmdbEpisodeCardTile extends StatelessWidget {
   /// `widget is OutlinedButton && widget.key is ValueKey<String> && key.startsWith('episode-<flag>-')`
   /// 计数（断言「不补集」），把 key 放在包装 widget 上会让那条门禁失效。
   final Key? buttonKey;
+
+  /// 「最近播放」角标的 key。
+  ///
+  /// 与 [stillKey] 分开：角标的位置/存在性由**渲染下标**决定，
+  /// 而 `stillKey` 用的是集号（可能缺失或重复）。
+  ///
+  /// 必须挂在 [Container] 而**不是**外壳 [OutlinedButton] 上：既有集成门禁按
+  /// `widget is OutlinedButton && key.startsWith('<prefix>-')` 计数（断言
+  /// 「不补集」），角标 key 也带同一前缀，挂错层会让计数多出一张卡。
+  final Key? recentKey;
+
+  /// 是否是「最近播放」那一集（`docs/phase6/design/02` §6）。
+  final bool isRecent;
 
   final TmdbEpisodeCard card;
   final String actionLabel;
@@ -1633,6 +1659,9 @@ class TmdbEpisodeCardTile extends StatelessWidget {
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           alignment: Alignment.centerLeft,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          side: isRecent
+              ? BorderSide(color: theme.colorScheme.primary, width: 2)
+              : null,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1693,6 +1722,49 @@ class TmdbEpisodeCardTile extends StatelessWidget {
                           child: Text(
                             card.rating.toStringAsFixed(1),
                             style: theme.textTheme.labelSmall,
+                          ),
+                        ),
+                      ),
+                    // 「最近播放」角标（`design/02` §6）。
+                    //
+                    // key 挂在 `Container` 上而**不是**外壳 `OutlinedButton`
+                    // 上：角标 key 与卡片 key 同前缀（`<prefix>-recent-<index>`），
+                    // 既有「不补集」门禁按 `widget is OutlinedButton &&
+                    // key.startsWith('<prefix>-')` 计数，挂到外壳上会让计数多出
+                    // 一张卡。
+                    //
+                    // 内边距/圆角与同 Stack 里的 `E<n>`、评分角标保持一致
+                    // （6/2、4）——它们是同一处徽标惯例，不引入新的散值。
+                    if (isRecent)
+                      Positioned(
+                        left: 6,
+                        bottom: 6,
+                        child: Container(
+                          key: recentKey,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.primaryContainer,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.history,
+                                size: 12,
+                                color: theme.colorScheme.onPrimaryContainer,
+                              ),
+                              const SizedBox(width: 2),
+                              Text(
+                                '上次看到这里',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: theme.colorScheme.onPrimaryContainer,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
