@@ -14,6 +14,24 @@ import '../core/protocol.dart';
 import 'app.dart';
 import 'common.dart';
 import 'player_page.dart';
+import 'tokens.dart';
+
+/// 历史卡片的目标列宽。
+///
+/// 与首页海报墙（`browse_pages.dart` 的 `_poster*`）是**同一套尺度**：
+/// `DESIGN.md` 的「内容网格」写明全站共用「目标列宽 150px、列间距 14px、
+/// 网格内边距 16px、海报下方文字区高 40px」。首页那份是文件私有常量，这里
+/// 只能各自声明——**改动时必须两处一起改**，否则两块海报墙的尺度会分叉。
+const double _historyCardTargetWidth = 150;
+
+/// 历史卡片列间距（= 首页海报墙的列间距，见上）。
+const double _historyCardSpacing = 14;
+
+/// 历史卡片海报下方的文字区高度（片名 + 集名两行）。
+///
+/// 给死高度而不是让它自适应：格子高度由「海报 2:3 + 本值」精确算出，文字区
+/// 一旦浮动，海报就会被压成非 2:3（与首页 `_posterCaptionHeight` 同理）。
+const double _historyCaptionHeight = 40;
 
 class HistoryPage extends StatefulWidget {
   const HistoryPage({super.key, required this.state});
@@ -199,64 +217,110 @@ class _HistoryPageState extends State<HistoryPage> {
                   title: '暂无播放记录',
                   message: '播放任意剧集后会自动记录进度。',
                 )
-              : ListView.builder(
+              : GridView.builder(
+                  key: const ValueKey('history-grid'),
+                  padding: const EdgeInsets.all(AppSpace.lg),
+                  gridDelegate: _historyGridDelegate(
+                    MediaQuery.sizeOf(context).width,
+                  ),
                   itemCount: items.length,
-                  itemBuilder: (context, index) {
-                    final item = items[index];
-                    return InkWell(
-                      key: ValueKey('history-row-${item.id}'),
-                      onTap: () => _resume(item),
-                      onDoubleTap: () => _resume(item),
-                      child: ListTile(
-                        leading: SizedBox(
-                          width: 64,
-                          height: 84,
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: PosterImage(url: item.vodPic),
-                          ),
-                        ),
-                        title: Text(
-                          item.vodName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        subtitle: Text(
-                          '${item.episodeName} · ${item.progressPercent}%'
-                          '${item.completed ? " · 已看完" : ""}\n'
-                          '更新 ${DateTime.fromMillisecondsSinceEpoch(item.updatedAt).toLocal()}',
-                        ),
-                        isThreeLine: true,
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            OutlinedButton.icon(
-                              onPressed: () => _resume(item),
-                              icon: Icon(
-                                item.completed
-                                    ? Icons.replay
-                                    : Icons.play_arrow,
-                              ),
-                              label: Text(item.completed ? '重播' : '继续播放'),
-                            ),
-                            IconButton(
-                              tooltip: '删除该记录',
-                              onPressed: () {
-                                _state.deleteHistory(item.id);
-                                setState(() {});
-                              },
-                              icon: const Icon(Icons.delete_outline),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
+                  itemBuilder: (context, index) =>
+                      _buildHistoryCard(context, items[index]),
                 ),
         ),
       ],
     );
   }
+
+  /// 网格度量：与首页海报墙同一套算法（`browse_pages.dart#_gridDelegate`）。
+  ///
+  /// 为什么不用 `SliverGridDelegateWithMaxCrossAxisExtent`：它的
+  /// `mainAxisExtent` 是固定值，窗口变窄时列宽变小、高度不变，海报会被
+  /// 压成非 2:3 或被裁切。这里列宽已知，格子高度就能精确算成
+  /// 「海报 2:3 + 文字区」。
+  static SliverGridDelegate _historyGridDelegate(double maxWidth) {
+    final usable = maxWidth - AppSpace.lg * 2;
+    final columns = (usable / (_historyCardTargetWidth + _historyCardSpacing))
+        .round()
+        .clamp(2, 12);
+    final cellWidth = (usable - (columns - 1) * _historyCardSpacing) / columns;
+    return SliverGridDelegateWithFixedCrossAxisCount(
+      crossAxisCount: columns,
+      crossAxisSpacing: _historyCardSpacing,
+      mainAxisSpacing: AppSpace.sm,
+      mainAxisExtent: cellWidth * 1.5 + AppSpace.sm + _historyCaptionHeight,
+    );
+  }
+
+  /// 单张历史卡片（对齐上游 `res/layout/adapter_vod.xml`）。
+  ///
+  /// **片名只渲染一次 `Text`**：`integration_test/phase5_sync_flow_test.dart`
+  /// 按 `find.text(name)` 断言 `findsOneWidget`。`Tooltip` 的 `message` 是字符串、
+  /// 不产生 `Text`，但这里仍然不加 tooltip——片名与集名已各占一行。
+  Widget _buildHistoryCard(BuildContext context, PlaybackHistory item) {
+    final theme = Theme.of(context);
+    return InkWell(
+      key: ValueKey('history-row-${item.id}'),
+      onTap: () => _onCardTap(item),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // `AspectRatio` 保证海报 2:3：文字区再高也不会把海报压变形。
+          AspectRatio(
+            aspectRatio: 2 / 3,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(AppRadius.md),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  PosterImage(url: item.vodPic),
+                  // 左下角进度角标（对齐上游 `@id/playback`）。
+                  Positioned(
+                    left: 6,
+                    bottom: 6,
+                    child: _HistoryBadge(
+                      text: item.completed
+                          ? '已看完'
+                          : '已看 ${item.progressPercent}%',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // 2px 进度条紧贴海报下沿（对齐上游 `@id/progress`）。
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: LinearProgressIndicator(
+              value: item.progress,
+              minHeight: 2,
+              backgroundColor: theme.colorScheme.surfaceContainerHighest,
+            ),
+          ),
+          const SizedBox(height: AppSpace.xs),
+          Text(
+            item.vodName,
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodyMedium,
+          ),
+          Text(
+            item.episodeName,
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 卡片点击（Task 8 会按设置分流；此处先保持既有行为）。
+  void _onCardTap(PlaybackHistory item) => unawaited(_resume(item));
 
   /// 「删除整部节目」二级操作（`02` §7.4）：必须先明确告知将删除的季度数量。
   Future<void> _confirmDeleteMedia(SeasonHistoryCard card) async {
@@ -364,6 +428,30 @@ class _HistoryPageState extends State<HistoryPage> {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(failure.userMessage)));
     }
+  }
+}
+
+/// 海报左下角的进度角标（对齐上游 `@id/playback` 的半透明底胶囊）。
+///
+/// 底色取 `colorScheme.surface` 而不是写死黑：海报画面色彩不可控，而这里的
+/// 文字用主题的 `labelSmall`，底与字必须成对取自同一主题才不会在亮色主题下
+/// 变成「深底深字」。
+class _HistoryBadge extends StatelessWidget {
+  const _HistoryBadge({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Text(text, style: theme.textTheme.labelSmall),
+    );
   }
 }
 
