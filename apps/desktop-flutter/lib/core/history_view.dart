@@ -152,3 +152,21 @@ int _indexOfUrl(VodPlayLine line, String url) {
   }
   return -1;
 }
+
+/// 详情页首屏按钮的文案（`docs/phase6/design/02` §3.1）。
+///
+/// 对齐上游 `TmdbDetailActivity#updatePlayLabel`：命中当前集**且**有进度
+/// 才叫"继续播放"，否则是"播放第一集"。
+///
+/// 为什么用 `resumePosition` 而不是自己判断 `completed` 与位置阈值：
+/// [AppState.resumePositionFor] 已经把这两件事一起处理了，两处判断会漂移。
+String historyPlayLabel({
+  required HistoryResumeTarget target,
+  required Duration? resumePosition,
+  String fallback = '播放第一集',
+}) {
+  if (!target.matched) return fallback;
+  if (resumePosition == null) return fallback;
+  if (target.episodeName.isEmpty) return fallback;
+  return '继续播放 · ${target.episodeName}';
+}

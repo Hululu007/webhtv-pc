@@ -186,4 +186,64 @@ void main() {
       expect(target.matched, isFalse);
     });
   });
+
+  group('首屏按钮文案（design/02 §3.1）', () {
+    const matched = HistoryResumeTarget(
+      flag: '线路一',
+      episodeIndex: 1,
+      episodeName: '第2集',
+      matched: true,
+    );
+    const unmatched = HistoryResumeTarget(
+      flag: '线路一',
+      episodeIndex: 0,
+      episodeName: '第1集',
+      matched: false,
+    );
+
+    test('完整命中且有续播位置 → 继续播放 · 集名', () {
+      expect(
+        historyPlayLabel(
+          target: matched,
+          resumePosition: const Duration(seconds: 30),
+        ),
+        '继续播放 · 第2集',
+      );
+    });
+
+    test('完整命中但无续播位置（已看完 / 位置过短）→ 播放第一集', () {
+      expect(
+        historyPlayLabel(target: matched, resumePosition: null),
+        '播放第一集',
+        reason: 'resumePositionFor 已把 completed 与位置过短一起处理',
+      );
+    });
+
+    test('未完整命中 → 播放第一集', () {
+      expect(
+        historyPlayLabel(
+          target: unmatched,
+          resumePosition: const Duration(seconds: 30),
+        ),
+        '播放第一集',
+      );
+    });
+
+    test('命中但集名为空 → 用兜底文案', () {
+      const noName = HistoryResumeTarget(
+        flag: '线路一',
+        episodeIndex: 1,
+        episodeName: '',
+        matched: true,
+      );
+      expect(
+        historyPlayLabel(
+          target: noName,
+          resumePosition: const Duration(seconds: 30),
+        ),
+        '播放第一集',
+        reason: '没有集名就无法表达"继续播放哪一集"',
+      );
+    });
+  });
 }
