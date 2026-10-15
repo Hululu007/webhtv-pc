@@ -554,5 +554,41 @@ void main() {
       expect(find.text('播放第一集'), findsOneWidget);
       expect(find.textContaining('继续播放'), findsNothing);
     });
+
+    testWidgets('点击播历史命中那一集（design/02 §3.2）', (tester) async {
+      // **这是「点击目标」的唯一钉子。**
+      //
+      // 为什么必须单独有它：上面 3 个用例只断言**渲染出来的文案**，没有一个
+      // 真的点下去看播了哪一集。实测把 `_play` 的第 3 个实参改回硬编码 `0`
+      // （`design/02` §3.2 明令禁止的那个反实现），那 3 个用例**全部照过**——
+      // 于是「点击播命中的那一集」这条明确要求当时一个钉子都没有。
+      //
+      // 怎么观察到「播了哪一集」：本用例没有站点服务，`resolvePlayback` 直接
+      // 返回 null（`app_state.dart` 的 `service == null || site == null`），
+      // `_play` 因此抛 `playbackUrlMissing`，其 `detail` 是
+      // `line=<flag> episode=<集名>`，经 `AppError.userMessage` 渲染成 SnackBar。
+      // 于是断言 SnackBar 里的集名即可区分「命中第2集」与「硬编码第1集」。
+      appState.database!.upsertHistory(
+        siteKey: appState.selectedSite?.key ?? '',
+        vodId: 'demo-1',
+        vodName: '剧集甲',
+        flag: '线路一',
+        episodeName: '第2集',
+        episodeId: 'http://x/e2',
+        positionMs: 30000,
+        durationMs: 100000,
+      );
+      await pump(tester);
+
+      await tester.tap(find.byKey(const ValueKey('detail-hero-play')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.textContaining('episode=第2集'),
+        findsOneWidget,
+        reason: '必须播历史命中的第2集，而不是硬编码的第 0 集（第1集）',
+      );
+    });
   });
 }
