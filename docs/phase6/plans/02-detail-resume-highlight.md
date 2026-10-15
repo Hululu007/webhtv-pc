@@ -489,10 +489,12 @@ git commit -m "新增：详情页历史解析（线路三级匹配 + 集匹配�
     });
 
     test('完整命中但无续播位置（已看完 / 位置过短）→ 播放第一集', () {
+      // `resumePositionFor` 已把 completed 与位置过短一起处理成 null，
+      // 因此这里传 null 就代表那两种情形——它的归一化在
+      // `lib/state/app_state.dart` 的 `resumePositionFor` 里，不在本模块。
       expect(
         historyPlayLabel(target: matched, resumePosition: null),
         '播放第一集',
-        reason: 'resumePositionFor 已把 completed 与位置过短一起处理',
       );
     });
 
@@ -545,7 +547,13 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 /// 才叫"继续播放"，否则是"播放第一集"。
 ///
 /// 为什么用 `resumePosition` 而不是自己判断 `completed` 与位置阈值：
-/// [AppState.resumePositionFor] 已经把这两件事一起处理了，两处判断会漂移。
+/// `AppState.resumePositionFor`（`lib/state/app_state.dart`）已经把这两件事
+/// 一起处理了，两处判断会漂移。
+///
+/// 注意这里用反引号而不是 dartdoc 的 `[]` 引用：本模块是纯逻辑层，
+/// **不得** import `state/app_state.dart`，写成 `[AppState.resumePositionFor]`
+/// 会是无法解析的悬空引用（当前 lint 未启用 `comment_references` 所以不报，
+/// 但 dartdoc 不会生成链接）。
 String historyPlayLabel({
   required HistoryResumeTarget target,
   required Duration? resumePosition,
