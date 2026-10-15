@@ -4,8 +4,13 @@
 /// "多选态点卡片只勾选"）是本轮最容易写错的地方，必须在无窗口环境下锁死。
 library;
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:webhtv_pc/core/history_view.dart';
+import 'package:webhtv_pc/services/ui_preferences_store.dart';
 
 void main() {
   group('删除模式状态机', () {
@@ -183,6 +188,125 @@ void main() {
     test('values 列出全部合法值，顺序稳定', () {
       expect(UiHistoryClickAction.values,
           [UiHistoryClickAction.detail, UiHistoryClickAction.play]);
+    });
+  });
+
+  group('historyClickAction 持久化（settings.json 的 ui 段）', () {
+    late Directory dir;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('webhtv-history-click');
+    });
+
+    tearDown(() async {
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    UiPreferencesStore storeOf() =>
+        UiPreferencesStore(path: p.join(dir.path, 'settings.json'));
+
+    test('默认是 detail（缺席 = 默认，不写盘）', () async {
+      final store = storeOf();
+      await store.load();
+      expect(store.historyClickAction, UiHistoryClickAction.detail);
+      expect(store.hasExplicitHistoryClickAction, isFalse);
+    });
+
+    test('显式选择后落盘，重新 load 仍读到', () async {
+      final store = storeOf();
+      await store.load();
+      await store.rememberHistoryClickAction(UiHistoryClickAction.play);
+
+      final again = storeOf();
+      await again.load();
+      expect(again.historyClickAction, UiHistoryClickAction.play);
+      expect(again.hasExplicitHistoryClickAction, isTrue);
+    });
+
+    test('非法值归一到 detail', () async {
+      final store = storeOf();
+      await store.load();
+      await store.rememberHistoryClickAction('nonsense');
+      expect(store.historyClickAction, UiHistoryClickAction.detail);
+    });
+
+    test('手改文件塞非法值时回落默认', () async {
+      final file = File(p.join(dir.path, 'settings.json'));
+      await file.writeAsString('{"ui":{"historyClickAction":"bogus"}}');
+      final store = storeOf();
+      await store.load();
+      expect(store.historyClickAction, UiHistoryClickAction.detail);
+    });
+
+    test('不污染 ui 段的既有键（themeMode / searchKeywords 保留）', () async {
+      final file = File(p.join(dir.path, 'settings.json'));
+      await file.writeAsString(
+        '{"ui":{"themeMode":"light","searchKeywords":["旧词"]},'
+        '"tmdb":{"enabled":true},"sync":{"serverEnabled":true}}',
+      );
+      final store = storeOf();
+      await store.load();
+      await store.rememberHistoryClickAction(UiHistoryClickAction.play);
+
+      final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
+      final ui = raw['ui']! as Map<String, Object?>;
+      expect(ui['themeMode'], 'light');
+      expect(ui['searchKeywords'], ['旧词']);
+      expect(ui['historyClickAction'], UiHistoryClickAction.play);
+      expect(raw.containsKey('tmdb'), isTrue, reason: '不得覆盖其他段');
+      expect(raw.containsKey('sync'), isTrue, reason: '不得覆盖其他段');
+    });
+
+    // 以下三个用例由 mutant 自检补入：原 brief 用例不足，
+    // 「缺席不写盘」与「load 校验非法值」两条实现被删掉仍然全绿。
+
+    test('缺席不写盘：后续保存不会把默认 detail 固化进文件', () async {
+      final file = File(p.join(dir.path, 'settings.json'));
+      await file.writeAsString('{"ui":{"themeMode":"light"}}');
+      final store = storeOf();
+      await store.load();
+      expect(store.hasExplicitHistoryClickAction, isFalse);
+      // 触发一次别的写盘，确保文件被重写过。
+      await store.rememberSearchThread(50);
+
+      final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
+      final ui = raw['ui']! as Map<String, Object?>;
+      expect(ui.containsKey('historyClickAction'), isFalse,
+          reason: '缺席 = 默认，不该把 detail 固化进文件');
+      expect(ui['themeMode'], 'light', reason: '重写时既有键仍要保留');
+      expect(ui['searchThread'], 50);
+    });
+
+    test('文件里的非法值不算显式选择，也不会被写回', () async {
+      final file = File(p.join(dir.path, 'settings.json'));
+      await file.writeAsString('{"ui":{"historyClickAction":"bogus"}}');
+      final store = storeOf();
+      await store.load();
+      expect(store.hasExplicitHistoryClickAction, isFalse,
+          reason: '非法值不是用户的选择，不能当成「设过」');
+      await store.rememberSearchThread(7);
+
+      final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
+      final ui = raw['ui']! as Map<String, Object?>;
+      expect(ui.containsKey('historyClickAction'), isFalse,
+          reason: 'bogus 不得被原样写回');
+    });
+
+    test('文件里的大写/带空白合法值被接受，并按归一化后的值写回', () async {
+      final file = File(p.join(dir.path, 'settings.json'));
+      await file.writeAsString('{"ui":{"historyClickAction":"  PLAY  "}}');
+      final store = storeOf();
+      await store.load();
+      expect(store.historyClickAction, UiHistoryClickAction.play);
+      expect(store.hasExplicitHistoryClickAction, isTrue);
+      await store.rememberSearchThread(9);
+
+      final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
+      final ui = raw['ui']! as Map<String, Object?>;
+      expect(ui['historyClickAction'], UiHistoryClickAction.play,
+          reason: '写回的是归一化后的值，不是原样的空白/大写');
     });
   });
 }

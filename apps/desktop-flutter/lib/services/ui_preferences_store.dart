@@ -14,12 +14,16 @@
 /// - `searchSimilarity`：**搜索结果相似度阈值**（0~100，上游
 ///   `Setting.getSearchSimilarity` 默认 30）；
 /// - `searchThread`：**搜索并发线程数**（1~100，上游
-///   `Setting.getSearchThread` 默认 20、`clampSearchThread` 夹在 1~100）。
+///   `Setting.getSearchThread` 默认 20、`clampSearchThread` 夹在 1~100）；
+/// - `historyClickAction`：**点击历史记录的行为**（`detail` 进详情页 /
+///   `play` 直接播放，上游 `HistoryActivity#onItemClick` 是直接播放，
+///   PC 端默认改为进详情页，见 `docs/phase6/design/01` §4.1）。
 library;
 
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/history_view.dart';
 import 'log_service.dart';
 
 /// 主题模式取值。
@@ -71,6 +75,9 @@ class UiPreferencesStore {
   /// 搜索并发线程数（1~100）。`null` = 从未设置过，用默认 [_defaultSearchThread]。
   int? _searchThread;
 
+  /// 点击历史记录的行为。`null` = 从未设置过，用默认 [UiHistoryClickAction.detail]。
+  String? _historyClickAction;
+
   bool _loaded = false;
 
   /// 搜索历史上限（上游安卓 `RecordAdapter.checkToAdd` 同为 10）。
@@ -111,6 +118,13 @@ class UiPreferencesStore {
 
   /// 用户是否显式设置过并发线程数。
   bool get hasExplicitSearchThread => _searchThread != null;
+
+  /// 生效的点击历史行为：用户选过就用选的，否则默认进详情页。
+  String get historyClickAction =>
+      UiHistoryClickAction.normalize(_historyClickAction);
+
+  /// 用户是否显式设置过（决定要不要写盘，与 `themeMode` 同理）。
+  bool get hasExplicitHistoryClickAction => _historyClickAction != null;
 
   /// 是否已成功读取过磁盘内容。
   bool get loaded => _loaded;
@@ -175,6 +189,15 @@ class UiPreferencesStore {
             // 与上游 `putSearchThread` 的 `clampSearchThread` 同语义：
             // 并发度 0 会让搜索一个站点都不发。
             _searchThread = _clampSearchThread(thread.toInt());
+          }
+          final clickAction = ui['historyClickAction'];
+          if (clickAction is String) {
+            // 只接受合法值；手改成别的字符串时回落到默认，不写坏状态。
+            if (UiHistoryClickAction.values.contains(
+              clickAction.trim().toLowerCase(),
+            )) {
+              _historyClickAction = clickAction.trim().toLowerCase();
+            }
           }
         }
       }
@@ -272,6 +295,14 @@ class UiPreferencesStore {
     return _persist();
   }
 
+  /// 记住点击历史记录的行为。非法值归一化为默认。
+  Future<bool> rememberHistoryClickAction(String mode) {
+    final normalized = UiHistoryClickAction.normalize(mode);
+    if (normalized == _historyClickAction) return Future.value(true);
+    _historyClickAction = normalized;
+    return _persist();
+  }
+
   /// 夹到 1~100：0 或负数会让搜索一个请求都不发，超大值会打满对端。
   static int _clampSearchThread(int value) {
     if (value < _minSearchThread) return _minSearchThread;
@@ -348,6 +379,9 @@ class UiPreferencesStore {
       // 并发线程数：同样缺席 = 默认 20。
       final thread = _searchThread;
       if (thread != null) ui['searchThread'] = thread;
+      // 点击行为同上：只有显式设置过才写，缺席 = 默认 detail。
+      final clickAction = _historyClickAction;
+      if (clickAction != null) ui['historyClickAction'] = clickAction;
       existing['ui'] = ui;
 
       final temporary = File('$path.tmp');
