@@ -456,4 +456,103 @@ void main() {
       expect(second.selected, isFalse);
     });
   });
+
+  group('首屏按钮接历史（design/02 §3）', () {
+    // 复用上一组的 setUp/tearDown 结构：这里重新声明一套局部状态，
+    // 因为 Dart 的 group 不共享 setUp 变量。
+    late Directory dir;
+    late AppState appState;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('webhtv-hero-play');
+      appState = AppState(
+        paths: AppPaths.resolve(
+          overrides: {'roaming': dir.path, 'local': dir.path},
+        ),
+        log: LogService(),
+      );
+      await appState.bootstrap();
+    });
+
+    tearDown(() async {
+      appState.dispose();
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    final vod = Vod(
+      vodId: 'demo-1',
+      vodName: '剧集甲',
+      vodPlayFrom: '线路一',
+      vodPlayUrl: '第1集\$http://x/e1#第2集\$http://x/e2',
+    );
+
+    Future<void> pump(WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1400, 2000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(home: DetailPage(state: appState, vod: vod)),
+      );
+      await tester.pump();
+      // **注入「本页详情已到达」**：否则 `state.detailResult` 为 null
+      // （fake-async 区 HTTP 固定失败），`belongs` 恒为 false。
+      //
+      // 注：hero 按钮**本身**不依赖它（渲染条件只有 `lines.isNotEmpty`，
+      // 而 `widget.vod` 自带两集），但本任务断言的是 `design/02` §3 描述的
+      // 「详情到达后用历史决定文案」路径——不注入就是在测另一条路。
+      // 依据：`loadDetail` 在无站点服务时**提前返回**（`app_state.dart:2116`，
+      // 早于 `_detailResult = null`），注入不会被页面自身请求清掉。
+      appState.seedDetailForTest(vod: vod);
+      await tester.pump();
+    }
+
+    // **不要滚过 hero**：hero 按钮在**首屏**（`heroActions` 是 hero 的一部分），
+    // `phase3_detail_page_test.dart` 也是先断言 `detail-hero-play` 存在、
+    // **再** `scrollPastHero`。滚动反而会让懒加载列表销毁 hero，
+    // 使 `findsOneWidget` 失败。
+
+    testWidgets('无历史 → 文案「播放第一集」', (tester) async {
+      await pump(tester);
+      expect(find.text('播放第一集'), findsOneWidget);
+      expect(find.byKey(const ValueKey('detail-hero-play')), findsOneWidget);
+    });
+
+    testWidgets('有历史且有进度 → 文案「继续播放 · <集名>」', (tester) async {
+      appState.database!.upsertHistory(
+        siteKey: appState.selectedSite?.key ?? '',
+        vodId: 'demo-1',
+        vodName: '剧集甲',
+        flag: '线路一',
+        episodeName: '第2集',
+        episodeId: 'http://x/e2',
+        positionMs: 30000,
+        durationMs: 100000,
+      );
+      await pump(tester);
+      expect(find.text('继续播放 · 第2集'), findsOneWidget);
+      expect(find.byKey(const ValueKey('detail-hero-play')), findsOneWidget);
+    });
+
+    testWidgets('已看完 → 回到「播放第一集」', (tester) async {
+      appState.database!.upsertHistory(
+        siteKey: appState.selectedSite?.key ?? '',
+        vodId: 'demo-1',
+        vodName: '剧集甲',
+        flag: '线路一',
+        episodeName: '第2集',
+        episodeId: 'http://x/e2',
+        positionMs: 100000,
+        durationMs: 100000,
+        completed: true,
+      );
+      await pump(tester);
+      expect(find.text('播放第一集'), findsOneWidget);
+      expect(find.textContaining('继续播放'), findsNothing);
+    });
+  });
 }

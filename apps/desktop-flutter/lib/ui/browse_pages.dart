@@ -1139,6 +1139,27 @@ class _DetailPageState extends State<DetailPage> {
     );
   }
 
+  /// 首屏按钮文案（`docs/phase6/design/02` §3.1）。
+  ///
+  /// 只有「线路与集都对上」且还有续播位置才叫「继续播放」——两个条件都交给
+  /// 已有实现判断：`matched` 由 [resolveHistoryTarget] 给出，续播位置由
+  /// [AppState.resumePositionFor] 给出（它已把 `completed` 与「位置过短」
+  /// 一起处理）。这里不重复实现其中任何一条，否则两处判定会漂移。
+  ///
+  /// `matched == false` 时**不**提前返回：`historyPlayLabel` 内部已经判过
+  /// `matched` 并回落到 `fallback`，在这里再判一次就是重复判定——也正是
+  /// §3.1 要避免的那种漂移。
+  String _heroPlayLabel(List<VodPlayLine> lines, Vod vod) {
+    final target = _resumeTarget(lines);
+    final resume = widget.state.resumePositionFor(
+      siteKey: widget.state.selectedSite?.key ?? '',
+      vodId: vod.vodId,
+      flag: target.flag,
+      episodeId: _history?.episodeId,
+    );
+    return historyPlayLabel(target: target, resumePosition: resume);
+  }
+
   Vod? get _currentVod {
     final result = widget.state.detailResult;
     if (result != null &&
@@ -1395,10 +1416,17 @@ class _DetailPageState extends State<DetailPage> {
                               onPressed: () => _play(
                                 vod,
                                 _activeLine(lines),
-                                0,
+                                // 历史命中的那一集（`design/02` §3.2）。
+                                // `matched == false` 时它本来就是 0，
+                                // 正是「播放第一集」该有的行为，无需额外分支。
+                                //
+                                // 这里用的是**原始下标**（`VodPlayLine.episodes`
+                                // 的下标），而渲染下标经过季度过滤与倒序——
+                                // `_play` 要的正是原始下标（§3.3）。
+                                _resumeTarget(lines).episodeIndex,
                               ),
                               icon: const Icon(Icons.play_arrow),
-                              label: const Text('播放第一集'),
+                              label: Text(_heroPlayLabel(lines, vod)),
                             ),
                             if ((display.vodContent ?? tmdbData?.overview ?? '')
                                     .trim()
