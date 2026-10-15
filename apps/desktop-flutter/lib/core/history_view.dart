@@ -170,3 +170,122 @@ String historyPlayLabel({
   if (target.episodeName.isEmpty) return fallback;
   return '继续播放 · ${target.episodeName}';
 }
+
+/// 历史页的三种模式。
+enum HistoryViewMode {
+  /// 默认：点卡片按「点击行为」设置分流。
+  none,
+
+  /// 长按进入的删除态：点卡片即删该条（对齐上游 `HistoryAdapter#setDelete`）。
+  singleDelete,
+
+  /// 「批量删除」按钮进入的多选态：点卡片切换勾选。
+  multiSelect,
+}
+
+/// 不可变的历史页视图状态。
+class HistoryViewState {
+  const HistoryViewState({
+    required this.mode,
+    required this.selectedIds,
+    required this.keyword,
+  });
+
+  /// 初始态。
+  static const HistoryViewState initial = HistoryViewState(
+    mode: HistoryViewMode.none,
+    selectedIds: <int>{},
+    keyword: '',
+  );
+
+  final HistoryViewMode mode;
+
+  /// 已勾选的历史记录 id。仅 [HistoryViewMode.multiSelect] 有意义。
+  final Set<int> selectedIds;
+
+  /// **上一次已知的**搜索词。
+  ///
+  /// 它同时是 [withKeyword] 的比较基准：**任何**转移都不得重置它，
+  /// 否则基准漂移会导致每次 `setState` 都清空用户的勾选。
+  final String keyword;
+
+  HistoryViewState copyWith({
+    HistoryViewMode? mode,
+    Set<int>? selectedIds,
+    String? keyword,
+  }) => HistoryViewState(
+    mode: mode ?? this.mode,
+    selectedIds: selectedIds ?? this.selectedIds,
+    keyword: keyword ?? this.keyword,
+  );
+
+  /// 进入删除态（长按）。清空选中集——删除态没有"选中集"概念。
+  HistoryViewState enterSingleDelete() =>
+      copyWith(mode: HistoryViewMode.singleDelete, selectedIds: const <int>{});
+
+  /// 进入多选态（批量删除按钮）。清空选中集，避免带上上一次的残留。
+  HistoryViewState enterMultiSelect() =>
+      copyWith(mode: HistoryViewMode.multiSelect, selectedIds: const <int>{});
+
+  /// 退出到默认态。保留 [keyword]。
+  HistoryViewState exitMode() =>
+      copyWith(mode: HistoryViewMode.none, selectedIds: const <int>{});
+
+  /// 切换某条记录的勾选。非多选态下**不产生**选中。
+  HistoryViewState toggleSelection(int id) {
+    if (mode != HistoryViewMode.multiSelect) return this;
+    final next = <int>{...selectedIds};
+    if (!next.remove(id)) next.add(id);
+    return copyWith(selectedIds: next);
+  }
+
+  /// 全选：只勾选传入的**可见** id，不动已有的其他勾选。
+  HistoryViewState selectAll(List<int> visibleIds) {
+    if (mode != HistoryViewMode.multiSelect) return this;
+    return copyWith(selectedIds: {...selectedIds, ...visibleIds});
+  }
+
+  /// 清空勾选。
+  HistoryViewState clearSelection() =>
+      copyWith(selectedIds: const <int>{});
+
+  /// 更新搜索词。**变化时清空勾选**，未变化时返回同一实例。
+  ///
+  /// 为什么变化时必须清空：用户可能在多选态下搜索缩小范围，此时已勾选但
+  /// **已不可见**的条目若仍留在 [selectedIds] 里，点「删除选中(N)」会删掉
+  /// 用户看不见的条目。
+  ///
+  /// 为什么未变化时必须返回 `this`：调用方在 `setState` 里无条件调它，
+  /// 每次都返回新实例会让用户刚勾的项被清空。
+  HistoryViewState withKeyword(String next) {
+    if (next == keyword) return this;
+    return copyWith(keyword: next, selectedIds: const <int>{});
+  }
+
+  /// 是否可以执行批量删除。
+  bool get canDeleteSelected =>
+      mode == HistoryViewMode.multiSelect && selectedIds.isNotEmpty;
+
+  /// 已勾选的 id，**升序**。稳定顺序便于测试断言与"全选"的幂等性。
+  List<int> get selectedInOrder => selectedIds.toList()..sort();
+}
+
+/// 「点击历史记录」的行为（`docs/phase6/design/01` §4.1）。
+///
+/// 存字符串而不是 enum：本层是纯逻辑层，且要与 `settings.json` 的
+/// 字面值一一对应（与 `UiThemeMode` 同样的分层理由）。
+abstract final class UiHistoryClickAction {
+  /// 打开该条对应的详情页（默认）。
+  static const String detail = 'detail';
+
+  /// 直接续播（既有行为）。
+  static const String play = 'play';
+
+  static const List<String> values = [detail, play];
+
+  /// 把任意输入归一化成合法值；不认识的值回落到默认 [detail]。
+  static String normalize(String? raw) {
+    final value = raw?.trim().toLowerCase() ?? '';
+    return values.contains(value) ? value : detail;
+  }
+}
