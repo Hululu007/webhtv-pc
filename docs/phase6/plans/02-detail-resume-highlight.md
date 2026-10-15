@@ -1216,7 +1216,9 @@ git commit -m "新增：详情页首屏按钮读历史续播（design/02 §3）"
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `test/phase6_detail_resume_test.dart` 追加：
+在 `test/phase6_detail_resume_test.dart` 追加（**无需新增 import**——该文件已有
+`dart:io` / `material` / `app_paths` / `log_service` / `app_state` / `browse_pages` /
+`history_view` / `protocol` / `flutter_test`）：
 
 ```dart
   group('线路 chip 的「最近播放」标记（design/02 §5）', () {
@@ -1244,12 +1246,28 @@ git commit -m "新增：详情页首屏按钮读历史续播（design/02 §3）"
     final vod = Vod(
       vodId: 'demo-1',
       vodName: '剧集甲',
-      vodPlayFrom: '线路一$$$线路二',
+      // **`$$$` 必须转义**：`$` 在 Dart 字符串里是插值前缀，
+      // 写成 `'线路一$$$线路二'` 会编译失败
+      // （`A '$' has special meaning inside a string`）。
+      vodPlayFrom: '线路一\$\$\$线路二',
       vodPlayUrl:
           '第1集\$http://x/e1\$\$\$第1集\$http://y/e1',
     );
 
-    testWidgets('历史线路的 chip 上有标记，其他线路没有', (tester) async {
+    /// 装页面、注入详情、滚到线路条。
+    ///
+    /// **三件事缺一不可**（Task 3–4 的教训）：
+    /// 1. `seedDetailForTest` —— 否则 `detailResult` 为 null、`belongs` 恒为 false，
+    ///    走的不是 `design/02` §4 描述的「详情到达后」路径；
+    /// 2. 放大视口 —— 800×600 下线路条会被挤出可见区；
+    /// 3. **滚过满屏 hero** —— 线路条在正文（第二屏），而正文是懒加载
+    ///    `ListView`，不滚过去 `tmdb-line-selector` 根本没挂载，
+    ///    `tester.widget<ChoiceChip>` 会抛 `Bad state: No element`。
+    Future<void> pumpLineStrip(
+      WidgetTester tester, {
+      String historyFlag = '线路二',
+      String historyEpisodeId = 'http://y/e1',
+    }) async {
       tester.view.physicalSize = const Size(1400, 2000);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() {
@@ -1261,12 +1279,28 @@ git commit -m "新增：详情页首屏按钮读历史续播（design/02 §3）"
           home: DetailPage(
             state: appState,
             vod: vod,
-            historyFlag: '线路二',
-            historyEpisodeId: 'http://y/e1',
+            historyFlag: historyFlag,
+            historyEpisodeId: historyEpisodeId,
           ),
         ),
       );
       await tester.pump();
+      appState.seedDetailForTest(vod: vod);
+      await tester.pump();
+      for (var attempt = 0; attempt < 20; attempt++) {
+        if (find
+            .byKey(const ValueKey('tmdb-line-selector'))
+            .evaluate()
+            .isNotEmpty) {
+          return;
+        }
+        await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
+        await tester.pump();
+      }
+    }
+
+    testWidgets('历史线路的 chip 上有标记，其他线路没有', (tester) async {
+      await pumpLineStrip(tester);
 
       expect(
         find.byKey(const ValueKey('tmdb-line-recent-线路二')),
@@ -1279,23 +1313,7 @@ git commit -m "新增：详情页首屏按钮读历史续播（design/02 §3）"
     });
 
     testWidgets('标记不改变 chip 仍可点击切换', (tester) async {
-      tester.view.physicalSize = const Size(1400, 2000);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(() {
-        tester.view.resetPhysicalSize();
-        tester.view.resetDevicePixelRatio();
-      });
-      await tester.pumpWidget(
-        MaterialApp(
-          home: DetailPage(
-            state: appState,
-            vod: vod,
-            historyFlag: '线路二',
-            historyEpisodeId: 'http://y/e1',
-          ),
-        ),
-      );
-      await tester.pump();
+      await pumpLineStrip(tester);
 
       await tester.tap(find.byKey(const ValueKey('tmdb-line-线路一')));
       await tester.pumpAndSettle();
