@@ -44,7 +44,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 
 | 文件 | 职责 | 动作 |
 | --- | --- | --- |
-| `lib/core/history_view.dart` | 删除模式状态机 + 点击行为归一化（纯逻辑，不依赖 Flutter） | 创建 |
+| `lib/core/history_view.dart` | 删除模式状态机 + 点击行为归一化（纯逻辑，不依赖 Flutter） | **创建或追加**（见下） |
 | `lib/services/ui_preferences_store.dart` | 新增 `historyClickAction` 的读 / 写 / 落盘 | 修改 |
 | `lib/state/app_state.dart` | 暴露 `historyClickAction` 与 setter | 修改 |
 | `lib/ui/diagnostics_pages.dart` | 设置页新增「历史记录」区块 | 修改 |
@@ -57,8 +57,21 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 ### Task 1: 删除模式状态机与点击行为归一化（纯逻辑）
 
 **Files:**
-- Create: `lib/core/history_view.dart`
+- Create or append: `lib/core/history_view.dart`
 - Test: `test/phase6_history_view_test.dart`
+
+> **文件归属**：`lib/core/history_view.dart` 由**本任务与 plans/02 Task 1 共用**——
+> 本任务写「删除模式状态机 + 点击行为归一化」，plans/02 Task 1 写「历史解析 + 按钮文案」。
+> 两份计划都**追加**到同一文件，因此执行先后顺序不影响结果：
+> - 文件不存在 → 创建它（并写本任务的内容）；
+> - 文件已存在（plans/02 先执行过）→ **只在 import 区补 `library;` 之后的声明、在末尾追加**，
+>   不要改动 plans/02 已写入的 `HistoryResumeTarget` / `resolveHistoryTarget` 等。
+>
+> 相应地，Step 2 的 RED 预期分两种：
+> - 文件不存在 → `Target of URI doesn't exist: 'package:webhtv_pc/core/history_view.dart'`
+> - 文件已存在 → `Undefined name 'HistoryViewState'` / `Undefined name 'HistoryViewMode'`
+>
+> 两种都算 RED 成立。
 
 **Interfaces:**
 - Consumes: 无（纯逻辑，零依赖）
@@ -209,21 +222,41 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_view_test.dart
 ```
 
-预期：编译失败，`Target of URI doesn't exist: 'package:webhtv_pc/core/history_view.dart'`。
+预期：编译失败。文件不存在时是
+`Target of URI doesn't exist: 'package:webhtv_pc/core/history_view.dart'`；
+文件已存在（plans/02 先执行过）时是 `Undefined name 'HistoryViewState'`。
+两者都算 RED 成立。
 
 - [ ] **Step 3: 写最小实现**
 
-创建 `lib/core/history_view.dart`：
+创建（或追加到）`lib/core/history_view.dart`：
+
+> **追加时**：文件已有 `library;`（第 9 行）与 `import 'protocol.dart';`（第 11 行），
+> 以及 plans/02 写入的历史解析代码。你只需把下面的
+> `enum HistoryViewMode` / `class HistoryViewState` /
+> `abstract final class UiHistoryClickAction` 三块**追加到文件末尾**。
+>
+> **⚠️ 必须去掉代码块开头的那三行**：
+>
+> ```dart
+> /// 历史页的视图语义（…）   ← 删掉（文件头已有模块说明）
+> /// …                        ← 删掉
+> library;                    ← **必须删掉**
+> ```
+>
+> 原因（实测）：`library;` 指令**必须出现在所有其他指令之前**。
+> 文件第 11 行已有 `import 'protocol.dart';`，把带 `library;` 的块追加到末尾
+> 会产生**第二个** `library;` 且位于 import 之后，编译直接失败：
+>
+> ```
+> error - The library directive must appear before all other directives.
+>         - lib/core/history_view.dart - library_directive_not_first
+> ```
+>
+> 也不要重复写 `library;` 或改动 import 区。
+> **不要**动 `HistoryResumeTarget` / `resolveHistoryTarget` / `_episodeIndexOf` / `_indexOfUrl`。
 
 ```dart
-/// 历史页的视图语义（`docs/phase6/design/01` §3.4、§4）。
-///
-/// 纯逻辑层：不依赖 Flutter，也不依赖 `dart:io`。理由与
-/// `hot_rank_layout.dart`、`search_result_filter.dart` 一致——状态转移是
-/// 本轮最容易写错的语义（"长按进删除态后点谁删谁" vs "多选态只勾选"），
-/// 必须在无窗口、无网络环境下可单测。
-library;
-
 /// 历史页的三种模式。
 enum HistoryViewMode {
   /// 默认：点卡片按「点击行为」设置分流。

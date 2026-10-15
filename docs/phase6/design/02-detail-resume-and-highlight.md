@@ -30,31 +30,52 @@
 /// 详情页从历史恢复播放的目标。
 class HistoryResumeTarget {
   final String flag;          // 命中的线路 flag（空串表示未命中任何线路）
-  final int episodeIndex;     // 该线路内的剧集下标（-1 表示未命中）
+  final int episodeIndex;     // 该线路内的剧集下标（0 = 未命中时的第一条线路第 0 集）
   final String episodeName;
-  final Duration? position;   // 续播位置；null = 从头
-  final bool matched;         // 是否真的命中了历史
+  final bool matched;         // 是否**完整**命中（线路与集都对上）
 }
 
+/// 收标量而不是 `PlaybackHistory`：后者定义在 `services/storage.dart`，
+/// 而本模块属于纯逻辑层（`lib/core/` 不得依赖 `services/`，全仓无先例）。
 HistoryResumeTarget resolveHistoryTarget({
-  required PlaybackHistory? history,
+  required String historyFlag,
+  required String historyEpisodeId,
+  required String historyEpisodeName,
   required List<VodPlayLine> lines,
 });
 ```
+
+**续播位置不在本函数内**：`position` 由调用方用既有的
+`AppState.resumePositionFor(...)` 取（见 §2.3），因此 `HistoryResumeTarget`
+**不含** `position` 字段——两处判断会漂移。
 
 ### 2.1 线路匹配（对齐 `TmdbUIAdapter#selectPlaybackFlag`）
 
 三级顺序，**任一级命中即返回**：
 
-1. **精确 flag 命中**：`line.playbackFlag == history.flag`，且该线路**包含**
-   `history.episodeId`（作为某集的 `url`）。若 flag 命中但该线路不含这一集 →
-   降级到第 2 级。
+1. **精确 flag 命中**：`line.playbackFlag == history.flag`（`playbackFlag` 为
+   `sourceFlag ?? flag`，桥接合并时两者可能不同，故 `line.flag` 也试），
+   且该线路**包含** `history.episodeId`（作为某集的 `url`）。若 flag 命中但该线路
+   不含这一集 → **降级到第 2 级**。
 2. **集 URL 唯一命中**：在所有线路里找包含 `history.episodeId` 的线路；
    **恰好一条**才算命中（对齐上游 `uniqueFlagForEpisodeUrl`：多条命中 = 歧义 = 不猜）。
-3. **线路名命中**：`line.flag == history.flag`（PC 的 `flag` 与 `playbackFlag`
-   在桥接合并时可能不同，故两级都试）。
+3. **线路名命中**：`line.flag == history.flag`，**仅当历史没有集入口目标**
+   （`historyEpisodeId` 为空，即旧数据）。
+
+**为什么第 3 级必须带那个前提**（2026-10-14 修订，实现时发现计划自相矛盾）：
+历史带着集入口却一条线路都找不到它时，说明那一集已从所有线路里消失。
+此时按线路名"猜"第 0 集会把用户送到**错误的集**上；按「歧义就不猜」退回第一条
+线路更诚实。只有历史**没有**集入口时，线路名命中才是可信的**线路级**命中。
+
+> 这条前提是**实现阶段的裁定**，与 §2.1 第 1 条的「降级」措辞一致：
+> 第 1 级降级 → 第 2 级（URL 唯一）→ 若 URL 非空且第 2 级也没命中，
+> 就直接退回第一条线路，**不再**走第 3 级。
 
 全部未命中 → `flag` 取第一条线路、`episodeIndex = 0`、`matched = false`。
+
+**`matched` 的语义（Task 3 依赖它）**：只有**线路与集都对上**才是 `true`。
+`matched == false` 时详情页首屏按钮必须是「播放第一集」，**不得**显示「继续播放」；
+`_selectedLineFlag` 也**不得**因此改变（见 §4）。
 
 ### 2.2 集匹配
 
@@ -136,6 +157,25 @@ const DetailPage({
 
 **为什么在详情到达之后**：`_activeLine(lines)` 依赖 `lines`，而 `lines` 在
 详情请求返回前可能是列表页传入的残缺数据。在残缺数据上解析会得出错误线路。
+
+### 4.1 何时**不**自动切线路（B7 的精确语义）
+
+**只有 `target.matched == true` 才自动切线路。** `matched == false` 时
+`_selectedLineFlag` 保持空串（即第一条线路），**不**采用 `target.flag`。
+
+理由：`matched == false` 涵盖三种情形，它们都**不该**改变用户的线路选择——
+
+| 情形 | `target.flag` | 为什么不切 |
+| --- | --- | --- |
+| 完全没有历史 | 第一条线路 | 无历史可循 |
+| 历史线路存在但那一集已消失（§2.1 第 1 级降级 + URL 非空） | 第一条线路 | 解析已按「歧义就不猜」退回，切过去也没有那集 |
+| 历史线路存在、集也对上，但**集名兜底**命中（§2.2 第 2 条） | 该线路 | **这一种是 `matched == true`**，会切 |
+
+**B7 的断言因此要写成**：`matched == true` 时 `_selectedLineFlag == target.flag`；
+`matched == false` 时 `_selectedLineFlag` 为空串（渲染上等价于第一条线路）。
+
+**同样地，`recentFlag`（§5）与 `recentIndex`（§6）也只在 `matched == true` 时给出**——
+否则会给一条"其实没命中"的线路/集打上「最近播放」标记，用户点进去发现不是那一集。
 
 ---
 

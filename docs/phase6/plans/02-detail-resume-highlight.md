@@ -231,6 +231,11 @@ void main() {
         lines: lines,
       );
       expect(target.episodeIndex, 1, reason: '集名兜底');
+      // 集名兜底**也算完整命中**：线路对上了、集也对上了（只是靠名字而非 URL）。
+      // 这条断言是 Task 3 的前提——`matched` 决定是否自动切线路
+      // （`design/02` §4.1），不锁住它会让「集名兜底」的行为漂移。
+      expect(target.matched, isTrue, reason: '集名命中也是完整命中');
+      expect(target.episodeName, '第2集');
     });
 
     test('都不匹配时取第 0 集且 matched=false', () {
@@ -377,7 +382,15 @@ HistoryResumeTarget resolveHistoryTarget({
     }
   }
 
-  // 第三级：线路名命中（含 URL 为空或集已不存在的旧数据）。
+  // 第三级：线路名命中——**仅当历史没有集入口目标**（旧数据）。
+  //
+  // 为什么必须加这个前提：历史带着集入口却一条线路都找不到时，说明那一集已
+  // 从所有线路里消失，此时按线路名"猜"第 0 集会把用户送到错误的集上；按
+  // 「歧义就不猜」退回第一条线路。只有历史**没有**集入口（`episodeId` 为空，
+  // 旧数据）时，线路名命中才是可信的线路级命中。
+  if (historyEpisodeId.isNotEmpty) {
+    return HistoryResumeTarget.firstEpisodeOf(lines);
+  }
   for (final line in lines) {
     if (line.playbackFlag != historyFlag && line.flag != historyFlag) continue;
     final index = _episodeIndexOf(line, historyEpisodeId, historyEpisodeName);
@@ -424,7 +437,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（13 个用例）。
+预期：`All tests passed!`（12 个用例）。
 
 - [ ] **Step 5: 提交**
 
@@ -552,7 +565,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（17 个用例）。
+预期：`All tests passed!`（16 个用例：Task 1 的 12 + 本任务 4）。
 
 - [ ] **Step 5: 提交**
 
@@ -676,6 +689,27 @@ git commit -m "新增：首屏按钮文案决策（design/02 §3.1）"
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('历史线路在但那一集已消失 → 不切线路（design/02 §4.1）', (tester) async {
+      // 线路二存在，但 http://stale/gone 不在任何线路上 →
+      // §2.1 第 1 级降级、第 2 级因 URL 非空且无命中而止步、第 3 级被前提挡住
+      // → matched == false → **不得**把用户切到线路二（切过去也没有那一集）。
+      await pumpDetail(
+        tester,
+        vod: twoLineVod,
+        historyFlag: '线路二',
+        historyEpisodeId: 'http://stale/gone',
+      );
+
+      final first = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路一')),
+      );
+      expect(first.selected, isTrue, reason: 'matched=false 时保持第一条线路');
+      final second = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路二')),
+      );
+      expect(second.selected, isFalse);
+    });
+
     testWidgets('不传历史参数时行为不变（第一条线路）', (tester) async {
       await pumpDetail(tester, vod: twoLineVod);
       final first = tester.widget<ChoiceChip>(
@@ -775,23 +809,25 @@ class DetailPage extends StatefulWidget {
 (c) 把历史线路应用到 `_selectedLineFlag`。在 `build` 里 `final lines = state.playLinesOf(vod);` **之后**插入：
 
 ```dart
-    // 详情到达后自动切到历史线路（`docs/phase6/design/02` §4）。
+    // 详情到达后自动切到历史线路（`docs/phase6/design/02` §4、§4.1）。
     //
     // 为什么在 build 里而不是 initState：详情请求在页面挂载后才完成，
     // initState 时 lines 还是残缺的。
+    //
+    // **只有 `matched == true` 才切**（`design/02` §4.1）：`matched == false`
+    // 涵盖「无历史」「历史线路在但那一集已消失」两种情形，它们都不该改变
+    // 用户的线路选择——切过去也没有那一集。
     if (lines.isNotEmpty) {
       final target = _resumeTarget(lines);
-      if (target.flag.isNotEmpty && target.flag != _selectedLineFlag) {
-        // 只在「用户还没手动选过」时应用（`_selectedLineFlag` 为空）。
-        // 用户手动切过线路后，历史不得把选择抢回去。
-        if (_selectedLineFlag.isEmpty) {
-          _selectedLineFlag = target.flag;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            state.tmdb.selectLine(target.flag);
-            unawaited(state.reloadTmdb());
-          });
-        }
+      // 只在「用户还没手动选过」时应用（`_selectedLineFlag` 为空）。
+      // 用户手动切过线路后，历史不得把选择抢回去。
+      if (target.matched && _selectedLineFlag.isEmpty) {
+        _selectedLineFlag = target.flag;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          state.tmdb.selectLine(target.flag);
+          unawaited(state.reloadTmdb());
+        });
       }
     }
 ```
@@ -812,7 +848,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（20 个用例）。
+预期：`All tests passed!`（20 个用例：Task 1–2 的 16 + 本任务 4）。
 
 确认没打破详情页既有门禁：
 
@@ -1008,7 +1044,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（23 个用例）。
+预期：`All tests passed!`（23 个用例：Task 1–3 的 20 + 本任务 3）。
 
 - [ ] **Step 5: 提交**
 
@@ -1214,7 +1250,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（25 个用例）。
+预期：`All tests passed!`（25 个用例：Task 1–4 的 23 + 本任务 2）。
 
 确认没打破线路 chip 的既有门禁：
 
@@ -1538,7 +1574,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（28 个用例）。
+预期：`All tests passed!`（27 个用例：Task 1–5 的 25 + 本任务 2）。
 
 确认没打破剧集卡门禁：
 
