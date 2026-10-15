@@ -180,7 +180,7 @@ HistoryViewState withKeyword(String next) {
 
 沿用 `UiPreferencesStore` 既有模式：**缺席 = 默认**，只有用户显式选过才写盘
 （与 `themeMode`、`searchSimilarity` 相同）。非法值归一到 `detail`。
-新增 `historyClickActionOf(String?)` 归一化函数与 `UiHistoryClickAction` 常量类，
+新增 `UiHistoryClickAction` 常量类（含 `normalize(String?)` 静态方法），
 与 `UiThemeMode` 同构。
 
 ### 4.3 设置页入口

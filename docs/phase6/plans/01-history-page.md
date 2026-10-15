@@ -391,7 +391,14 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_view_test.dart
 ```
 
-预期：`All tests passed!`（13 个用例）。
+预期：`All tests passed!`（20 个用例：brief 13 + 变异自检补的 7 个钉子）。
+
+> **为什么是 20 而不是 13**（实现后回填）：**变异自检**跑了 17 个变异，发现 brief 自带的
+> 13 个用例有 **7 处覆盖缺口**（brief 点名担心的三个变异都被杀死了，
+> 但它未点名处有 7 个存活），包括 **`clearSelection()` 从未被执行过**、
+> `selectAll` 的两个契约都没锁住、`canDeleteSelected` 只锁了选中集维没锁模式维、
+> `normalize` 只喂了「已是小写」的输入。补钉后 **17/17 变异全杀**。
+> 实现与 brief **逐字一致、未多加一行**。
 
 - [ ] **Step 5: 提交**
 
@@ -586,7 +593,15 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_view_test.dart
 ```
 
-预期：`All tests passed!`（18 个用例）。
+预期：`All tests passed!`（28 个用例：Task 1 的 20 + 本任务 brief 5 + 变异自检补的 3 个钉子）。
+
+> **为什么是 28**（实现后回填）：brief 原文写「18」，它假设 Task 1 结束在 13 个用例——
+> 实际 Task 1 因变异自检补到 **20**。本任务再做变异自检，又发现 **2 个存活变异**
+> （**M4**：`load()` 不校验非法值；**M5**：无条件把默认值写盘），各补 1 个钉子。
+> 故 20 + 5 + 3 = 28。
+
+> **另一处 brief 事实性错误**（实现者报出）：brief 说「预期 18 个用例」，
+> 实际动手前该文件已有 20 个。以**实际代码**为准。
 
 再跑一次既有的偏好测试，确认没打破它：
 
@@ -724,7 +739,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_view_test.dart
 ```
 
-预期：`All tests passed!`（21 个用例）。
+预期：`All tests passed!`（31 个用例：Task 1–2 的 28 + 本任务 3）。
 
 - [ ] **Step 5: 提交**
 
