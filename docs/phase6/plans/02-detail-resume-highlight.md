@@ -598,13 +598,26 @@ git commit -m "新增：首屏按钮文案决策（design/02 §3.1）"
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `test/phase6_detail_resume_test.dart` 追加（import 区加
-`import 'dart:io';`、`import 'package:flutter/material.dart';`、
-`import 'package:webhtv_pc/services/app_paths.dart';`、
-`import 'package:webhtv_pc/services/log_service.dart';`、
-`import 'package:webhtv_pc/state/app_state.dart';`、
-`import 'package:webhtv_pc/ui/browse_pages.dart';`、
-`import 'package:webhtv_pc/core/tmdb_detail_model.dart';`）：
+在 `test/phase6_detail_resume_test.dart` 追加。该文件此时已有
+`flutter_test` / `history_view` / `protocol` 三个 import（Task 1 加的），
+本任务**再补四个**：
+
+```dart
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:webhtv_pc/services/app_paths.dart';
+import 'package:webhtv_pc/services/log_service.dart';
+import 'package:webhtv_pc/state/app_state.dart';
+import 'package:webhtv_pc/ui/browse_pages.dart';
+```
+
+> **不要**加 `import 'package:webhtv_pc/core/tmdb_detail_model.dart';`——
+> 本任务的用例用不到它，加了会触发 `unused_import`。
+>
+> **也不要**假设 `browse_pages.dart` 已经 import 了 `services/storage.dart`：
+> 实测它**没有**（既无 `PlaybackHistory` 引用也无该 import），
+> 所以实现步骤里要显式补上（见 Step 3）。
 
 ```dart
   group('DetailPage 自动选历史线路（design/02 §4）', () {
@@ -652,12 +665,41 @@ git commit -m "新增：首屏按钮文案决策（design/02 §3.1）"
         ),
       );
       await tester.pump();
+      // **必须滚过满屏 hero**：`DetailPage` 的背景 hero 是满屏的
+      // （`TmdbDetailHeader` 在 1400×2000 视口下实测占满整屏），正文因此从
+      // **第二屏**开始；而正文是懒加载 `ListView`，不滚过去线路条根本没被挂载，
+      // `tester.widget<ChoiceChip>` 会抛 `Bad state: No element`。
+      //
+      // 这与 `phase3_detail_page_test.dart` 的 `scrollPastHero` 是同一件事
+      // （那里的注释写着「背景 hero 现在是满屏的…正文因此从第二屏开始」）。
+      await revealLineSelector(tester);
+    }
+
+    /// 按增量拖动外层 `Scrollable`，直到线路条挂载（最多 20 次）。
+    ///
+    /// 只会「找不到就继续拖」：真的找不到时下游
+    /// `tester.widget<ChoiceChip>` 会直接失败，**不会**产生假通过。
+    Future<void> revealLineSelector(WidgetTester tester) async {
+      for (var attempt = 0; attempt < 20; attempt++) {
+        if (find
+            .byKey(const ValueKey('tmdb-line-selector'))
+            .evaluate()
+            .isNotEmpty) {
+          return;
+        }
+        await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
+        await tester.pump();
+      }
     }
 
     final twoLineVod = Vod(
       vodId: 'demo-1',
       vodName: '剧集甲',
-      vodPlayFrom: '线路一$$$线路二',
+      // **`$$$` 必须转义**：`$` 在 Dart 字符串里是插值前缀，
+      // 写成 `'线路一$$$线路二'` 会编译失败
+      // （`A '$' has special meaning inside a string`）。
+      // TVBox 的线路分隔符就是字面 `$$$`，转义不改变语义。
+      vodPlayFrom: '线路一\$\$\$线路二',
       vodPlayUrl:
           '第1集\$http://x/e1#第2集\$http://x/e2'
           '\$\$\$'
@@ -724,6 +766,31 @@ git commit -m "新增：首屏按钮文案决策（design/02 §3.1）"
         find.byKey(const ValueKey('tmdb-line-线路一')),
       );
       expect(first.selected, isTrue);
+    });
+
+    testWidgets('旧数据（无集入口）按线路名命中但集未对上 → 不切线路', (tester) async {
+      // **这个用例是 §4.1 裁定的唯一钉子。**
+      //
+      // 为什么必须单独有它：上面三个 `matched == false` 的场景里，
+      // `resolveHistoryTarget` 返回的都是 `firstEpisodeOf(lines)`，
+      // 其 `flag` 恰好就是第一条线路——于是「正确实现（`target.matched`）」
+      // 与「错误实现（`target.flag.isNotEmpty`）」**行为完全一致**，无法区分。
+      // 变异测试实测：把 `target.matched` 换成 `target.flag.isNotEmpty`，
+      // 上面全部用例照样通过。
+      //
+      // 本用例走 §2.1 **第三级**（历史没有集入口 → 按线路名命中）：
+      // `flag == '线路二'` 但 `matched == false`。
+      // 正确实现不切（仍选线路一）；错误实现会切到线路二 → 本用例失败。
+      await pumpDetail(tester, vod: twoLineVod, historyFlag: '线路二');
+
+      final first = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路一')),
+      );
+      expect(first.selected, isTrue, reason: 'matched=false 时保持第一条线路');
+      final second = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-line-线路二')),
+      );
+      expect(second.selected, isFalse, reason: '不得切到只按线路名命中的线路');
     });
   });
 ```
@@ -840,14 +907,18 @@ class DetailPage extends StatefulWidget {
     }
 ```
 
-(d) 顶部 import 追加：
+(d) 顶部 import 追加**两个**：
 
 ```dart
 import '../core/history_view.dart';
+import '../services/storage.dart';
 ```
 
-> 若 `PlaybackHistory` 未 import，`browse_pages.dart` 已有
-> `import '../services/storage.dart';`（用于 `_play` 的续播查询），无需新增。
+> **必须显式加 `storage.dart`**：`_history` 的返回类型是
+> `PlaybackHistory?`，它定义在 `services/storage.dart`。
+> 不要假设该文件已经 import 了它——实测 `browse_pages.dart` 既没有
+> `PlaybackHistory` 的任何引用，也没有这个 import（原计划此处写「已有、无需新增」，
+> **是错的**）。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -856,7 +927,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（20 个用例：Task 1–2 的 16 + 本任务 4）。
+预期：`All tests passed!`（21 个用例：Task 1–2 的 16 + 本任务 5）。
 
 确认没打破详情页既有门禁：
 
@@ -1052,7 +1123,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（23 个用例：Task 1–3 的 20 + 本任务 3）。
+预期：`All tests passed!`（24 个用例：Task 1–3 的 21 + 本任务 3）。
 
 - [ ] **Step 5: 提交**
 
@@ -1258,7 +1329,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（25 个用例：Task 1–4 的 23 + 本任务 2）。
+预期：`All tests passed!`（26 个用例：Task 1–4 的 24 + 本任务 2）。
 
 确认没打破线路 chip 的既有门禁：
 
@@ -1582,7 +1653,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_detail_resume_test.dart
 ```
 
-预期：`All tests passed!`（27 个用例：Task 1–5 的 25 + 本任务 2）。
+预期：`All tests passed!`（28 个用例：Task 1–5 的 26 + 本任务 2）。
 
 确认没打破剧集卡门禁：
 
