@@ -293,17 +293,50 @@ final history = (widget.historyFlag.isNotEmpty || widget.historyEpisodeId.isNotE
 
 ## 8. 验收
 
-| # | 断言 |
-| --- | --- |
-| B1 | 无历史 → 按钮文案「播放第一集」，点击播第一条线路第 0 集 |
-| B2 | 有历史且命中 → 按钮文案「继续播放 · <集名>」，点击播**那一集** |
-| B3 | 有历史但已看完 → 按钮文案回到「播放第一集」（`resumePositionFor` 返回 null） |
-| B4 | 有历史但位置过短 → 同上 |
-| B5 | 历史线路已不存在 → 退回第一条线路，不报错 |
-| B6 | 历史集入口目标在多条线路里都出现 → 判定歧义，退回第一条线路 |
-| B7 | 打开详情页时自动切到历史线路（`_selectedLineFlag == history.flag`） |
-| B8 | 线路 chip 上出现「最近播放」标记，且该 chip 仍可点击切换 |
-| B9 | 选集卡片上出现「上次看到这里」标记，外壳仍是 `OutlinedButton` |
-| B10 | 剧照仍是 16:9 |
-| B11 | `detail-hero-play` key 仍存在 |
-| B12 | 从历史页点卡片进详情页时，站点已先切换（不串站） |
+| # | 断言 | 状态 |
+| --- | --- | --- |
+| B1 | 无历史 → 按钮文案「播放第一集」，点击播第一条线路第 0 集 | ✅ Task 4 |
+| B2 | 有历史且命中 → 按钮文案「继续播放 · <集名>」，点击播**那一集** | ✅ Task 4（含变异钉子） |
+| B3 | 有历史但已看完 → 按钮文案回到「播放第一集」（`resumePositionFor` 返回 null） | ✅ Task 4 |
+| B4 | 有历史但位置过短 → 同上 | ✅ 组合覆盖（见下注） |
+| B5 | 历史线路已不存在 → 退回第一条线路，不报错 | ✅ Task 3 |
+| B6 | 历史集入口目标在多条线路里都出现 → 判定歧义，退回第一条线路 | ✅ Task 1 |
+| B7 | 打开详情页时自动切到历史线路（`_selectedLineFlag == history.flag`） | ✅ Task 3（§4.1 已精确化） |
+| B8 | 线路 chip 上出现「最近播放」标记，且该 chip 仍可点击切换 | ✅ Task 5（含变异钉子） |
+| B9 | 选集卡片上出现「上次看到这里」标记，外壳仍是 `OutlinedButton` | ✅ Task 6（含两颗变异钉子） |
+| B10 | 剧照仍是 16:9 | ❌ **未达成**（见下） |
+| B11 | `detail-hero-play` key 仍存在 | ✅ Task 4 + `phase3_detail_page_test` |
+| B12 | 从历史页点卡片进详情页时，站点已先切换（不串站） | ⏸ 由 **plans/01 Task 8** 交付 |
+
+### 8.1 B4 是组合覆盖，不是缺口
+
+B4 的链条由三段既有测试拼成，**没有**一条端到端用例：
+
+1. `resumePositionFor(positionMs: 4999)` → `null` ——
+   已由 `test/phase2_resume_test.dart:94` 覆盖（短位置分支）；
+2. `historyPlayLabel(target, resumePosition: null)` → `'播放第一集'` ——
+   已由 plans/02 Task 2 的用例 2 覆盖；
+3. `_heroPlayLabel` 把两者接起来 —— 已由 Task 4 的用例 3（`completed` 路径）
+   覆盖**同一段**接线代码。
+
+`historyPlayLabel` 对 `resumePosition == null` 一视同仁，**不关心它为何为 null**，
+所以 `completed` 与「位置过短」在标签层走的是同一条路径。
+因此 B4 判定为**已覆盖**，但记录在案：若将来要给 B4 加端到端钉子，
+只需把 Task 4 用例 3 的 `completed: true` 换成 `positionMs: 4999`。
+
+### 8.2 B10 未达成 —— 既有偏差，不在本轮修
+
+**实测**：`TmdbEpisodeCardTile` 的剧照是 `SizedBox(height: 110)`，
+**宽度随列宽变化**（实测 143–266px），因此它**从来就不是** 16:9。
+本节原文写「剧照**仍是** 16:9」——「仍是」这个前提**不成立**，
+这处偏差**先于 Phase 6**。
+
+**为什么不在本轮修**：改成 `AspectRatio(16/9)` 会让剧照高度随宽度在 80–149px 之间变化，
+而卡片高度是固定 `196`（`mainAxisExtent`）——
+宽度大的列（如集数少时 266px → 剧照 149px）会**溢出**。
+要修就必须同时改卡片高度与网格 `mainAxisExtent` 的计算，
+而 `DESIGN.md` 的 Metric-Neutral Rule 明确警告净高度变化会把控件挤出
+800×600 测试视口。这是一个**独立的重构任务**，需要自己的计划与审查。
+
+**追踪**：记入 Phase 6 ledger 的 deferred 列表，交最终验收裁定。
+不得在本阶段以「改测试」的方式让它通过。
