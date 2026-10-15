@@ -739,7 +739,23 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_view_test.dart
 ```
 
-预期：`All tests passed!`（31 个用例：Task 1–2 的 28 + 本任务 3）。
+预期：`All tests passed!`（35 个用例：Task 1–2 的 28 + 本任务 brief 3 + 变异自检补的 4 个钉子）。
+
+> **为什么是 35 而不是 21**（实现后回填）：brief 原文写「21」，它假设 Task 1 结束在 13——
+> 实际 Task 1 补到 20、Task 2 补到 28。本任务再做变异自检，发现 **1 个存活变异**：
+> **D**：把 `notifyListeners()` 挪到 `await` **之前** → 监听者收到通知时读到的是**旧值**，
+> UI 会用旧模式重建且不再刷新。已补钉子「通知发出时 getter 已是新值」。
+> 故 28 + 3 + 4 = 35。
+
+> **brief 的另一处事实性错误**（实现者报出）：brief 的落盘用例假设 settings 在
+> `<dir>/settings.json`，实测在 `<dir>/webhtv-pc/settings.json`
+> （`configDir = p.join(roaming, appName)`）。应以
+> `AppPaths.resolve(...).settingsPath` 取真实路径，**不要写死路径假设**。
+
+> **一条值得后续注意的盲区**（实现者报出）：brief 的原始用例只**数通知次数**，
+> 不校验**回调里读到的值**——所以「通知时机」错了也测不出来。
+> 既有测试对 `themeMode` 等其它偏好转发有**同样的盲区**。
+> 记入 ledger，交最终审查决定是否统一加固。
 
 - [ ] **Step 5: 提交**
 
