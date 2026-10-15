@@ -31,13 +31,18 @@
 - 每张历史卡片**只渲染一次**片名 `Text`（`integration_test/phase5_sync_flow_test.dart` 按 `find.text(name)` 断言 `findsOneWidget`）。
 - 「清空历史」按钮文案**不得改动**（`integration_test/mvp_a_flow_test.dart` 按 `find.text('清空历史')` 断言）。
 - 批量删除必须**逐条**调 `AppState.deleteHistory(id)`，**不得**新增批量 SQL 删除路径（否则漏写 `history_deletions` 标记，安卓下次推来旧记录会复活）。
-- **widget 测试的前置条件**（plans/02 的教训，同一类缺陷出现过 5 次）：
-  - `HistoryPage` **没有**满屏 hero，列表紧接搜索行，且测试视口充裕
+- **widget 测试的前置条件**（plans/02 的教训，同一类缺陷出现过 5 次）：  - `HistoryPage` **没有**满屏 hero，列表紧接搜索行，且测试视口充裕
     （1200×1600 / 1400×1000）、条目数少（3–5 条）→ **本计划不需要滚动**。
   - 但**若**你把列表改到视口外（例如加了高区块），必须补
     「找不到就继续拖」的循环（见 `phase3_detail_page_test.dart` 的 `scrollPastHero`）。
   - 需要注入假数据时用既有 `seedListingForTest` / `seedDetailForTest`
     （`app_state.dart`），**不要**靠真实网络。
+- **「默认选中 X」型断言的普遍盲区**（Task 4 的变异自检发现，对 Task 5–8 同样适用）：
+  **默认值断言无法区分「读 AppState 的默认值」与「硬编码常量」** ——
+  在一个新 state 上，两种实现的观察结果完全相同。
+  因此凡「默认选中 X / 默认是某模式」的用例，必须**再加一条**：
+  先用 `tester.runAsync` 把偏好改成**非默认值**，再 pump 页面，断言反映的是**那个值**。
+  否则「用户改过设置、重启后回到默认」这类回归无人拦截。
 - 测试命令（本机 Flutter 不在 PATH，需用绝对路径；并须清掉损坏的 git 环境变量）：
 
 ```powershell
@@ -920,7 +925,13 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_page_test.dart
 ```
 
-预期：`All tests passed!`（3 个用例）。
+预期：`All tests passed!`（4 个用例：brief 3 + 变异自检补的 1 个钉子）。
+
+> **为什么是 4 而不是 3**（实现后回填）：变异自检发现**变异 A 存活** ——
+> 把初始选中项**硬编码**成 `UiHistoryClickAction.detail`（不读 `AppState`），
+> brief 给的 3 个用例**全绿**。根因就是上面 Global Constraints 里那条盲区：
+> 默认值断言区分不了「读默认值」与「硬编码默认值」。
+> 补的钉子：先 `tester.runAsync` 把偏好写成 `play`，再 pump 页面，断言 `selected == {play}`。
 
 再确认没打破设置页既有门禁：
 
