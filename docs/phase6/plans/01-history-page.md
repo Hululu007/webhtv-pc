@@ -2111,7 +2111,42 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_page_test.dart
 ```
 
-预期：`All tests passed!`（23 个用例）。
+预期：`All tests passed!`（43 个用例）。
+
+> **计数回填（实现后）**：Task 7 结束时 35 个 → 本轮 +8 = **43**。
+> brief 写的「23」与任何口径都对不上（35 + brief 的 3 = 38）。
+>
+> **brief 的 2 处缺陷**（实现时发现，已在上方片段修正）：
+>
+> 1. **三条用例都缺「配置前置」**：`setUp` 的 `state` 没有配置
+>    （`bootstrap()` 不导入任何配置），而 `_openDetail` / `_resume` 都要求
+>    「站点在配置里」——不导入配置时三条用例全部走「站点不在配置中」分支，
+>    第一条（期望进详情页）必红。已加 `seedSite()` 辅助函数：
+>    导入**内联 JSON** 配置（不联网；`configFor(url)` 是 URL 源，在
+>    `testWidgets` 的 fake-async 区会拿到 400）。
+> 2. **`play` 用例会挂死**（`did not complete`，无 Exception 日志）：
+>    `setHistoryClickAction` 会真实写盘，而 `testWidgets` 是假时钟，
+>    写盘回调不会被 `pump` 推进。同文件上方的
+>    「已保存的偏好决定初始选中项」用例已踩过同一个坑。已改为
+>    `tester.runAsync(() => state.setHistoryClickAction(...))`。
+>
+> **另补 5 条 brief 没有的钉子 + 2 处测试基建**（预检/变异自检发现）：
+> - 「进详情页前先切到该记录所属站点（不串站）」——用双站点配置断言
+>   `selectedSite.key` 真的变了（`search_page.dart#_openResult` 同因）；
+> - 「详情页收到该条历史的线路与集入口」（`design/02` §7.1：点旧记录不得续新记录）；
+> - 「删除态下点卡片不跳详情页」「多选态下点卡片不跳详情页」；
+> - 「play 模式下站点不在配置中同样给提示」；
+> - **测试基建 ①**：注入 `_RecordingSiteClient`（`http.BaseClient` 子类）
+>   —— 避免 fake-async 区里的真实 socket I/O 挂死，同时让「是否真的发起了
+>   播放入口请求（`play=` 参数）」可断言。只断言「没进详情页」是弱断言，
+>   「什么都没发生」也能让它绿。
+> - **测试基建 ②**：`runAsync` 之后要 `pump(Duration(milliseconds: 300))`
+>   把 `LogService._enqueue` 的 0 延迟刷盘 `Timer` 泵完，否则报
+>   `A Timer is still pending even after the widget tree was disposed`。
+>
+> **变异自检 6/6 全部杀死**：①分流恒为 detail（忽略设置）；②分流恒为 play；
+> ③进详情页前不切站点；④站点缺失时静默返回；⑤不传历史的 flag/episodeId；
+> ⑥删除态也走分流（点卡片会跳详情页）。
 
 - [ ] **Step 5: 提交**
 
