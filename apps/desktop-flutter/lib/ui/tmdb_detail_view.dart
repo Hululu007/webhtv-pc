@@ -28,6 +28,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 
+import '../core/episode_range.dart';
 import '../core/app_error.dart';
 import '../core/person_work_filters.dart';
 import '../core/tmdb_detail_model.dart';
@@ -801,7 +802,7 @@ class TmdbEpisodeSection extends StatelessWidget {
 /// 也让用户在「点哪个」上犹豫；卡片信息量更大（剧照/集号/标题/日期/时长）。
 ///
 /// 卡片数量恒等于线路剧集数（不补集、不丢集）。
-class TmdbEpisodeStrip extends StatelessWidget {
+class TmdbEpisodeStrip extends StatefulWidget {
   const TmdbEpisodeStrip({
     super.key,
     required this.cards,
@@ -812,17 +813,26 @@ class TmdbEpisodeStrip extends StatelessWidget {
     this.height = 196,
     this.gridMode = false,
     this.recentIndex = -1,
+    this.ranges = const [],
+    this.rangeIndex = 0,
+    this.onRangeChanged,
   });
 
   final List<TmdbEpisodeCard> cards;
   final String keyPrefix;
   final String actionLabel;
+
+  /// 卡片点击。
+  ///
+  /// `index` 是**管线原始下标**（`cards` 的下标），**不是当前区间的下标**：
+  /// 分页只切渲染（`docs/phase6/design/03` §4.5），调用方的「渲染下标 →
+  /// 线路原始下标」换算必须拿到未切片的下标，否则会二次映射、静默播错集。
   final void Function(int index, TmdbEpisodeCard card)? onTap;
 
   /// 「最近播放」的卡片下标（-1 = 无）。
   ///
-  /// 注意是**渲染下标**：调用方已把线路原始下标换算过
-  /// （`docs/phase6/design/02` §6）。
+  /// 与 [onTap] 的下标同一口径：**管线原始下标**（`cards` 的下标），
+  /// 因此区间切片后仍能正确标中（`docs/phase6/design/02` §6）。
   final int recentIndex;
 
   /// 单卡宽度。
@@ -838,56 +848,178 @@ class TmdbEpisodeStrip extends StatelessWidget {
   /// 更多集；上游同样提供「列表/网格」两种模式切换。
   final bool gridMode;
 
+  /// 区间分组（`docs/phase6/design/03` §4.3）。空或只有 1 个区间时不渲染区间条。
+  final List<EpisodeRange> ranges;
+
+  /// 当前区间下标。
+  final int rangeIndex;
+
+  final ValueChanged<int>? onRangeChanged;
+
+  @override
+  State<TmdbEpisodeStrip> createState() => _TmdbEpisodeStripState();
+}
+
+class _TmdbEpisodeStripState extends State<TmdbEpisodeStrip> {
+  final ScrollController _rangeScroll = ScrollController();
+
+  /// 单个区间 chip 的估算宽度（含间距）。用于把选中区间滚入视野。
+  static const double _rangeChipExtent = 72;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollToRange();
+  }
+
+  @override
+  void didUpdateWidget(covariant TmdbEpisodeStrip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.rangeIndex != widget.rangeIndex) _scrollToRange();
+  }
+
+  @override
+  void dispose() {
+    _rangeScroll.dispose();
+    super.dispose();
+  }
+
+  /// 把选中区间滚入视野（对齐上游 `renderEpisodeRanges` 的 `smoothScrollTo`）。
+  ///
+  /// 在 post-frame 回调里做：`maxScrollExtent` 要等本帧布局完成才可用。
+  ///
+  /// 为什么不用 `GlobalKey` + `Scrollable.ensureVisible`：那要求把 `GlobalKey`
+  /// 挂在**选中的那个** chip 上，而测试按 `ValueKey('<prefix>-range-<i>')`
+  /// 定位区间 chip——一个 widget 只能有一个 key，两者不能同时满足。
+  /// 用 `ScrollController` 算偏移则所有 chip 都能保留各自的 `ValueKey`。
+  void _scrollToRange() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_rangeScroll.hasClients) return;
+      final target = (widget.rangeIndex * _rangeChipExtent - 12).clamp(
+        0.0,
+        _rangeScroll.position.maxScrollExtent,
+      );
+      _rangeScroll.animateTo(
+        target,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  /// 生效的区间下标（防越界）。
+  int get _safeRangeIndex => widget.ranges.isEmpty
+      ? 0
+      : widget.rangeIndex.clamp(0, widget.ranges.length - 1);
+
+  /// 当前要渲染的卡片与它们在 [TmdbEpisodeStrip.cards] 里的**原始下标**。
+  ///
+  /// 为什么要把原始下标一路带着走：分页只切**渲染**（§4.5），
+  /// 卡片 key 后缀、`onTap` 回调、`isRecent` 判定全部要用原始下标，
+  /// 否则第 2 区间会与第 1 区间撞 key、点卡会播错集。
+  List<(int, TmdbEpisodeCard)> get _visibleEntries {
+    if (widget.ranges.length <= 1) {
+      return [for (var i = 0; i < widget.cards.length; i++) (i, widget.cards[i])];
+    }
+    final range = widget.ranges[_safeRangeIndex];
+    // 与 `EpisodeRangePolicy.slice` 同一套夹取规则，保证下标与它切出的
+    // 卡片**一一对应**（`slice` 会把 start 夹到 `[0, length]`）。
+    final start = range.start.clamp(0, widget.cards.length);
+    final end = range.end.clamp(start, widget.cards.length);
+    return [for (var i = start; i < end; i++) (i, widget.cards[i])];
+  }
+
+  /// 区间 chip 条。**只在区间数 > 1 时渲染**（否则白占一行高度，
+  /// 把控件挤出 800×600 测试视口）。
+  Widget _buildRangeBar(BuildContext context) => SizedBox(
+    height: 36,
+    child: ListView.separated(
+      key: ValueKey('${widget.keyPrefix}-range-strip'),
+      controller: _rangeScroll,
+      scrollDirection: Axis.horizontal,
+      itemCount: widget.ranges.length,
+      separatorBuilder: (_, _) => const SizedBox(width: 8),
+      itemBuilder: (context, index) => ChoiceChip(
+        key: ValueKey('${widget.keyPrefix}-range-$index'),
+        label: Text(widget.ranges[index].label),
+        selected: index == _safeRangeIndex,
+        onSelected: widget.onRangeChanged == null
+            ? null
+            : (_) => widget.onRangeChanged!(index),
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
-    if (cards.isEmpty) return const SizedBox.shrink();
-    if (gridMode) {
+    if (widget.cards.isEmpty) return const SizedBox.shrink();
+    final entries = _visibleEntries;
+    final strip = _buildStrip(context, entries);
+    if (widget.ranges.length <= 1) return strip;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [_buildRangeBar(context), const SizedBox(height: 8), strip],
+    );
+  }
+
+  /// 网格模式或横向滚动条。
+  ///
+  /// [entries] 是 `(原始下标, 卡片)`：所有 key 与回调都用**原始下标**。
+  Widget _buildStrip(
+    BuildContext context,
+    List<(int, TmdbEpisodeCard)> entries,
+  ) {
+    if (widget.gridMode) {
       return GridView.builder(
-        key: ValueKey('$keyPrefix-grid'),
+        key: ValueKey('${widget.keyPrefix}-grid'),
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
         gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: cardWidth + 12,
-          mainAxisExtent: height,
+          maxCrossAxisExtent: widget.cardWidth + 12,
+          mainAxisExtent: widget.height,
           crossAxisSpacing: 10,
           mainAxisSpacing: 10,
         ),
-        itemCount: cards.length,
-        itemBuilder: (context, index) => TmdbEpisodeCardTile(
-          buttonKey: ValueKey('$keyPrefix-$index'),
-          stillKey: ValueKey('$keyPrefix-still-${cards[index].number}'),
-          card: cards[index],
-          actionLabel: actionLabel,
-          isRecent: index == recentIndex,
-          recentKey: ValueKey('$keyPrefix-recent-$index'),
-          onTap: onTap == null ? null : () => onTap!.call(index, cards[index]),
+        itemCount: entries.length,
+        itemBuilder: (context, index) => _tile(
+          originalIndex: entries[index].$1,
+          card: entries[index].$2,
         ),
       );
     }
     return SizedBox(
-      height: height,
+      height: widget.height,
       child: ListView.separated(
-        key: ValueKey('$keyPrefix-strip'),
+        key: ValueKey('${widget.keyPrefix}-strip'),
         scrollDirection: Axis.horizontal,
-        itemCount: cards.length,
+        itemCount: entries.length,
         separatorBuilder: (_, _) => const SizedBox(width: 10),
         itemBuilder: (context, index) => SizedBox(
-          width: cardWidth,
-          child: TmdbEpisodeCardTile(
-            buttonKey: ValueKey('$keyPrefix-$index'),
-            stillKey: ValueKey('$keyPrefix-still-${cards[index].number}'),
-            card: cards[index],
-            actionLabel: actionLabel,
-            isRecent: index == recentIndex,
-            recentKey: ValueKey('$keyPrefix-recent-$index'),
-            onTap: onTap == null
-                ? null
-                : () => onTap!.call(index, cards[index]),
+          width: widget.cardWidth,
+          child: _tile(
+            originalIndex: entries[index].$1,
+            card: entries[index].$2,
           ),
         ),
       ),
     );
   }
+
+  /// 单张卡片。[originalIndex] 是 `cards` 里的下标（不是区间内下标）。
+  Widget _tile({
+    required int originalIndex,
+    required TmdbEpisodeCard card,
+  }) => TmdbEpisodeCardTile(
+    buttonKey: ValueKey('${widget.keyPrefix}-$originalIndex'),
+    stillKey: ValueKey('${widget.keyPrefix}-still-${card.number}'),
+    card: card,
+    actionLabel: widget.actionLabel,
+    isRecent: originalIndex == widget.recentIndex,
+    recentKey: ValueKey('${widget.keyPrefix}-recent-$originalIndex'),
+    onTap: widget.onTap == null
+        ? null
+        : () => widget.onTap!.call(originalIndex, card),
+  );
 }
 
 /// 详情页主体（站点页与纯 TMDB 页共用）。

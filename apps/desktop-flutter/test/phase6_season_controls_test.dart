@@ -16,6 +16,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:webhtv_pc/core/episode_range.dart';
 import 'package:webhtv_pc/core/protocol.dart';
 import 'package:webhtv_pc/core/tmdb_config.dart';
 import 'package:webhtv_pc/core/tmdb_detail_model.dart';
@@ -696,6 +697,308 @@ void main() {
       await tester.pump();
 
       expect(find.byKey(const ValueKey('tmdb-choose-season')), findsOneWidget);
+    });
+  });
+
+  group('选集区间条（design/03 §4.3、§4.5）', () {
+    List<TmdbEpisodeCard> cardsFor(int count) => [
+      for (var i = 1; i <= count; i++)
+        TmdbEpisodeCard(number: i, title: '第$i集'),
+    ];
+
+    /// 当前条上实际挂载的**卡片**（排除区间 chip）。
+    ///
+    /// 横向 `ListView` 是**懒构建**的：1400 宽视口下只挂载 ~6 张卡，
+    /// 因此不能用它数「本区间共几张卡」。
+    Finder cardButtons(String keyPrefix) => find.byWidgetPredicate(
+      (widget) =>
+          widget is OutlinedButton &&
+          widget.key is ValueKey<String> &&
+          (widget.key! as ValueKey<String>).value.startsWith('$keyPrefix-') &&
+          !(widget.key! as ValueKey<String>).value.contains('range') &&
+          !(widget.key! as ValueKey<String>).value.contains('still'),
+    );
+
+    Future<void> pumpStrip(
+      WidgetTester tester, {
+      required int count,
+      required List<EpisodeRange> ranges,
+      int rangeIndex = 0,
+      ValueChanged<int>? onRangeChanged,
+      void Function(int index, TmdbEpisodeCard card)? onTap,
+      bool gridMode = true,
+    }) async {
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              // `gridMode: true`：`shrinkWrap` + 不可滚会**构建全部**子项，
+              // 因此能用 `findsNWidgets` 数卡片数（横向 `ListView` 是懒构建的，
+              // 数不准）。
+              child: TmdbEpisodeStrip(
+                keyPrefix: 'tmdb-episode-card-线路一',
+                cards: cardsFor(count),
+                ranges: ranges,
+                rangeIndex: rangeIndex,
+                onRangeChanged: onRangeChanged,
+                onTap: onTap,
+                gridMode: gridMode,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('区间数 > 1 时渲染区间条', (tester) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, false);
+      await pumpStrip(tester, count: 70, ranges: ranges);
+
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-range-strip')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-range-0')),
+        findsOneWidget,
+      );
+      // 70 集、每段 40 → 标签 1-40 / 41-70（brief 写的 1-20 误用了每段 20）。
+      expect(find.text('1-40'), findsWidgets);
+      expect(find.text('41-70'), findsWidgets);
+    });
+
+    testWidgets('区间数为 1 时不渲染区间条', (tester) async {
+      final ranges = EpisodeRangePolicy.build(10, 0, false);
+      await pumpStrip(tester, count: 10, ranges: ranges);
+
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-range-strip')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('只渲染当前区间的卡片', (tester) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, false);
+      await pumpStrip(tester, count: 70, ranges: ranges, rangeIndex: 0);
+
+      // 区间 0 = [0, 40) → 40 张卡（70 集的阶梯值是 40，不是 20）。
+      expect(cardButtons('tmdb-episode-card-线路一'), findsNWidgets(40));
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-40')),
+        findsNothing,
+        reason: '第 2 区间的卡片不得被渲染',
+      );
+    });
+
+    testWidgets('切到第 2 区间只渲染该区间的卡片', (tester) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, false);
+      await pumpStrip(tester, count: 70, ranges: ranges, rangeIndex: 1);
+
+      // 区间 1 = [40, 70) → 30 张卡。
+      expect(cardButtons('tmdb-episode-card-线路一'), findsNWidgets(30));
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-40')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('点区间 chip 回调下标', (tester) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, false);
+      int? tapped;
+      await pumpStrip(
+        tester,
+        count: 70,
+        ranges: ranges,
+        onRangeChanged: (index) => tapped = index,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-range-1')),
+      );
+      await tester.pump();
+      expect(tapped, 1);
+    });
+
+    // ===== 以下为 brief 没有的钉子（预检 + 变异自检发现）=====
+
+    // **`design/03` §4.5 的核心**：分页只切**渲染**，播放必须仍用**线路原始下标**。
+    //
+    // brief 的 `_buildStrip` 把**可见下标**直接交给 `onTap`，而调用方
+    // `browse_pages.dart#_playEpisodeAt` 把它当作「未切片列表的下标」
+    // （它会按 `line.episodes[index]` 取集，再做 indexWhere 换算原始下标）——
+    // 于是第 2 区间的第 0 张卡会播成**第 1 区间的第 0 集**：静默播错集。
+    //
+    // 本用例断言：切到区间 1 后点第一张卡，回调收到的是**原始下标 40**。
+    testWidgets('切到第 2 区间后点首张卡 → 回调收到原始下标 40（不是 0）', (
+      tester,
+    ) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, false);
+      int? tappedIndex;
+      await pumpStrip(
+        tester,
+        count: 70,
+        ranges: ranges,
+        rangeIndex: 1,
+        onRangeChanged: (_) {},
+        onTap: (index, _) => tappedIndex = index,
+      );
+
+      // 区间 1 = [40, 70) → 首卡的**原始下标**是 40。
+      await tester.tap(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-40')),
+      );
+      await tester.pump();
+      expect(
+        tappedIndex,
+        40,
+        reason:
+            '分页只切渲染（§4.5）：回调必须给**原始下标**，'
+            '否则调用方的「渲染下标 → 原始下标」换算会二次映射，静默播错集。',
+      );
+    });
+
+    // 卡片自身的 key 后缀也必须是**原始下标**，否则集成门禁按
+    // `tmdb-episode-card-<flag>-<i>` 计数/定位会错位。
+    testWidgets('卡片 key 后缀用原始下标（第 2 区间从 40 开始）', (tester) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, false);
+      await pumpStrip(
+        tester,
+        count: 70,
+        ranges: ranges,
+        rangeIndex: 1,
+        onRangeChanged: (_) {},
+      );
+
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-40')),
+        findsOneWidget,
+        reason: '第 2 区间首卡必须是原始下标 40',
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-0')),
+        findsNothing,
+        reason: '第 1 区间的下标不得在第 2 区间重现（会与门禁定位冲突）',
+      );
+    });
+
+    // 「最近播放」标记也必须是原始下标，否则分页后标错卡。
+    //
+    // 标记本体是一个带 `recentKey` 的徽标（`<prefix>-recent-<i>`），
+    // **只在 `isRecent` 为真时渲染**；卡片外壳的 key 两种情况都在，
+    // 因此断言外壳测不出这个变异（首轮 M7 存活的原因）。
+    testWidgets('recentIndex 用原始下标，分页后仍标中正确的卡', (tester) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, false);
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: TmdbEpisodeStrip(
+              keyPrefix: 'tmdb-episode-card-线路一',
+              cards: cardsFor(70),
+              ranges: ranges,
+              rangeIndex: 1,
+              onRangeChanged: (_) {},
+              // 原始下标 42（在区间 1 = [40,70) 内）。
+              recentIndex: 42,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-recent-42')),
+        findsOneWidget,
+        reason: '原始下标 42 的卡必须带「最近播放」徽标',
+      );
+      // 区间内下标 2 的位置**不得**被误标（它对应原始下标 42，二者在本例
+      // 恰好相同，所以另测一个区间内下标≠原始下标 的位置）。
+      expect(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-recent-2')),
+        findsNothing,
+        reason:
+            '徽标 key 必须用**原始下标**：若用区间内下标，'
+            '第 2 区间的首卡会被标成 recent-0 而非 recent-40',
+      );
+    });
+
+    // 选中区间要**自动滚入视野**（对齐上游 `smoothScrollTo`）。
+    // 用 ScrollController 算偏移，因此可以直接读 controller.offset。
+    testWidgets('选中的区间自动滚入视野', (tester) async {
+      final ranges = EpisodeRangePolicy.build(3000, 0, false);
+      // 3000 集：阶梯 300 → 被 50 封顶 → 每段 50 → 60 个区间，必然超出屏宽。
+      expect(ranges.length, greaterThan(20), reason: '前置：区间数要足够多');
+      await pumpStrip(
+        tester,
+        count: 120,
+        ranges: ranges,
+        rangeIndex: 30,
+        onRangeChanged: (_) {},
+        gridMode: false,
+      );
+      await tester.pumpAndSettle();
+
+      final list = tester.widget<ListView>(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-range-strip')),
+      );
+      expect(
+        list.controller?.offset ?? 0,
+        greaterThan(0),
+        reason: '选中靠后的区间时必须滚动，否则用户看不到当前区间',
+      );
+    });
+
+    // 区间数 > 1 但 `onRangeChanged` 为空 → chip 禁用（不给假入口）。
+    testWidgets('未传 onRangeChanged 时区间 chip 禁用', (tester) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, false);
+      await pumpStrip(tester, count: 70, ranges: ranges);
+
+      final chip = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-episode-card-线路一-range-0')),
+      );
+      expect(chip.onSelected, isNull);
+    });
+
+    // 传入 `ranges` 但区间数 ≤ 1 时，卡片应是**全部**（不得被空区间切没）。
+    testWidgets('区间数 ≤ 1 时渲染全部卡片', (tester) async {
+      await pumpStrip(
+        tester,
+        count: 10,
+        ranges: EpisodeRangePolicy.build(10, 0, false),
+      );
+
+      expect(cardButtons('tmdb-episode-card-线路一'), findsNWidgets(10));
+    });
+
+    // 区间 chip 的标签是**真实集号**（`design/03` §4.2 / 验收 C11），
+    // 不是列表下标：降到 0 基会让人误以为集号从 0 开始。
+    testWidgets('区间标签是真实集号（正序 1 基）', (tester) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, false);
+      await pumpStrip(tester, count: 70, ranges: ranges);
+
+      expect(find.text('1-40'), findsWidgets, reason: '首段从第 1 集开始');
+      expect(find.text('0-39'), findsNothing, reason: '不得降到 0 基');
+    });
+
+    // 倒序时区间标签也是真实集号方向（大集号在前）。
+    testWidgets('倒序时区间标签从大集号开始', (tester) async {
+      final ranges = EpisodeRangePolicy.build(70, 0, true);
+      await pumpStrip(tester, count: 70, ranges: ranges);
+
+      expect(find.text('70-41'), findsWidgets);
+      expect(find.text('40-1'), findsWidgets);
     });
   });
 }
