@@ -149,37 +149,38 @@ class _HistoryPageState extends State<HistoryPage> {
                     hintText: '搜索片名或剧集名',
                     border: OutlineInputBorder(),
                   ),
-                  onChanged: (value) => setState(() => _keyword = value.trim()),
+                  onChanged: (value) => setState(() {
+                    final next = value.trim();
+                    _keyword = next;
+                    // 搜索词变化**不退出**模式，但多选态下必须清空已选
+                    // （否则会删到看不见的条目，`design/01` §3.2）。
+                    // `withKeyword` 在值未变时返回同一实例，所以这里
+                    // 无条件调用是安全的——它不会把用户刚勾的项清掉。
+                    _view = _view.withKeyword(next);
+                  }),
                 ),
               ),
               const SizedBox(width: 12),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  final confirmed = await showDialog<bool>(
-                    context: context,
-                    builder: (context) => AlertDialog(
-                      title: const Text('清空播放历史'),
-                      content: const Text('该操作只清空播放历史，不会删除配置。'),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.of(context).pop(false),
-                          child: const Text('取消'),
-                        ),
-                        FilledButton(
-                          onPressed: () => Navigator.of(context).pop(true),
-                          child: const Text('清空'),
-                        ),
-                      ],
-                    ),
-                  );
-                  if (confirmed == true) {
-                    _state.clearHistory();
-                    if (mounted) setState(() {});
-                  }
-                },
-                icon: const Icon(Icons.delete_sweep_outlined),
-                label: const Text('清空历史'),
-              ),
+              // 工具栏按模式渲染（`design/01` §3.1）：
+              // 多选态下只留「取消」在工具栏，其余动作在下面的多选工具栏里。
+              if (_view.mode == HistoryViewMode.none) ...[
+                // 列表为空时**两个删除入口都不渲染**（§3.2）。
+                if (items.isNotEmpty)
+                  OutlinedButton.icon(
+                    key: const ValueKey('history-bulk-delete'),
+                    onPressed: () =>
+                        setState(() => _view = _view.enterMultiSelect()),
+                    icon: const Icon(Icons.checklist_outlined),
+                    label: const Text('批量删除'),
+                  ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  key: const ValueKey('history-clear-all'),
+                  onPressed: _confirmClearAll,
+                  icon: const Icon(Icons.delete_sweep_outlined),
+                  label: const Text('清空历史'),
+                ),
+              ],
             ],
           ),
         ),
@@ -203,6 +204,46 @@ class _HistoryPageState extends State<HistoryPage> {
                   key: const ValueKey('history-delete-done'),
                   onPressed: _exitDeleteMode,
                   child: const Text('完成'),
+                ),
+              ],
+            ),
+          ),
+        // 多选态工具栏（`design/01` §3.1、§3.3）。
+        if (_view.mode == HistoryViewMode.multiSelect)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _view.selectedIds.isEmpty
+                        ? '批量删除：勾选要删除的记录'
+                        : '已选 ${_view.selectedIds.length} 条',
+                  ),
+                ),
+                TextButton(
+                  key: const ValueKey('history-select-all'),
+                  // 只勾**当前可见**的（§3.2）：搜索后被挡住的不得被勾。
+                  onPressed: () => setState(
+                    () => _view = _view.selectAll([
+                      for (final item in items) item.id,
+                    ]),
+                  ),
+                  child: const Text('全选'),
+                ),
+                TextButton(
+                  key: const ValueKey('history-delete-selected'),
+                  // 未勾选时**禁用**（`DESIGN.md`：一个点了什么也没有的
+                  // 按钮比没有按钮更糟）。
+                  onPressed: _view.canDeleteSelected
+                      ? _confirmDeleteSelected
+                      : null,
+                  child: Text('删除选中(${_view.selectedIds.length})'),
+                ),
+                TextButton(
+                  key: const ValueKey('history-cancel-select'),
+                  onPressed: () => setState(() => _view = _view.exitMode()),
+                  child: const Text('取消'),
                 ),
               ],
             ),
@@ -327,6 +368,21 @@ class _HistoryPageState extends State<HistoryPage> {
                 fit: StackFit.expand,
                 children: [
                   PosterImage(url: item.vodPic),
+                  // 多选态：左上角复选框（§3.1）。
+                  if (_view.mode == HistoryViewMode.multiSelect)
+                    Positioned(
+                      left: 4,
+                      top: 4,
+                      child: Icon(
+                        key: ValueKey('history-checkbox-${item.id}'),
+                        _view.selectedIds.contains(item.id)
+                            ? Icons.check_box
+                            : Icons.check_box_outline_blank,
+                        color: _view.selectedIds.contains(item.id)
+                            ? theme.colorScheme.primary
+                            : theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
                   // 删除态：盖一层删除遮罩（对齐上游 `@id/delete`）。
                   if (_view.mode == HistoryViewMode.singleDelete)
                     Container(
@@ -456,8 +512,78 @@ class _HistoryPageState extends State<HistoryPage> {
     });
   }
 
-  /// 退出删除态的按钮（顶部「完成」）。
+  /// 退出删除态 / 多选态（顶部「完成」与「取消」共用）。
+  ///
+  /// 两个模式都用 `exitMode()`：它回到 `none` 并清空选中集（`design/01` §3.2）。
   void _exitDeleteMode() => setState(() => _view = _view.exitMode());
+
+  /// 批量删除确认（`docs/phase6/design/01` §3.3）。
+  ///
+  /// 必须写明**条数**与**不可撤销**：一次删多条是破坏性操作。
+  /// 第二条说明来自 `docs/phase5/design/02` §4.5：删除会写
+  /// `history_deletions` 标记，避免远端旧记录复活。
+  Future<void> _confirmDeleteSelected() async {
+    final ids = _view.selectedInOrder;
+    if (ids.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const ValueKey('history-bulk-confirm-dialog'),
+        title: const Text('批量删除播放历史'),
+        content: Text(
+          '将删除选中的 ${ids.length} 条播放历史。\n'
+          '该操作不可撤销；已同步到安卓的删除标记会随下次同步生效。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey('history-bulk-confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    // **逐条**删除：走既有的 `deleteHistory` 才能写 `history_deletions` 标记
+    // （`docs/phase5/design/02` §4.5）。直接改本地列表会让远端旧记录复活。
+    for (final id in ids) {
+      _state.deleteHistory(id);
+    }
+    if (!mounted) return;
+    setState(() => _view = _view.exitMode());
+  }
+
+  /// 清空历史确认。
+  ///
+  /// 文案与逻辑**与既有实现一字不差**（`mvp_a_flow_test` 锁定「清空历史」），
+  /// 只是从 `onPressed` 内联搬到方法里。
+  Future<void> _confirmClearAll() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('清空播放历史'),
+        content: const Text('该操作只清空播放历史，不会删除配置。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    _state.clearHistory();
+    if (!mounted) return;
+    setState(() => _view = _view.exitMode());
+  }
 
   /// 「删除整部节目」二级操作（`02` §7.4）：必须先明确告知将删除的季度数量。
   Future<void> _confirmDeleteMedia(SeasonHistoryCard card) async {

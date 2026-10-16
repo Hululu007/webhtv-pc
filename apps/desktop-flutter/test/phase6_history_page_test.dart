@@ -453,6 +453,285 @@ void main() {
       );
     });
   });
+
+  group('多选批量删除（design/01 §3.1、§3.3）', () {
+    testWidgets('点「批量删除」进入多选态', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      expect(find.byKey(const ValueKey('history-bulk-delete')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('history-checkbox-1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('history-select-all')), findsOneWidget);
+    });
+
+    testWidgets('多选态点卡片只勾选，不删除', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('剧集甲'), findsOneWidget, reason: '不得删除');
+      expect(find.text('已选 1 条'), findsOneWidget);
+      expect(state.recentHistory().length, 2, reason: '库中仍是 2 条');
+    });
+
+    testWidgets('全选后删除选中：确认框写明条数，确认后删除', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-select-all')));
+      await tester.pump();
+      expect(find.text('已选 2 条'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('history-delete-selected')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('将删除选中的 2 条'), findsOneWidget);
+      expect(find.textContaining('不可撤销'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(state.recentHistory(), isEmpty);
+      expect(find.text('暂无播放记录'), findsOneWidget);
+      // `design/01` A10：「确认后 N 条被删除，**退出多选态**」。
+      // 不退出的话，列表已空而多选工具栏仍在（「全选 / 删除选中(0) / 取消」
+      // 对着一个空列表），正是文档自己批判的反模式。
+      expect(
+        find.byKey(const ValueKey('history-select-all')),
+        findsNothing,
+        reason: '确认删除后必须退出多选态（A10）',
+      );
+      expect(
+        find.byKey(const ValueKey('history-bulk-delete')),
+        findsNothing,
+        reason: '列表已空 → 两个删除入口都不渲染（A12）',
+      );
+    });
+
+    testWidgets('取消确认框不删除', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-select-all')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-delete-selected')));
+      await tester.pumpAndSettle();
+      // **必须限定到对话框内**：多选工具栏自己也有一个「取消」按钮，
+      // 裸 `find.text('取消')` 会命中 2 个 widget 而报「ambiguously found」。
+      // （brief 原文就是裸 finder，属事实性错误。）
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const ValueKey('history-bulk-confirm-dialog')),
+          matching: find.text('取消'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(state.recentHistory().length, 1);
+    });
+
+    testWidgets('「取消」退出多选态并清空勾选', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-cancel-select')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('history-checkbox-1')), findsNothing);
+      expect(find.byKey(const ValueKey('history-bulk-delete')), findsOneWidget);
+    });
+
+    testWidgets('搜索词变化清空已选', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      expect(find.text('已选 1 条'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), '剧集乙');
+      await tester.pumpAndSettle();
+
+      expect(find.text('已选 1 条'), findsNothing, reason: '搜索词变化必须清空已选');
+      expect(find.byKey(const ValueKey('history-checkbox-2')), findsOneWidget);
+    });
+
+    testWidgets('搜索词未变化时不清空已选', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), '剧集');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      // 再输入同一个词（onChanged 会被调用，但值未变）。
+      await tester.enterText(find.byType(TextField), '剧集');
+      await tester.pumpAndSettle();
+
+      expect(find.text('已选 1 条'), findsOneWidget, reason: '值未变不得清空');
+    });
+
+    // ---- 以下 5 条是 brief 没有的钉子（变异自检发现）----
+
+    // 「全选」必须只勾**可见**的（`design/01` §3.2：「勾选当前可见全部」）。
+    // 搜索后全选若把被搜索词挡住的条目也勾上，用户点「删除选中」会删掉
+    // 自己看不见的记录。
+    testWidgets('全选只勾当前可见的（搜索后被挡住的不得被勾）', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), '剧集乙');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('history-select-all')));
+      await tester.pump();
+
+      expect(find.text('已选 1 条'), findsOneWidget, reason: '只有「剧集乙」可见');
+    });
+
+    // 只删**选中**的，不得把未选中的一起删（`design/01` A10）。
+    testWidgets('只删选中的那一条，未选中的保留', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-delete-selected')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('history-bulk-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('剧集甲'), findsNothing, reason: '选中的被删');
+      expect(find.text('剧集乙'), findsOneWidget, reason: '未选中的必须保留');
+      expect(state.recentHistory().length, 1);
+    });
+
+    // 批量删除也必须逐条走 `deleteHistory`（写删除标记），
+    // 否则安卓下次推来旧记录会复活（`phase5 design/02` §4.5）。
+    testWidgets('批量删除也写删除标记', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-select-all')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-delete-selected')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('history-bulk-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(
+        state.database!.historyDeletionCount,
+        2,
+        reason: '两条删除都必须留下 history_deletions 标记',
+      );
+    });
+
+    // 未勾选任何条目时「删除选中(0)」必须**禁用**（`DESIGN.md`：
+    // 「一个点了什么也没有的按钮比没有按钮更糟」）。
+    testWidgets('未勾选时「删除选中(0)」禁用', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+
+      final button = tester.widget<TextButton>(
+        find.byKey(const ValueKey('history-delete-selected')),
+      );
+      expect(button.onPressed, isNull, reason: '没有选中时不得可点');
+
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      final enabled = tester.widget<TextButton>(
+        find.byKey(const ValueKey('history-delete-selected')),
+      );
+      expect(enabled.onPressed, isNotNull, reason: '勾选后必须可点');
+    });
+
+    // 多选态下长按**不得**切进删除态（§3.1 状态图里没有
+    // `multiSelect → singleDelete` 这条边）：否则用户误长按会丢掉已勾选的集合，
+    // 而且卡片会突然变成「点谁删谁」——一个删除动作被误触。
+    testWidgets('多选态下长按不切进删除态，已勾选不丢', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      expect(find.text('已选 1 条'), findsOneWidget);
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-2')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('history-delete-done')),
+        findsNothing,
+        reason: '多选态长按不得切进删除态',
+      );
+      expect(find.text('已选 1 条'), findsOneWidget, reason: '已勾选不得被清掉');
+      expect(state.recentHistory().length, 2, reason: '长按不得删任何东西');
+    });
+
+    // 多选态下 Esc 退出（`design/01` §3.1 的「退出方式」列）。
+    testWidgets('多选态下 Esc 退出并清空勾选', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('history-checkbox-1')), findsNothing);
+      expect(find.byKey(const ValueKey('history-bulk-delete')), findsOneWidget);
+      expect(state.recentHistory().length, 1, reason: 'Esc 不删任何东西');
+    });
+
+    // `none` 态不得渲染多选态的工具栏（模式互斥）。
+    testWidgets('默认态不渲染多选工具栏', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      expect(find.byKey(const ValueKey('history-select-all')), findsNothing);
+      expect(find.byKey(const ValueKey('history-cancel-select')), findsNothing);
+      expect(find.byKey(const ValueKey('history-delete-selected')), findsNothing);
+      expect(find.byKey(const ValueKey('history-checkbox-1')), findsNothing);
+    });
+  });
 }
 
 /// 读出历史网格当前的实际列数。
