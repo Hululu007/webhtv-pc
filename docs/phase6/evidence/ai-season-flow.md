@@ -114,16 +114,43 @@ ai-settings-page opened, binding=1
    命中 2 个 widget，改为精确 `find.text` 或 `find.descendant(of: SnackBar)`。
 6. 进度框断言需要 `fake.delay`（假服务端太快时进度框会在断言前就关闭）。
 
-## 7. 尚未做完（收尾验证）
+## 7. 收尾验证完成情况（2026-10-16）
 
-- [ ] `flutter analyze` 全量零告警核实
-- [ ] 全量 `flutter test` 复跑核实（上一次尝试被中断，
-      且中断残留在日志里表现为 `Connection closed before test suite loaded`，
-      那**不是**真实失败）
-- [ ] AI 设置页与预览框截图写入
-      `docs/phase6/evidence/ai-settings.png` / `ai-season-preview.png`
-      （`design/05` §6 要求；AI 设置页真机截图已在
-      `ai-settings-page.png` 完成，**预览框截图仍缺**）
-- [ ] 回填 `docs/webhtv-pc-design.md` §27.12 的取舍修订
-- [ ] 更新 `docs/phase6/README.md` 阶段状态
-- [ ] Key 不进日志的全局复查
+- [x] `flutter analyze`：`1 issue found` —— 仅
+      `integration_test/phase6_history_visual_flow_test.dart:359` 的
+      `unused_local_variable`，**既有、且该文件本轮未改**（非本阶段引入）。
+      改动文件单独 analyze：`No issues found!`。
+- [x] 全量 `flutter test`：**1968 通过 / 4 失败**。4 条均为既知 flaky：
+      `phase2_last_site_test`（文件锁）、`phase2_ipc_test`、
+      `phase3_jvm_spider_test`×2（sidecar/JVM 资源争用，失败信息是
+      `SPIDER_TIMEOUT ... deadline 15000ms`）。
+      按 `design/05` §7.1 的判定标准（失败集合 ⊆ 已知 flaky 集合），
+      已**逐条单独复跑核实全绿**：`phase2_last_site` 8/8、
+      `phase2_ipc` 31/31、`phase3_jvm_spider` 18/18。
+- [x] 截图产出（`design/05` §6）：
+      `docs/phase6/evidence/ai-season-preview.png`（预览框，实拍确认含标题、
+      mode·置信度、取消/应用建议）、`ai-settings.png`（AI 设置页）。
+      两者均由集成测试的 `RepaintBoundary → toImage → PNG` 产出，
+      **不是** widget 树重描述。
+- [x] `docs/webhtv-pc-design.md` §27.12 取舍修订已回填。
+- [x] `docs/phase6/README.md` 状态更新为「已完成」并附验收结论。
+- [x] Key 不进日志：`test/phase6_ai_*.dart` 与 `integration_test/*ai*.dart`
+      搜 `sk-[a-zA-Z0-9]{20,}` **零命中**；实际用的是
+      `sk-test` / `sk-abc` / `k` 这类明显占位符。
+
+### 7.1 截图产出的一个坑（供后续复用）
+
+**「拍整窗」在 Flutter 里不存在。** 每个路由（含 dialog）在 `Navigator`
+里各有自己的 `RepaintBoundary`，没有任何一个 boundary 同时包含页面与
+对话框的内容。`captureEvidence` 默认取第一个 boundary，于是拍对话框时
+只会拍到下面的页面（实测 173791 字节的图里完全没有预览框，看起来「拍到了」
+其实没有）。
+
+正确做法与既有 `tmdb-photo-viewer-boundary` 一致：给对话框包一层
+**带 key 的** `RepaintBoundary`，截图时按 key 指定该层。
+本次新增 `ai-season-preview-boundary`。
+
+另外两个实测教训：
+- 传 `find.ancestor(...).last` 会挑中一个不含内容的 boundary，产出**全白**图
+  （13171 字节、尺寸正常但无像素）；
+- 按尺寸挑「最大 boundary」也**不管用**（拍出来仍是页面，不是对话框）。
