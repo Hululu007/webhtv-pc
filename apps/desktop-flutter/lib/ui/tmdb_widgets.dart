@@ -223,6 +223,30 @@ class _SkeletonLine extends StatelessWidget {
   }
 }
 
+/// 季度文案（`docs/phase6/design/03` §2.2）。
+///
+/// 顶层而不是私有静态：季度按钮与 chip 条都要用。
+String _seasonLabel(int season) => season == 0 ? '特别篇' : '第 $season 季';
+
+/// 季度按钮的文案（`docs/phase6/design/03` §2.2）。
+///
+/// 对齐上游 `TmdbDetailActivity#detailSeasonButtonLabel`：先看当前季度上下文，
+/// 再看解析出的季度，都没有才用「选择季度」。
+///
+/// 【关于 §2.2 表格的中间一行】原文还列了一行
+/// 「`selectedSeason < 0` 但解析出季度 → 同『第 N 季』」。
+/// 该行**当前不可达**：`TmdbState` 在 `availableSeasons` 非空时总会把
+/// `_selectedSeason` 落定（`scope is KnownSeason` 或 `_defaultSeasonOf`），
+/// 因此「有季度而 `selectedSeason < 0`」不会出现。
+/// 这里**不写**那行分支（写了就是不可达的死代码）；
+/// 一旦状态机改了，`test/phase6_season_controls_test.dart` 的
+/// 「selectedSeason<0 而季度已解析 → 不可达（现状）」用例会失败并提醒补上。
+String tmdbSeasonButtonLabel(TmdbState state) {
+  final season = state.selectedSeason;
+  if (season >= 0) return _seasonLabel(season);
+  return '选择季度';
+}
+
 /// 季度选择器（`04` §4.1）。
 class TmdbSeasonSelector extends StatelessWidget {
   const TmdbSeasonSelector({
@@ -230,11 +254,43 @@ class TmdbSeasonSelector extends StatelessWidget {
     required this.state,
     this.onChanged,
     this.onSelectManual,
+    this.padding = const EdgeInsets.symmetric(horizontal: 16),
+    this.showManualEntry = true,
   });
 
   final TmdbState state;
   final ValueChanged<int>? onChanged;
   final VoidCallback? onSelectManual;
+
+  /// 内容内边距（纯 TMDB 页传 `EdgeInsets.zero` 以贴合其内容列）。
+  final EdgeInsets padding;
+
+  /// 是否允许手动改绑。
+  ///
+  /// 默认 `true`。为 `false` 时季度按钮**渲染但禁用**——
+  /// 与整块隐藏相比，禁用态仍能告诉用户「这里可以换季」，
+  /// 只是当前上下文不允许（`DESIGN.md`：不要给点了没反应的假入口，
+  /// 但也不要把能力藏起来）。
+  final bool showManualEntry;
+
+  /// 常驻的季度按钮（`docs/phase6/design/03` §2）。
+  ///
+  /// 为什么必须常驻：单季剧集原先只显示一行上下文文字，**没有任何改绑入口**
+  /// ——用户发现 TMDB 匹配错了季度也没法手动纠正。上游
+  /// `updateTmdbSeasonActionVisibility` 的条件里 `seasonNumbers` 非空即可见，
+  /// 不要求多季，正是这个理由。
+  ///
+  /// [labelKey] 用于把 `tmdb-season-context` 挂到按钮文字上：
+  /// 单季时按钮文字**就是**季度上下文，再另外渲染一行「第 1 季」会变成
+  /// 同一句话出现两次（`design/03` §2.3 的单季示意图里只有 `[ 第 1 季 ▾ ]`）。
+  Widget _seasonButton(BuildContext context, {Key? labelKey}) =>
+      TextButton.icon(
+        key: const ValueKey('tmdb-season-button'),
+        onPressed: showManualEntry ? onSelectManual : null,
+        iconAlignment: IconAlignment.end,
+        icon: const Icon(Icons.expand_more, size: 18),
+        label: Text(tmdbSeasonButtonLabel(state), key: labelKey),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -248,9 +304,11 @@ class TmdbSeasonSelector extends StatelessWidget {
       return SizedBox(
         height: tmdbSeasonSelectorHeight,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          padding: padding,
           child: Row(
             children: [
+              _seasonButton(context),
+              const SizedBox(width: 8),
               Text('未确定季度', style: Theme.of(context).textTheme.bodyMedium),
               const SizedBox(width: 8),
               TextButton(
@@ -265,47 +323,69 @@ class TmdbSeasonSelector extends StatelessWidget {
     }
 
     if (seasons.length == 1) {
-      // 单季：隐藏切换控件，但显示季度上下文（`04` §4.1）
+      // 单季：按钮本身就是季度上下文（`design/03` §2.3 的示意图里只有
+      // `[ 第 1 季 ▾ ]`）。
+      //
+      // 【裁定】`design/03` §2 正文说「保留既有 key `tmdb-season-context`」，
+      // 而 §2.3 的图只画了按钮——两者直接相加会出现**同一句话两次**
+      // （按钮「第 1 季」+ 上下文文字「第 1 季」），既违反图示也是可见冗余。
+      // 取图示（用户看到什么）+ 把该 key **移到按钮文字上**：
+      // key 仍存在（`phase4_tmdb_ui_test` 的 `findsOneWidget` 与
+      // `phase6_season_controls_test` 都按它断言），画面也不再重复。
       return SizedBox(
         height: tmdbSeasonSelectorHeight,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          padding: padding,
           child: Align(
             alignment: Alignment.centerLeft,
-            child: Text(
-              _seasonLabel(seasons.first),
-              key: const ValueKey('tmdb-season-context'),
-              style: Theme.of(context).textTheme.bodyMedium,
+            child: _seasonButton(
+              context,
+              labelKey: const ValueKey('tmdb-season-context'),
             ),
           ),
         ),
       );
     }
 
+    // 多季：按钮在左，chip 条在右。
+    //
+    // 按钮单独包一层 `Padding`（只吃 `padding.left`）而不是给整行加 padding：
+    // chip 条自己带 `padding.horizontal / 2`，两边相加正好等于 `padding.horizontal`，
+    // 于是「按钮对齐内容列左沿」与「chip 条仍有呼吸」同时成立。
     return SizedBox(
       height: tmdbSeasonSelectorHeight,
-      child: ListView.separated(
-        key: const ValueKey('tmdb-season-switcher'),
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        itemCount: seasons.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final season = seasons[index];
-          final selected = season == state.selectedSeason;
-          return ChoiceChip(
-            key: ValueKey('tmdb-season-$season'),
-            label: Text(_seasonLabel(season)),
-            selected: selected,
-            onSelected: (_) => onChanged?.call(season),
-          );
-        },
+      child: Row(
+        children: [
+          Padding(
+            padding: EdgeInsets.only(left: padding.left),
+            child: _seasonButton(context),
+          ),
+          Expanded(
+            child: ListView.separated(
+              key: const ValueKey('tmdb-season-switcher'),
+              scrollDirection: Axis.horizontal,
+              padding: EdgeInsets.symmetric(
+                horizontal: padding.horizontal / 2,
+                vertical: 6,
+              ),
+              itemCount: seasons.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
+              itemBuilder: (context, index) {
+                final season = seasons[index];
+                final selected = season == state.selectedSeason;
+                return ChoiceChip(
+                  key: ValueKey('tmdb-season-$season'),
+                  label: Text(_seasonLabel(season)),
+                  selected: selected,
+                  onSelected: (_) => onChanged?.call(season),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
-
-  static String _seasonLabel(int season) =>
-      season == 0 ? '特别篇' : '第 $season 季';
 }
 
 /// 选集区渲染辅助（`02` §4.7）。

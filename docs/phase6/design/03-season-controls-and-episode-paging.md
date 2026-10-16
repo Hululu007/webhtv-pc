@@ -91,6 +91,18 @@ PC 端已有 `TmdbState.selectedSeason` 与 `_resolution`，可直接对应。
 按它们断言。新增的 `tmdb-season-button` 与它们**并存**：
 未确定季度时 `tmdb-choose-season` 与 `tmdb-season-button` 都指向同一个弹窗。
 
+> **2026-10-16 修订：单季情形下上面两段自相矛盾，已裁定。**
+> §2.3 的单季示意图只画了 `[ 第 1 季 ▾ ]`（一个元素），
+> 而本段要求「保留 `tmdb-season-context` 这行上下文文字」——两者直接相加，
+> 单季会渲染出**按钮「第 1 季」+ 文字「第 1 季」**，同一句话出现两次。
+> 实测症状：`phase4_tmdb_ui_test` 的「单季 → 只显示季度上下文」用例报
+> `Found 2 widgets with text "第 1 季"`。
+>
+> **裁定：取图示（用户看到什么）**，把 `tmdb-season-context` 这个 key
+> **移到按钮文字上**（`TmdbSeasonSelector._seasonButton(labelKey:)`）。
+> 于是 key 仍存在（两套测试都按它断言）、画面也不再重复。
+> 上面那段的「单季上下文文字」应读作「单季上下文（即按钮文字）」。
+>
 > 若实测发现两个入口在同一行冗余，退让方案是：未确定季度时**只**保留
 > `tmdb-season-button`，并把 `tmdb-choose-season` 作为它的别名 key 挂上去
 > （一个 widget 只能有一个 key，因此改为在测试里断言 `tmdb-season-button`，
