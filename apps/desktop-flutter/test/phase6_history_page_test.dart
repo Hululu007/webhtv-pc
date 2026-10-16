@@ -126,15 +126,38 @@ void main() {
   Future<void> pumpHistory(
     WidgetTester tester, {
     Size size = const Size(1400, 1000),
+    bool inShell = false,
+    double textScaleFactor = 1.0,
   }) async {
+    if (textScaleFactor != 1.0) {
+      tester.platformDispatcher.textScaleFactorTestValue = textScaleFactor;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    }
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1.0;
     addTearDown(() {
       tester.view.resetPhysicalSize();
       tester.view.resetDevicePixelRatio();
     });
+    // `inShell: true` 复刻真实壳层：左栏 76 + `VerticalDivider(width: 1)`，
+    // 于是**内容区宽 ≠ 整窗宽**。这正是判据：
+    // 列数必须来自 `LayoutBuilder` 的 `constraints.maxWidth`（内容区），
+    // 而不是 `MediaQuery.sizeOf(context).width`（整窗）。
+    final page = HistoryPage(state: state);
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: HistoryPage(state: state))),
+      MaterialApp(
+        home: Scaffold(
+          body: inShell
+              ? Row(
+                  children: [
+                    const SizedBox(width: 76),
+                    const VerticalDivider(width: 1),
+                    Expanded(child: page),
+                  ],
+                )
+              : page,
+        ),
+      ),
     );
     await tester.pump();
   }
@@ -214,6 +237,49 @@ void main() {
         reason: '700 宽必须收到 4 列——写死列数会让窄窗口下的海报比例失真',
       );
     });
+
+    // 列数的**基准宽度**必须是内容区，而不是整窗（`design/01` §2.2 要求与首页
+    // 海报墙共用同一套算法，而首页用的是 `LayoutBuilder(constraints.maxWidth)`）。
+    // 壳层左侧有 `NavigationRail`(76) + `VerticalDivider`(1)，两者相差 77px。
+    // 窗宽 1100 时两种口径必然分叉：
+    //   整窗（错）：usable 1100-32 = 1068，1068/164 = 6.51 → 7 列
+    //   内容（对）：usable 1100-77-32 = 991，991/164 = 6.04 → 6 列
+    testWidgets('列数按内容区宽度算，不是整窗宽（壳层下列数不偏多）', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester, size: const Size(1100, 1000), inShell: true);
+      expect(
+        _historyColumns(tester),
+        6,
+        reason:
+            '壳层里内容区只有 1023px：列数必须用 LayoutBuilder 的 constraints.maxWidth。'
+            '用 MediaQuery.sizeOf 会算成 7 列（比首页海报墙多一列）。',
+      );
+    });
+
+    // 无障碍放大字号时，卡片**不得溢出格子**。`_historyCaptionHeight` 是固定值
+    // （DESIGN.md 的「文字区高 40px」，与首页共用），所以文字区必须夹住放大倍数
+    // ——首页 `_VodCard` 就是这么做的（`browse_pages.dart` 的
+    // `MediaQuery.withClampedTextScaling(maxScaleFactor: 1.25)`）。
+    //
+    // 取 1.5 而不是 1.25：1.25 是**clamp 的上界本身**，在 1.25 下「夹住」与
+    // 「没夹住」观察结果相同，测不出 clamp 是否真的存在。
+    for (final scale in const [1.5, 2.0]) {
+      testWidgets('文字放大 $scale 倍时卡片不溢出', (tester) async {
+        seedHistory(id: 1, vodName: '剧集甲');
+        await pumpHistory(
+          tester,
+          size: const Size(1400, 1000),
+          textScaleFactor: scale,
+        );
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: 'textScaleFactor=$scale 时卡片溢出了固定高度的文字区',
+        );
+        // 片名仍然只渲染一次（放大不能靠复制一份「缩小版」文字来兜底）。
+        expect(find.text('剧集甲'), findsOneWidget);
+      });
+    }
   });
 }
 

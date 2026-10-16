@@ -33,6 +33,11 @@ const double _historyCardSpacing = 14;
 /// 一旦浮动，海报就会被压成非 2:3（与首页 `_posterCaptionHeight` 同理）。
 const double _historyCaptionHeight = 40;
 
+/// 文字区允许的**最大**放大倍数（无障碍字号只缩不放）。
+///
+/// 与首页 `_VodCard` 同值同理由：文字区是固定高度，放大时不让步就会溢出格子。
+const double _historyTextScaleMax = 1.25;
+
 class HistoryPage extends StatefulWidget {
   const HistoryPage({super.key, required this.state});
 
@@ -217,15 +222,19 @@ class _HistoryPageState extends State<HistoryPage> {
                   title: '暂无播放记录',
                   message: '播放任意剧集后会自动记录进度。',
                 )
-              : GridView.builder(
-                  key: const ValueKey('history-grid'),
-                  padding: const EdgeInsets.all(AppSpace.lg),
-                  gridDelegate: _historyGridDelegate(
-                    MediaQuery.sizeOf(context).width,
+              // 列数必须由**内容区**宽度推出，而不是 `MediaQuery` 的整窗宽：
+              // 壳层左侧有 `NavigationRail`(76) + `VerticalDivider`(1)，整窗宽
+              // 会比内容区宽 77px，列数就会比首页海报墙多算（`design/01` §2.2
+              // 要求两处共用同一套尺度）。
+              : LayoutBuilder(
+                  builder: (context, constraints) => GridView.builder(
+                    key: const ValueKey('history-grid'),
+                    padding: const EdgeInsets.all(AppSpace.lg),
+                    gridDelegate: _historyGridDelegate(constraints.maxWidth),
+                    itemCount: items.length,
+                    itemBuilder: (context, index) =>
+                        _buildHistoryCard(context, items[index]),
                   ),
-                  itemCount: items.length,
-                  itemBuilder: (context, index) =>
-                      _buildHistoryCard(context, items[index]),
                 ),
         ),
       ],
@@ -298,20 +307,46 @@ class _HistoryPageState extends State<HistoryPage> {
             ),
           ),
           const SizedBox(height: AppSpace.xs),
-          Text(
-            item.vodName,
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodyMedium,
-          ),
-          Text(
-            item.episodeName,
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
+          // 文字区与首页 `_VodCard` 同形：`Expanded` + 夹住缩放。
+          // `Expanded` 把文字区钉在固定高度上（格子高度已由 `mainAxisExtent`
+          // 算死），海报 2:3 不受文字影响。
+          //
+          // 字号/行高也**照抄首页 `_VodCard`**（13/1.2 与 11/1.2，而不是 M3 默认的
+          // 14/1.43 与 12/1.33）：这不是为了「好看」，是 1.25 倍 clamp 能不能成立
+          // 的算术前提——40px 文字区在 1.25 倍下只放得下 32px 的本征高度，
+          // M3 默认两行要 35.98px（×1.25 = 44.98px，溢出 5px，已实测）。
+          // 首页那套 28.8px（×1.25 = 36px）才留得住 4px 余量；两者不一致会让
+          // 「同一套尺度」名存实亡（`design/01` §2.2 第 1 条要求取值一致）。
+          Expanded(
+            child: MediaQuery.withClampedTextScaling(
+              maxScaleFactor: _historyTextScaleMax,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    item.vodName,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontSize: 13,
+                      height: 1.2,
+                    ),
+                  ),
+                  Text(
+                    item.episodeName,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      fontSize: 11,
+                      height: 1.2,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
