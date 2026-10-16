@@ -106,7 +106,7 @@
 | A11 | 搜索词变化清空已选 | L1+L2 |
 | A11b | 搜索词未变化时不清空已选 | L1 |
 | A11c | `singleDelete` 下搜索词变化不退出删除态 | L1 |
-| A11d | 删除态删掉"过滤后最后一条"才退出 | L2 |
+| A11d | 删除态删掉"过滤后最后一条"即退出（可见列表为空） | L2 |
 | A12 | 空列表时两个入口都不渲染 | L2 |
 | A13 | `historyClickAction=detail` → 进详情页 | L2 |
 | A14 | `historyClickAction=play` → 直接续播 | L2 |

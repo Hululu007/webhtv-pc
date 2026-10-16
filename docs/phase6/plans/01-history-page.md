@@ -1453,11 +1453,17 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
   }
 
   /// 长按：进入 / 退出删除态（对齐上游 `OnClickListener#onLongClick`）。
+  ///
+  /// 多选态下长按**不切到**删除态：两个模式的入口互斥（§3.1 的状态图里
+  /// 没有 `multiSelect → singleDelete` 这条边），否则用户在多选态误长按会
+  /// 丢掉已勾选的集合。
   void _onCardLongPress() {
     setState(() {
-      _view = _view.mode == HistoryViewMode.singleDelete
-          ? _view.exitMode()
-          : _view.enterSingleDelete();
+      _view = switch (_view.mode) {
+        HistoryViewMode.singleDelete => _view.exitMode(),
+        HistoryViewMode.multiSelect => _view,
+        HistoryViewMode.none => _view.enterSingleDelete(),
+      };
     });
   }
 
@@ -1467,8 +1473,8 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
   void _deleteOne(PlaybackHistory item) {
     _state.deleteHistory(item.id);
     setState(() {
-      // 判定基准是**过滤后的可见列表**：搜索出 1 条、删掉它之后才退出；
-      // 全量还有条目但被搜索挡住时不退出（`design/01` §3.2）。
+      // 判定基准是**过滤后的可见列表**：可见列表为空即退出。
+      // （`design/01` §3.2 原文此处自相矛盾，已按裁定改写，见该节修订说明。）
       final remaining = _items.where((row) => row.id != item.id).length;
       if (remaining == 0) _view = _view.exitMode();
     });
@@ -1582,7 +1588,33 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_page_test.dart
 ```
 
-预期：`All tests passed!`（13 个用例）。
+预期：`All tests passed!`（21 个用例）。
+
+> **计数回填（实现后）**：Task 5 结束时文件共 12 个用例 → 本轮 +9 = **21**。
+> brief 写的「13」与任何口径都对不上（12 + brief 的 6 = 18）。
+>
+> **brief 的 3 处缺陷**（实现时发现，已在上方片段修正）：
+>
+> 1. **`_onCardLongPress` 缺 `multiSelect` 分支**：brief 写的是
+>    `mode == singleDelete ? exitMode() : enterSingleDelete()`，于是**多选态下
+>    长按会切进删除态**并清空已勾选集。而 §3.1 的状态图里**没有**
+>    `multiSelect → singleDelete` 这条边（两个模式入口互斥）。已改为 `switch`。
+> 2. **`_deleteOne` 的注释与 `design/01` §3.2 的句3 同源错误**：brief 的注释写
+>    「全量还有条目但被搜索挡住时不退出」，与它自己的代码（用 `_items` 判定）
+>    矛盾。§3.2 原文自相矛盾，已裁定为**退出**（详见 `design/01` §3.2 的
+>    2026-10-16 修订说明）。
+> 3. **brief 没给 Esc 的钉子**：`design/01` §3.1 与 A6 都要求 Esc 退出，
+>    但 brief 的 6 条用例里没有一条按 Esc。已补「Esc 退出删除态」。
+>
+> **另补 3 条 brief 没有的钉子**（变异自检发现）：
+> - 「删掉过滤后最后一条即退出」——**判定基准**的钉子（改用全量判空会失败）；
+> - 「删除会写删除标记」——逐条走 `state.deleteHistory` 的钉子
+>   （直接改本地列表会让远端旧记录复活，`phase5 design/02` §4.5）；
+> - 「再次长按退出删除态」补了**进入态的前置断言**（否则「从未进入」时也绿）。
+>
+> **变异自检 6/6 全部杀死**：①长按空实现；②删除态点击走 `_resume`；
+> ③判定改用 `state.recentHistory()`；④删除不走 `state.deleteHistory`；
+> ⑤Esc 绑定换成 F12；⑥删除态不渲染遮罩。
 
 - [ ] **Step 5: 提交**
 
