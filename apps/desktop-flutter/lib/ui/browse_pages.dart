@@ -1099,7 +1099,17 @@ class _DetailPageState extends State<DetailPage> {
       return;
     }
     final line = tmdb.sourceLine;
-    final choice = await showDialog<TmdbSeasonChoice>(
+    // 【必须用**无类型**路由 + `decodeSeasonChoice`，不能 `showDialog<TmdbSeasonChoice>`】
+    //
+    // 弹窗 pop 的是 `_SeasonChoice`（私有枚举）或 `int`（季号），两者都不是
+    // `TmdbSeasonChoice`。若把路由声明成 `showDialog<TmdbSeasonChoice>`，
+    // `Navigator.pop` 会因「结果类型与路由期望类型不符」抛异常，
+    // 对话框结果恒为 `null`——用户点“第 2 季”看起来就是“点了没反应”
+    // （Phase 4 起就存在的缺陷，2026-10-16 由 L3 `phase6_ai_season_flow_test`
+    // 驱动真实弹窗时揪出）。
+    //
+    // `decodeSeasonChoice` 本来就是为这一步写的转换函数，此前**从未被接线**。
+    final raw = await showDialog<Object?>(
       context: context,
       builder: (_) => TmdbSeasonDialog(
         tmdbSeasons: seasons,
@@ -1110,6 +1120,8 @@ class _DetailPageState extends State<DetailPage> {
         aiReady: state.aiReady,
       ),
     );
+    if (raw == null || !mounted) return;
+    final choice = decodeSeasonChoice(raw);
     if (choice == null || !mounted) return;
 
     // **分流必须在 bindTmdbSeason 之前**（`docs/phase6/design/04` §7.1.1）：
@@ -1163,6 +1175,9 @@ class _DetailPageState extends State<DetailPage> {
 
     final service = AiEpisodeSeasonService(config: state.aiConfig);
     var canceled = false;
+    // 提前拿住 navigator：要等 `await` 之后才能关进度框，届时 `context` 可能已失效
+    // （也因此不能用 `Navigator.of(context, ...)` 去做那件事）。
+    final navigator = Navigator.of(context, rootNavigator: true);
     unawaited(
       showDialog<void>(
         context: context,
@@ -1196,12 +1211,22 @@ class _DetailPageState extends State<DetailPage> {
 
     // 只在取消路径下**跳过**关闭进度框。
     //
-    // 【缺陷修正】顺序不能照抄成「先 `maybePop()` 再判 canceled」：用户点取消时
-    // 进度框已由取消按钮自己 pop 掉了，此时 `maybePop()` 弹掉的是**详情页本身**
-    // （用户点「取消」却被退出详情页）。
-    if (!canceled && mounted) {
-      Navigator.of(context, rootNavigator: true).maybePop();
-    }
+    // 【两处都不能照抄计划的写法】
+    //
+    // 1. 顺序：计划写的是「先 `maybePop()` 再判 `canceled`」。用户点取消时进度框
+    //    已由取消按钮自己 pop 掉了，此时 `maybePop()` 弹掉的是**详情页本身**
+    //    （用户点「取消」却被退出详情页）。
+    //
+    // 2. `pop()` 而不是 `maybePop()`：`maybePop()` 会调 `Route.willPop()`，
+    //    而 `ModalRoute.willPop()` 断言本路由的 `_ModalScopeState` 已构建
+    //    （`routes.dart`: `'scope != null'`）。假服务端回得快时，`await` 在
+    //    进度框的**第一帧之前**就返回了，`maybePop()` 当场断言失败
+    //    （实测 `phase6_ai_season_flow_test`）。`pop()` 不经过 `willPop()`，
+    //    因此不依赖“已经渲染过”。
+    //
+    // 安全性：进度框 `barrierDismissible: false`，唯一的退出路径就是取消按钮
+    // （会置 `canceled`），所以 `!canceled` 时栈顶必然仍是进度框。
+    if (!canceled && mounted) navigator.pop();
     if (canceled || !mounted) return;
 
     if (!result.success) {
