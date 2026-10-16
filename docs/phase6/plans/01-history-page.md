@@ -1942,7 +1942,35 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_page_test.dart
 ```
 
-预期：`All tests passed!`（20 个用例）。
+预期：`All tests passed!`（35 个用例）。
+
+> **计数回填（实现后）**：Task 6 结束时 21 个 → 本轮 +14 = **35**。
+> brief 写的「20」与任何口径都对不上（21 + brief 的 7 = 28）。
+>
+> **brief 的 1 处事实性错误**（实现时发现，已在上方片段修正）：
+>
+> - 「取消确认框不删除」用例里的裸 `find.text('取消')` **会命中 2 个 widget**
+>   —— 多选工具栏自己也有一个「取消」按钮。实测报
+>   `ambiguously found multiple matching widgets`。已改为
+>   `find.descendant(of: ValueKey('history-bulk-confirm-dialog'), matching: find.text('取消'))`。
+>
+> **另补 7 条 brief 没有的钉子**（变异自检发现）：
+> - 「全选只勾当前可见的」（搜索后被挡住的不得被勾）；
+> - 「只删选中的那一条，未选中的保留」；
+> - 「批量删除也写删除标记」（`phase5 design/02` §4.5）；
+> - 「未勾选时『删除选中(0)』禁用」；
+> - 「多选态下长按不切进删除态，已勾选不丢」（§3.1 状态图无这条边）；
+> - 「多选态下 Esc 退出并清空勾选」；
+> - 「默认态不渲染多选工具栏」。
+>
+> **变异自检 7/7 全部杀死**：①全选改用全量 `recentHistory()`；
+> ②批量删除不写删除标记；③去掉 `canDeleteSelected` 守卫；
+> ④去掉 `withKeyword`（搜索词变化不清空）；⑤多选态长按切进删除态
+> （退回 brief 原写法）；⑥不渲染复选框；⑦批量删除后不退出多选态。
+>
+> **变异 ⑦ 首轮存活 → 真覆盖缺口**：「全选后删除选中」原本只断言
+> `recentHistory()` 为空与空态文案，而删除后**留在**多选态同样能全绿。
+> 已补断言「确认后退出多选态」（`design/01` A10）与「列表空后两个入口都不渲染」（A12）。
 
 - [ ] **Step 5: 提交**
 
