@@ -2655,9 +2655,16 @@ pwsh -File tools/phase4/run_windows_acceptance.ps1
 **改写**：OkHttp/Gson → `package:http` + `dart:convert`；`Prefers` → `settings.json`；
 Room → SQLite 新表；`TmdbUIAdapter` 上帝类 → 分层服务与纯逻辑模块。
 
-**不抄**：`TmdbDetailActivity` 单体、AI 刮削与 AI 推荐、豆瓣评分富集、
+**不抄**：`TmdbDetailActivity` 单体、AI 推荐、豆瓣评分富集、
 个人推荐画像、WebHome 内联/短剧/小说/漫画路由、应用内 YouTube 播放、
 Android 特有的多套详情页形态。
+
+> **2026-10-16 修订**：AI 集季结构识别**已实现**（Phase 6，见
+> `docs/phase6/design/04`）。原先「不抄 AI 刮削」一条收窄为「不抄 AI 推荐」——
+> 集季识别是季度绑定的辅助手段，与本轮之外的其他 AI 能力（推荐 / 标题提取 /
+> 去广 / 分组规则 / 观影报告）无关，那些仍不实现。
+> 与上游一致的两条硬边界：AI **可选**（未配置绝不阻塞任何现有路径）、
+> AI 结果**必经用户确认**才落盘（不存在自动应用的路径）。
 
 ---
 

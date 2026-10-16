@@ -1252,56 +1252,69 @@ class _DetailPageState extends State<DetailPage> {
     final previewOnly = result.mode == AiSeasonMode.explicitMapping;
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        key: const ValueKey('ai-season-preview'),
-        title: const Text('AI 剧集 / 季度分析建议'),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                '${_aiModeLabel(result.mode)} · '
-                '${(result.confidence * 100).round()}%',
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              if (result.seasonNumber >= 0)
+      // 包一层**带 key 的** `RepaintBoundary`：证据截图必须能拍到这张对话框本身。
+      //
+      // 【为什么非加不可】每个路由（含 dialog）在 `Navigator` 里各有自己的
+      // `RepaintBoundary`，**没有任何一个** boundary 同时包含页面与对话框的
+      // 内容。所以「拍整窗」并不存在：默认取第一个 boundary 只会拍到详情页，
+      // 对话框完全不在图里（实测 173791 字节的图里没有预览框）。既有套件
+      // 用的是同一个办法：`tmdb_detail_visual_flow_test` 为图片查看器加了
+      // `tmdb-photo-viewer-boundary`，截图时按 key 指定这一层。
+      builder: (context) => RepaintBoundary(
+        key: const ValueKey('ai-season-preview-boundary'),
+        child: AlertDialog(
+          key: const ValueKey('ai-season-preview'),
+          title: const Text('AI 剧集 / 季度分析建议'),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
                 Text(
-                  result.seasonNumber == 0
-                      ? '特别篇'
-                      : '第 ${result.seasonNumber} 季',
+                  '${_aiModeLabel(result.mode)} · '
+                  '${(result.confidence * 100).round()}%',
+                  style: Theme.of(context).textTheme.titleSmall,
                 ),
-              if (result.summary.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Text(result.summary),
+                if (result.seasonNumber >= 0)
+                  Text(
+                    result.seasonNumber == 0
+                        ? '特别篇'
+                        : '第 ${result.seasonNumber} 季',
+                  ),
+                if (result.summary.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(result.summary),
+                ],
+                for (final warning in result.warnings) ...[
+                  const SizedBox(height: 4),
+                  Text('• $warning'),
+                ],
+                if (previewOnly) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    '本版本仅预览，不会写入绑定。',
+                    key: const ValueKey('ai-season-preview-only'),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ],
               ],
-              for (final warning in result.warnings) ...[
-                const SizedBox(height: 4),
-                Text('• $warning'),
-              ],
-              if (previewOnly) ...[
-                const SizedBox(height: 12),
-                Text(
-                  '本版本仅预览，不会写入绑定。',
-                  key: const ValueKey('ai-season-preview-only'),
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text(previewOnly ? '知道了' : '取消'),
-          ),
-          if (!previewOnly)
-            FilledButton(
-              key: const ValueKey('ai-season-apply'),
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('应用建议'),
             ),
-        ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text(previewOnly ? '知道了' : '取消'),
+            ),
+            if (!previewOnly)
+              FilledButton(
+                key: const ValueKey('ai-season-apply'),
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('应用建议'),
+              ),
+          ],
+        ),
       ),
     );
     if (confirmed != true || previewOnly || !mounted) return;

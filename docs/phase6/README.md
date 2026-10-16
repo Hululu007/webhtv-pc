@@ -1,7 +1,21 @@
 # Phase 6 计划（历史记录 / 详情页续播 / 季度与选集控件 / AI 集季识别）
 
-- 状态：**设计指导待评审**（设计 `design/00`–`design/05` 已产出，实现未开始）
-- 日期：2026-10-14
+- 状态：**已完成**（2026-10-16）
+- 日期：2026-10-14（设计）／2026-10-16（实现与验收）
+- 验收结论：四项能力（历史记录卡片化 / 点击行为可配置 / 详情页读历史续播 /
+  季度与选集控件 + AI 集季识别）均已实现并取得证据。
+  - `flutter test`：**1968 通过 / 4 失败**；4 条均为既知 flaky
+    （`phase2_last_site_test` 文件锁、`phase2_ipc_test`、`phase3_jvm_spider_test`×2
+    的 sidecar/JVM 资源争用），**单独跑全绿（8/8、31/31、18/18）**
+    —— 与 `design/05` §7.1 记录的已知 flaky 集合一致。
+  - L3：`phase6_ai_season_flow_test` 7/7（真窗口 + 真 HTTP + 真 SQLite）、
+    `phase6_history_visual_flow_test` 6/6、`tmdb_detail_flow_test` 1/1。
+  - 证据：`evidence/01-history-page.md`、`evidence/02-detail-resume-highlight.md`、
+    `evidence/03-season-controls-paging.md`、`evidence/ai-ui-screenshots.md`、
+    `evidence/ai-season-flow.md`。
+  - 实现过程中修正的既有缺陷：季度弹窗选择结果丢失（Phase 4 起，
+    `showDialog<TmdbSeasonChoice>` 与弹窗 `pop` 类型不符导致结果恒为 `null`，
+    详见 `evidence/ai-season-flow.md` §5）。
 - 对应设计文档章节：本目录 `design/00`–`design/05`、`docs/webhtv-pc-design.md`
   §15（历史记录与收藏）、§17.2（页面清单）、§27.12（与上游的取舍，本轮修订）
 - 上游：`docs/phase5/README.md`（Phase 5 已完成：安卓桥接）

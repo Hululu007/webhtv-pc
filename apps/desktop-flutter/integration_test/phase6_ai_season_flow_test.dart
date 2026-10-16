@@ -21,6 +21,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:webhtv_pc/core/ai_config.dart';
@@ -32,6 +33,7 @@ import 'package:webhtv_pc/ui/ai_settings_page.dart';
 import 'package:webhtv_pc/ui/browse_pages.dart';
 
 import 'fixture_ai.dart';
+import 'phase5_evidence.dart';
 
 void evidence(String message) =>
     debugPrint('PHASE6-AI-EVIDENCE $message');
@@ -236,6 +238,21 @@ void main() {
       reason: '预览必须写明 mode 与置信度',
     );
 
+    // 证据截图（`design/05` §6）。
+    //
+    // 【为什么必须按 key 指定这一层】每个路由（含 dialog）在 `Navigator` 里各有
+    // 自己的 `RepaintBoundary`，**没有任何一个** boundary 同时包含页面与对话框：
+    // 默认取第一个 boundary 只会拍到详情页，对话框完全不在图里
+    // （实测 173791 字节的图里没有预览框）。所以 `_showAiPreview` 给对话框包了
+    // `ai-season-preview-boundary`，与既有 `tmdb-photo-viewer-boundary` 同一办法。
+    await tester.pumpAndSettle();
+    await captureEvidence(
+      tester,
+      relativePath: 'docs/phase6/evidence/ai-season-preview.png',
+      evidence: evidence,
+      anchor: find.byKey(const ValueKey('ai-season-preview-boundary')),
+    );
+
     // **确认之前不得落盘**（P2：AI 必经确认）。
     expect(
       state.tmdb.selectedSeason,
@@ -424,6 +441,14 @@ void main() {
       find.byType(AiSettingsPage),
       findsOneWidget,
       reason: '未配置时应打开 AI 设置页',
+    );
+    // 证据截图（`design/05` §6）。不传 `anchor`：AI 设置页是普通路由，
+    // 默认取第一个 boundary 就已是该页，实测产出正常（46961 字节）。
+    await tester.pumpAndSettle();
+    await captureEvidence(
+      tester,
+      relativePath: 'docs/phase6/evidence/ai-settings.png',
+      evidence: evidence,
     );
     expect(
       state.tmdb.selectedSeason,
