@@ -4,8 +4,10 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/app_error.dart';
+import '../core/history_view.dart';
 import '../services/proxy_server.dart';
 import '../services/storage.dart';
 import '../services/tmdb_history.dart';
@@ -49,6 +51,11 @@ class HistoryPage extends StatefulWidget {
 
 class _HistoryPageState extends State<HistoryPage> {
   String _keyword = '';
+
+  /// 删除模式状态机（`docs/phase6/design/01` §3.1）。
+  ///
+  /// 纯逻辑在 `core/history_view.dart`（不依赖 Flutter），这里只持有实例。
+  HistoryViewState _view = HistoryViewState.initial;
 
   AppState get _state => widget.state;
 
@@ -112,9 +119,24 @@ class _HistoryPageState extends State<HistoryPage> {
   @override
   Widget build(BuildContext context) {
     final items = _items;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
+    // Esc 退出删除态（`design/01` §3.1 的「退出方式」列）。
+    //
+    // 用 `CallbackShortcuts` + `Focus(autofocus: true)`，与播放页同一套写法
+    // （`player_page.dart` 的 `buildPlayerShortcuts`）：无需自建 `Intent` 类，
+    // 且不需要 `Actions` 映射。
+    //
+    // 只在非 `none` 态才消费 Esc：否则会把 Esc 从壳层其它控件手里抢走。
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.escape): () {
+          if (_view.mode != HistoryViewMode.none) _exitDeleteMode();
+        },
+      },
+      child: Focus(
+        autofocus: true,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
         Padding(
           padding: const EdgeInsets.all(12),
           child: Row(
@@ -165,6 +187,25 @@ class _HistoryPageState extends State<HistoryPage> {
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 12),
             child: Text('本地存储不可用，播放历史暂不记录。'),
+          ),
+        // 删除态提示条（`design/01` §3.1）。
+        //
+        // 删掉最后一条 → 列表为空 → 自动回到 `none`（§3.2），提示条随之消失。
+        if (_view.mode == HistoryViewMode.singleDelete)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text('删除模式：点击卡片即删除该条记录'),
+                ),
+                TextButton(
+                  key: const ValueKey('history-delete-done'),
+                  onPressed: _exitDeleteMode,
+                  child: const Text('完成'),
+                ),
+              ],
+            ),
           ),
         const Divider(height: 1),
         // 季度历史卡片（`02` §7.1）：同一节目的每季一张卡片。
@@ -237,7 +278,9 @@ class _HistoryPageState extends State<HistoryPage> {
                   ),
                 ),
         ),
-      ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -271,6 +314,7 @@ class _HistoryPageState extends State<HistoryPage> {
     return InkWell(
       key: ValueKey('history-row-${item.id}'),
       onTap: () => _onCardTap(item),
+      onLongPress: _onCardLongPress,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -283,16 +327,29 @@ class _HistoryPageState extends State<HistoryPage> {
                 fit: StackFit.expand,
                 children: [
                   PosterImage(url: item.vodPic),
-                  // 左下角进度角标（对齐上游 `@id/playback`）。
-                  Positioned(
-                    left: 6,
-                    bottom: 6,
-                    child: _HistoryBadge(
-                      text: item.completed
-                          ? '已看完'
-                          : '已看 ${item.progressPercent}%',
+                  // 删除态：盖一层删除遮罩（对齐上游 `@id/delete`）。
+                  if (_view.mode == HistoryViewMode.singleDelete)
+                    Container(
+                      key: ValueKey('history-delete-overlay-${item.id}'),
+                      color: theme.colorScheme.surface.withValues(alpha: 0.72),
+                      alignment: Alignment.center,
+                      child: Icon(
+                        Icons.delete_outline,
+                        size: 32,
+                        color: theme.colorScheme.error,
+                      ),
                     ),
-                  ),
+                  // 删除态下隐藏进度角标（对齐上游：删除态是「另一个模式」）。
+                  if (_view.mode != HistoryViewMode.singleDelete)
+                    Positioned(
+                      left: 6,
+                      bottom: 6,
+                      child: _HistoryBadge(
+                        text: item.completed
+                            ? '已看完'
+                            : '已看 ${item.progressPercent}%',
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -355,7 +412,52 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   /// 卡片点击（Task 8 会按设置分流；此处先保持既有行为）。
-  void _onCardTap(PlaybackHistory item) => unawaited(_resume(item));
+  /// 卡片点击（`docs/phase6/design/01` §3.2）。
+  ///
+  /// 删除态下「点谁删谁」（对齐上游 `HistoryAdapter#setClickListener`）；
+  /// 多选态下只切换勾选；默认态按设置分流（Task 8 补）。
+  void _onCardTap(PlaybackHistory item) {
+    switch (_view.mode) {
+      case HistoryViewMode.singleDelete:
+        _deleteOne(item);
+      case HistoryViewMode.multiSelect:
+        setState(() => _view = _view.toggleSelection(item.id));
+      case HistoryViewMode.none:
+        unawaited(_resume(item));
+    }
+  }
+
+  /// 长按：进入 / 退出删除态（对齐上游 `OnClickListener#onLongClick`）。
+  ///
+  /// 多选态下长按**不切到**删除态：两个模式的入口互斥（§3.1 的状态图里
+  /// 没有 `multiSelect → singleDelete` 这条边），否则用户在多选态误长按会
+  /// 丢掉已勾选的集合。
+  void _onCardLongPress() {
+    setState(() {
+      _view = switch (_view.mode) {
+        HistoryViewMode.singleDelete => _view.exitMode(),
+        HistoryViewMode.multiSelect => _view,
+        HistoryViewMode.none => _view.enterSingleDelete(),
+      };
+    });
+  }
+
+  /// 删除一条。
+  ///
+  /// **必须逐条走 `state.deleteHistory`**：它同时写 `history_deletions` 标记，
+  /// 否则安卓下次推来旧记录会复活（`docs/phase5/design/02` §4.5）。
+  void _deleteOne(PlaybackHistory item) {
+    _state.deleteHistory(item.id);
+    setState(() {
+      // 判定基准是**过滤后的可见列表**：搜索出 1 条、删掉它之后才退出；
+      // 全量还有条目但被搜索挡住时**不**退出（`design/01` §3.2）。
+      final remaining = _items.where((row) => row.id != item.id).length;
+      if (remaining == 0) _view = _view.exitMode();
+    });
+  }
+
+  /// 退出删除态的按钮（顶部「完成」）。
+  void _exitDeleteMode() => setState(() => _view = _view.exitMode());
 
   /// 「删除整部节目」二级操作（`02` §7.4）：必须先明确告知将删除的季度数量。
   Future<void> _confirmDeleteMedia(SeasonHistoryCard card) async {

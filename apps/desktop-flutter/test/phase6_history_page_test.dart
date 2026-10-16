@@ -4,6 +4,7 @@ library;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webhtv_pc/core/history_view.dart';
 import 'package:webhtv_pc/services/app_paths.dart';
@@ -280,6 +281,177 @@ void main() {
         expect(find.text('剧集甲'), findsOneWidget);
       });
     }
+  });
+
+  group('删除态（design/01 §3）', () {
+    testWidgets('长按卡片进入删除态：出现遮罩与「完成」', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      expect(find.byKey(const ValueKey('history-delete-done')), findsNothing);
+      await tester.longPress(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('history-delete-done')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('history-delete-overlay-1')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('删除态下点卡片即删该条，仍在删除态', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('剧集甲'), findsNothing, reason: '该条被删除');
+      expect(find.text('剧集乙'), findsOneWidget, reason: '另一条不受影响');
+      expect(
+        find.byKey(const ValueKey('history-delete-done')),
+        findsOneWidget,
+        reason: '还有条目时仍在删除态',
+      );
+      expect(state.recentHistory().length, 1, reason: '必须真的落盘');
+    });
+
+    testWidgets('删除态删掉最后一条后自动退出', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('history-delete-done')), findsNothing);
+      expect(find.text('暂无播放记录'), findsOneWidget);
+    });
+
+    testWidgets('点「完成」退出删除态且不删任何东西', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-delete-done')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('history-delete-done')), findsNothing);
+      expect(find.text('剧集甲'), findsOneWidget);
+      expect(state.recentHistory().length, 1);
+    });
+
+    testWidgets('再次长按退出删除态', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      // 先断言**真的进去了**：否则「退出」断言在「从未进入」时也绿（假绿）。
+      expect(find.byKey(const ValueKey('history-delete-done')), findsOneWidget);
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('history-delete-done')), findsNothing);
+      expect(find.text('剧集甲'), findsOneWidget);
+    });
+
+    testWidgets('空历史时不渲染删除入口', (tester) async {
+      await pumpHistory(tester);
+      expect(find.byKey(const ValueKey('history-bulk-delete')), findsNothing);
+    });
+
+    // **`design/01` §3.2 这一段自相矛盾**（同一场景两个相反结论）：
+    //   句2「搜索出 1 条、删掉它之后，可见列表为空 → 退出删除态」
+    //   句3「搜索后可见 1 条，删掉这 1 条**不应**退出（还有 9 条被搜索词挡着）」
+    //   句5「判定必须用 `_items`（过滤后）而不是 `state.recentHistory()`（全量）」
+    // 句3 与句5 **不可兼得**：用 `_items` 判定 ⇒ 删掉可见最后一条后必然为空
+    // ⇒ 必然退出（= 句2），永远达不到句3。
+    //
+    // **裁定：退出**。依据 3 条 vs 1 条：
+    //   ① `design/05` A11d（**验收判据**）只写了退出条款：
+    //      「删除态删掉"过滤后最后一条"才退出」；
+    //   ② §3.2 句5 是实现指令，用 `_items` 必然导出退出；
+    //   ③ §3.2 句2 是**加粗的主规则**（「判定基准是过滤后的可见列表」）；
+    //   ④ 上游 `HistoryActivity` 无搜索，`getItemCount() == 0 → setDelete(false)`
+    //      （其 `getItemCount()` 等价于全量，但全量==可见时与句2 一致）。
+    // UX 判据（决定性）：若「不退出」，可见列表已空、删除态横幅仍在，屏幕会同时
+    // 出现「暂无播放记录」与「点击卡片即删除该条记录」——自相矛盾的界面，
+    // 正是 design 自己批判的反模式（「点了什么也没有的按钮比没有按钮更糟」）。
+    //
+    // 这条用例同时是**判定基准**的钉子：若实现改用 `state.recentHistory()`（全量）
+    // 判空，则全量还有 1 条 → 不退出 → 本用例失败。
+    testWidgets('删掉过滤后最后一条即退出（裁定：§3.2 句3 与句5 冲突，取句5）', (
+      tester,
+    ) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.enterText(find.byType(TextField), '剧集乙');
+      await tester.pump();
+      expect(find.text('剧集甲'), findsNothing, reason: '前置：搜索已把它挡住');
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-2')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-2')));
+      await tester.pumpAndSettle();
+
+      expect(
+        state.recentHistory().length,
+        1,
+        reason: '全量里还有「剧集甲」（被搜索词挡着）',
+      );
+      expect(
+        find.byKey(const ValueKey('history-delete-done')),
+        findsNothing,
+        reason:
+            '判定必须用 `_items`（过滤后）：可见列表已空 → 退出。'
+            '用 `state.recentHistory()`（全量）判空会留在这个已无卡片可点的模式里。',
+      );
+    });
+
+    // Esc 退出（`design/01` §3.1 的「退出方式」列）。
+    testWidgets('Esc 退出删除态', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('history-delete-done')), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('history-delete-done')), findsNothing);
+      expect(find.text('剧集甲'), findsOneWidget, reason: 'Esc 不删任何东西');
+    });
+
+    // 删除态下**必须**逐条走 `state.deleteHistory`（而不是直接改本地列表）：
+    // 它同时写 `history_deletions` 标记，否则安卓下次推来旧记录会复活
+    // （`docs/phase5/design/02` §4.5）。
+    testWidgets('删除会写删除标记（否则远端旧记录会复活）', (tester) async {
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      expect(
+        state.database!.historyDeletionCount,
+        1,
+        reason: '删除必须留下 history_deletions 标记（phase5 design/02 §4.5）',
+      );
+    });
   });
 }
 
