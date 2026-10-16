@@ -14,6 +14,7 @@ import '../services/tmdb_history.dart';
 import '../state/app_state.dart';
 import '../core/protocol.dart';
 import 'app.dart';
+import 'browse_pages.dart';
 import 'common.dart';
 import 'player_page.dart';
 import 'tokens.dart';
@@ -479,7 +480,7 @@ class _HistoryPageState extends State<HistoryPage> {
       case HistoryViewMode.multiSelect:
         setState(() => _view = _view.toggleSelection(item.id));
       case HistoryViewMode.none:
-        unawaited(_resume(item));
+        unawaited(_openBySetting(item));
     }
   }
 
@@ -628,6 +629,55 @@ class _HistoryPageState extends State<HistoryPage> {
   ///
   /// 设计约束：历史只保存剧集地址与站点 key，恢复时需要重新解析播放决策，
   /// 避免把过期直链直接交给播放器（§15.2 “继续播放”）。
+  /// 按「点击历史行为」设置分流（`docs/phase6/design/01` §4.1）。
+  ///
+  /// 默认 `detail`（进详情页），`play` 则是既有行为（直接续播）。
+  Future<void> _openBySetting(PlaybackHistory item) {
+    return _state.historyClickAction == UiHistoryClickAction.play
+        ? _resume(item)
+        : _openDetail(item);
+  }
+
+  /// 打开该条历史对应的详情页。
+  ///
+  /// **必须先切站点**：`DetailPage` 的详情请求依赖「当前站点」，
+  /// 不切会串到别的站点去取详情（与 `search_page.dart#_openResult` 同因）。
+  ///
+  /// 站点已不在当前配置中时**不静默失败**：历史可能来自旧配置或安卓推送，
+  /// 用户需要知道为什么没反应。
+  Future<void> _openDetail(PlaybackHistory item) async {
+    final state = _state;
+    final config = state.config;
+    final site = config?.sites
+        .where((candidate) => candidate.key == item.siteKey)
+        .firstOrNull;
+    if (site == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('该记录所属站点已不在当前配置中：${item.siteKey}')),
+      );
+      return;
+    }
+    await state.selectSite(site);
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => DetailPage(
+          state: state,
+          vod: Vod(
+            vodId: item.vodId,
+            vodName: item.vodName,
+            vodPic: item.vodPic,
+          ),
+          // **必须传用户点的那一条**的线路与集入口：同一部剧有多条历史时，
+          // 点旧记录却续新记录是错的（`docs/phase6/design/02` §7.1）。
+          historyFlag: item.flag,
+          historyEpisodeId: item.episodeId,
+        ),
+      ),
+    );
+  }
+
   Future<void> _resume(PlaybackHistory item) async {
     final state = _state;
     final episodeTarget = _historyEntryTarget(item);

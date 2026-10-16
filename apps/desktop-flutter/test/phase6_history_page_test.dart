@@ -6,10 +6,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:webhtv_pc/core/history_view.dart';
 import 'package:webhtv_pc/services/app_paths.dart';
 import 'package:webhtv_pc/services/log_service.dart';
 import 'package:webhtv_pc/state/app_state.dart';
+import 'package:webhtv_pc/ui/browse_pages.dart';
 import 'package:webhtv_pc/ui/diagnostics_pages.dart';
 import 'package:webhtv_pc/ui/library_pages.dart';
 
@@ -24,6 +26,11 @@ void main() {
         overrides: {'roaming': tempDir.path, 'local': tempDir.path},
       ),
       log: LogService(),
+      // **必须注入假 client**：`play` 分流会走 `_resume` → `resolvePlayback`，
+      // 那是真实 HTTP + 本地代理链。在 `testWidgets` 的 fake-async 区里做真实
+      // socket I/O 会**挂死**（`did not complete`，无任何 Exception 日志）——
+      // 这是本仓库既有的分层纪律（`webhtv-pc-test-io-layering`）。
+      httpClient: _RecordingSiteClient(),
     );
     await state.bootstrap();
   });
@@ -732,6 +739,187 @@ void main() {
       expect(find.byKey(const ValueKey('history-checkbox-1')), findsNothing);
     });
   });
+
+  group('点击分流（design/01 §4、§5）', () {
+    // `setUp` 的 `state` 没有配置（`bootstrap()` 不导入任何配置），
+    // 而 `_openDetail` / `_resume` 都要求「站点在配置里」。
+    // 因此本组用例必须先导入一份**内联 JSON** 配置。
+    //
+    // 用内联 JSON 而不是 `configFor(url)`：后者是 URL 源，
+    // `importConfig` 会走真实 HTTP 拉取，而 `testWidgets` 的 fake-async 区里
+    // 所有 `HttpClient` 都被固定返回 400（Flutter 测试框架既有行为）。
+    // 内联 JSON 不联网，实测 `ok=true`。
+    Future<void> seedSite({String key = 'site-a'}) async {
+      final ok = await state.importConfig(
+        '{"name":"点击分流测试","sites":[{"key":"$key","name":"甲站",'
+        '"type":4,"api":"http://127.0.0.1:1/vod/api?key=$key"}]}',
+      );
+      expect(ok, isTrue, reason: '前置：配置导入必须成功');
+      expect(state.config, isNotNull, reason: '前置：config 必须可用');
+    }
+
+    testWidgets('默认 detail：点卡片进详情页，不播放', (tester) async {
+      await seedSite();
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DetailPage), findsOneWidget);
+    });
+
+    testWidgets('play：点卡片直接续播，不进详情页', (tester) async {
+      await seedSite();
+      // **必须放进 `runAsync`**：`setHistoryClickAction` 会真实写盘，
+      // 而 `testWidgets` 是假时钟，写盘回调不会被 `pump` 推进 → 整个用例
+      // `did not complete`（无 Exception 日志）。同文件上方
+      // 「已保存的偏好决定初始选中项」用例已踩过同一个坑。
+      await tester.runAsync(
+        () => state.setHistoryClickAction(UiHistoryClickAction.play),
+      );
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+      // 清掉 `pumpHistory` 期间 `_repairMissingPosters` 留下的请求记录，
+      // 只观察**点击之后**发起了什么。
+      _requests.clear();
+
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      // 真实 I/O 链必须用 `runAsync` 推：fake-async 区里只 `pump()` 推不动
+      // 挂在真实 socket 上的续体（本仓库既有的分层纪律）。
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 200)),
+      );
+      // **必须把 `LogService` 的刷盘定时器泵完**：`loadHome` 失败会写一条
+      // error 日志，`_enqueue` 安排了一个 0 延迟 `Timer`；不泵完则用例结束时
+      // 报 `A Timer is still pending even after the widget tree was disposed`。
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(DetailPage), findsNothing);
+      // **强断言**：必须真的发起了「播放入口」请求（`play=` 参数）。
+      // 只断言「没进详情页」是弱断言——「什么都没发生」也能让它绿。
+      expect(
+        _requests.any((url) => url.queryParameters.containsKey('play')),
+        isTrue,
+        reason: 'play 分流必须走 _resume → resolvePlayback（带 play= 的播放入口请求），'
+            '实际请求：$_requests',
+      );
+    });
+
+    testWidgets('站点不在配置中时给出可见提示，不静默失败', (tester) async {
+      await seedSite();
+      seedHistory(id: 1, vodName: '剧集甲', siteKey: '已删除的站点');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('已不在当前配置中'), findsOneWidget);
+      expect(find.byType(DetailPage), findsNothing);
+    });
+
+    // ---- 以下 5 条是 brief 没有的钉子（预检/变异自检发现）----
+
+    // **进详情页前必须先切站点**（`search_page.dart#_openResult` 同因）：
+    // `DetailPage` 的详情请求依赖「当前站点」，不切会串到别的站点去取详情。
+    // 用两个站点：历史属于第二个，断言点卡片后 `selectedSite` 变成了它。
+    testWidgets('进详情页前先切到该记录所属站点（不串站）', (tester) async {
+      final ok = await state.importConfig(
+        '{"name":"双站","sites":['
+        '{"key":"site-a","name":"甲站","type":4,'
+        '"api":"http://127.0.0.1:1/vod/api?key=site-a"},'
+        '{"key":"site-b","name":"乙站","type":4,'
+        '"api":"http://127.0.0.1:1/vod/api?key=site-b"}]}',
+      );
+      expect(ok, isTrue, reason: '前置：配置导入必须成功');
+      // 导入后默认选中第一个站点；先把当前站点明确设为 site-a。
+      await state.selectSite(state.config!.sites.first);
+      expect(state.selectedSite?.key, 'site-a', reason: '前置：当前是甲站');
+
+      seedHistory(id: 1, vodName: '剧集甲', siteKey: 'site-b');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      expect(
+        state.selectedSite?.key,
+        'site-b',
+        reason: '必须先切到历史所属站点，否则详情会串到甲站去取',
+      );
+      expect(find.byType(DetailPage), findsOneWidget);
+    });
+
+    // 详情页必须拿到**用户点的那一条**的线路与集入口（`design/02` §7.1）：
+    // 同一部剧有多条历史时，点旧记录却续新记录是错的。
+    testWidgets('详情页收到该条历史的线路与集入口', (tester) async {
+      await seedSite();
+      seedHistory(
+        id: 1,
+        vodName: '剧集甲',
+        flag: '线路二',
+        episodeId: 'http://x/e7',
+      );
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      final page = tester.widget<DetailPage>(find.byType(DetailPage));
+      expect(page.historyFlag, '线路二');
+      expect(page.historyEpisodeId, 'http://x/e7');
+      expect(page.vod.vodId, 'v1', reason: '必须传该条历史的 vodId');
+      expect(page.vod.vodName, '剧集甲');
+    });
+
+    // 删除态 / 多选态下点卡片**不得**走分流（否则会边删边跳详情页）。
+    testWidgets('删除态下点卡片不跳详情页', (tester) async {
+      await seedSite();
+      seedHistory(id: 1, vodName: '剧集甲');
+      seedHistory(id: 2, vodName: '剧集乙', updatedAt: 1000);
+      await pumpHistory(tester);
+
+      await tester.longPress(find.byKey(const ValueKey('history-row-1')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-2')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DetailPage), findsNothing, reason: '删除态不跳详情');
+      expect(state.recentHistory().length, 1, reason: '而是删掉那一条');
+    });
+
+    testWidgets('多选态下点卡片不跳详情页', (tester) async {
+      await seedSite();
+      seedHistory(id: 1, vodName: '剧集甲');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-bulk-delete')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DetailPage), findsNothing, reason: '多选态只勾选');
+      expect(find.text('已选 1 条'), findsOneWidget);
+    });
+
+    // `play` 模式下站点不在配置中时也必须给可见提示（不得静默失败）。
+    testWidgets('play 模式下站点不在配置中同样给提示', (tester) async {
+      await seedSite();
+      await tester.runAsync(
+        () => state.setHistoryClickAction(UiHistoryClickAction.play),
+      );
+      seedHistory(id: 1, vodName: '剧集甲', siteKey: '已删除的站点');
+      await pumpHistory(tester);
+
+      await tester.tap(find.byKey(const ValueKey('history-row-1')));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 200)),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.textContaining('已不在当前配置中'), findsOneWidget);
+    });
+  });
 }
 
 /// 读出历史网格当前的实际列数。
@@ -742,3 +930,21 @@ int _historyColumns(WidgetTester tester) {
   return (grid.gridDelegate as SliverGridDelegateWithFixedCrossAxisCount)
       .crossAxisCount;
 }
+
+/// 记录所有站点请求，并一律拒绝。
+///
+/// 两个作用：
+/// 1. **避免真实 socket I/O**：`testWidgets` 的 fake-async 区里做真实网络会挂死
+///    （`did not complete`，无 Exception 日志）——本仓库既有的分层纪律。
+/// 2. **让分流可断言**：记录 URL 就能区分「发了播放入口请求（`play=`）」
+///    与「没发任何请求」，比只断言「没进详情页」强得多。
+class _RecordingSiteClient extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    _requests.add(request.url);
+    throw StateError('测试不发真实站点请求：${request.url}');
+  }
+}
+
+/// 本文件内所有站点请求的 URL（跨用例共享，用例内自行清空）。
+final List<Uri> _requests = <Uri>[];
