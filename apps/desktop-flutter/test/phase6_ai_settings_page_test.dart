@@ -1,0 +1,129 @@
+/// AI 设置页（`docs/phase6/design/04` §7.6）。
+library;
+
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:webhtv_pc/services/app_paths.dart';
+import 'package:webhtv_pc/services/log_service.dart';
+import 'package:webhtv_pc/state/app_state.dart';
+import 'package:webhtv_pc/ui/ai_settings_page.dart';
+import 'package:webhtv_pc/ui/diagnostics_pages.dart';
+
+void main() {
+  late Directory tempDir;
+  late AppState state;
+
+  setUp(() async {
+    tempDir = await Directory.systemTemp.createTemp('webhtv-ai-settings');
+    state = AppState(
+      paths: AppPaths.resolve(
+        overrides: {'roaming': tempDir.path, 'local': tempDir.path},
+      ),
+      log: LogService(),
+    );
+    await state.bootstrap();
+  });
+
+  tearDown(() async {
+    state.dispose();
+    try {
+      await tempDir.delete(recursive: true);
+    } catch (_) {}
+  });
+
+  Future<void> pumpSettings(WidgetTester tester) async {
+    tester.view.physicalSize = const Size(1200, 1800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: SettingsPage(state: state))),
+    );
+    await tester.pump();
+  }
+
+  Future<void> pumpAiPage(WidgetTester tester) async {
+    tester.view.physicalSize = const Size(1200, 1800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(MaterialApp(home: AiSettingsPage(state: state)));
+    await tester.pump();
+  }
+
+  testWidgets('设置页有「AI 助手」区块与入口', (tester) async {
+    await pumpSettings(tester);
+    expect(find.text('AI 助手'), findsOneWidget);
+    expect(find.byKey(const ValueKey('settings-ai-open')), findsOneWidget);
+  });
+
+  testWidgets('入口与 TMDB 解耦：未配置 TMDB 也可见', (tester) async {
+    // state 刚 bootstrap，TMDB 未配置。
+    expect(state.tmdbConfig.isReady, isFalse);
+    await pumpSettings(tester);
+    expect(find.byKey(const ValueKey('settings-ai-open')), findsOneWidget);
+  });
+
+  testWidgets('AI 设置页渲染全部字段', (tester) async {
+    await pumpAiPage(tester);
+    expect(find.byKey(const ValueKey('ai-settings-page')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-enabled')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-protocol')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-endpoint')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-api-key')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-model')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-user-agent')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-test')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-fetch-models')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ai-save')), findsOneWidget);
+  });
+
+  testWidgets('保存后写入 ai 段', (tester) async {
+    await pumpAiPage(tester);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-endpoint')),
+      'https://api.deepseek.com/v1',
+    );
+    await tester.enterText(find.byKey(const ValueKey('ai-api-key')), 'sk-test');
+    await tester.enterText(
+      find.byKey(const ValueKey('ai-model')),
+      'deepseek-chat',
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('ai-save')));
+    await tester.pumpAndSettle();
+
+    expect(state.aiConfig.endpoint, 'https://api.deepseek.com/v1');
+    expect(state.aiConfig.apiKey, 'sk-test');
+    expect(state.aiConfig.model, 'deepseek-chat');
+  });
+
+  testWidgets('切换协议时自动填该协议的默认端点', (tester) async {
+    await pumpAiPage(tester);
+    await tester.tap(find.byKey(const ValueKey('ai-protocol')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anthropic Messages').last);
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(
+      find.byKey(const ValueKey('ai-endpoint')),
+    );
+    expect(field.controller?.text, 'https://api.anthropic.com/v1/messages');
+  });
+
+  testWidgets('API Key 默认遮蔽', (tester) async {
+    await pumpAiPage(tester);
+    final field = tester.widget<TextField>(
+      find.byKey(const ValueKey('ai-api-key')),
+    );
+    expect(field.obscureText, isTrue, reason: '凭据默认遮蔽');
+  });
+}

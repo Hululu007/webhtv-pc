@@ -10,6 +10,7 @@ import '../services/log_service.dart';
 import '../services/storage.dart';
 import '../state/app_state.dart';
 import '../state/sync_state.dart';
+import 'ai_settings_page.dart';
 import 'app.dart';
 import 'common.dart';
 import 'config_pages.dart';
@@ -98,6 +99,30 @@ class SettingsPage extends StatelessWidget {
         Text(
           '点击历史记录时的行为。长按卡片始终进入删除状态。',
           style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const Divider(height: 32),
+        // AI 助手区块（`docs/phase6/design/04` §7.6）。
+        //
+        // 与 TMDB 区块同样**无条件可见**：未配置时也要有入口，
+        // 否则用户永远进不来（Phase 4 的发布包实测缺陷）。
+        Text('AI 助手', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          state.aiReady
+              ? '已启用（协议 ${state.aiConfig.protocol}）'
+              : '未配置：用于季度弹窗的「AI 识别剧集/季度」',
+          key: const ValueKey('settings-ai-summary'),
+        ),
+        const SizedBox(height: 12),
+        FilledButton.tonalIcon(
+          key: const ValueKey('settings-ai-open'),
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => AiSettingsPage(state: state),
+            ),
+          ),
+          icon: const Icon(Icons.auto_awesome),
+          label: const Text('打开 AI 设置'),
         ),
         const Divider(height: 32),
         // 搜索区块。

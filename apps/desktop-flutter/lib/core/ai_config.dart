@@ -54,7 +54,10 @@ String cleanBaseEndpoint(String endpoint) {
 }
 
 /// 末段是否是 `vN` 形态（`v1`、`v1beta`）。
-bool _endsWithVersionSegment(String url) {
+///
+/// 公开而不是文件私有：端点归一化（`AiConfig.completionUrl`）与模型列表拉取
+/// （`fetchAiModelList`）必须对「版本段」有一致判断，否则两处会给出不同的基址。
+bool endsWithVersionSegment(String url) {
   final last = url.substring(url.lastIndexOf('/') + 1);
   if (last.length < 2 || last[0] != 'v') return false;
   var i = 1;
@@ -147,7 +150,7 @@ class AiConfig {
   static String _appendCompletionPath(String endpoint, String path) {
     if (endpoint.isEmpty) return '';
     if (endpoint.endsWith('/$path')) return endpoint;
-    if (_endsWithVersionSegment(endpoint)) return '$endpoint/$path';
+    if (endsWithVersionSegment(endpoint)) return '$endpoint/$path';
     return '$endpoint/v1/$path';
   }
 
@@ -167,7 +170,7 @@ class AiConfig {
       return '$endpoint/${_stripGeminiPrefix(model)}:generateContent';
     }
     var value = endpoint;
-    if (!_endsWithVersionSegment(value)) value = '$value/v1beta';
+    if (!endsWithVersionSegment(value)) value = '$value/v1beta';
     return '$value/$modelPath:generateContent';
   }
 

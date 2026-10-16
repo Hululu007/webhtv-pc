@@ -404,6 +404,9 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// AI 配置（`docs/phase6/design/04` §4）。
   AiConfig get aiConfig => _aiConfigStore.config;
 
+  /// AI 服务是否就绪（季度弹窗据此决定 AI 项是分析还是引导去设置）。
+  bool get aiReady => aiConfig.isReady;
+
   /// 持久化 AI 配置。
   ///
   /// 与 `saveTmdbConfig` 同构：写盘失败**不影响**当前会话（store 的内存值已

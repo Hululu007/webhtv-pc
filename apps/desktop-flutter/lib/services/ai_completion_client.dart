@@ -349,3 +349,93 @@ class AiCompletionClient {
 
   void close() => _client.close();
 }
+
+/// 拉取模型列表（`docs/phase6/design/04` §7.6）。
+///
+/// OpenAI 兼容端点走 `/v1/models`，Gemini 走 `/v1beta/models`。
+/// **失败返回空列表**（不是错误）：模型名可以手填，拉列表只是便利。
+Future<List<String>> fetchAiModelList(AiConfig config) async {
+  final safe = config.sanitized();
+  if (!safe.isModelFetchReady) return const [];
+  final base = cleanBaseEndpoint(safe.endpoint);
+  final url = safe.protocol == AiProtocol.geminiNative
+      ? '${_geminiModelsBase(base)}/models'
+      : '${_openAiModelsBase(base)}/models';
+
+  final client = http.Client();
+  try {
+    final response = await client
+        .get(Uri.parse(url), headers: _modelFetchHeaders(safe))
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return const [];
+    }
+    return _parseModelList(
+      utf8.decode(response.bodyBytes, allowMalformed: true),
+    );
+  } catch (_) {
+    return const [];
+  } finally {
+    client.close();
+  }
+}
+
+Map<String, String> _modelFetchHeaders(AiConfig config) {
+  if (config.protocol == AiProtocol.geminiNative) {
+    return {'x-goog-api-key': config.apiKey};
+  }
+  final headers = {'Authorization': 'Bearer ${config.apiKey}'};
+  if (config.protocol == AiProtocol.anthropicMessages) {
+    headers['x-api-key'] = config.apiKey;
+    headers['anthropic-version'] = aiAnthropicVersion;
+  }
+  final userAgent = _sanitizeUserAgent(config.customUserAgent);
+  if (userAgent.isNotEmpty) headers['User-Agent'] = userAgent;
+  return headers;
+}
+
+/// 模型列表基址：把完整补全端点退回其 `/v1` 父级。
+String _openAiModelsBase(String base) {
+  if (base.endsWith('/v1')) return base;
+  for (final suffix in const ['/responses', '/chat/completions', '/messages']) {
+    if (base.endsWith(suffix)) {
+      return base.substring(0, base.length - suffix.length);
+    }
+  }
+  return '$base/v1';
+}
+
+String _geminiModelsBase(String base) {
+  if (base.endsWith('/models')) {
+    return base.substring(0, base.length - '/models'.length);
+  }
+  final marker = base.indexOf('/models/');
+  if (marker >= 0) return base.substring(0, marker);
+  if (endsWithVersionSegment(base)) return base;
+  return '$base/v1beta';
+}
+
+List<String> _parseModelList(String body) {
+  try {
+    final decoded = jsonDecode(body);
+    if (decoded is! Map) return const [];
+    final result = <String>[];
+    for (final key in const ['data', 'models']) {
+      final list = decoded[key];
+      if (list is! List) continue;
+      for (final item in list) {
+        if (item is! Map) continue;
+        final id = item['id'] ?? item['name'] ?? item['baseModelId'];
+        if (id is String && id.trim().isNotEmpty) {
+          result.add(
+            id.startsWith('models/') ? id.substring('models/'.length) : id.trim(),
+          );
+        }
+      }
+    }
+    result.sort();
+    return result;
+  } catch (_) {
+    return const [];
+  }
+}
