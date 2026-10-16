@@ -45,8 +45,12 @@ import 'package:integration_test/integration_test.dart';
 import 'package:webhtv_pc/services/app_paths.dart';
 import 'package:webhtv_pc/services/log_service.dart';
 import 'package:webhtv_pc/state/app_state.dart';
+import 'package:webhtv_pc/core/episode_range.dart';
+import 'package:webhtv_pc/core/tmdb_detail_model.dart';
 import 'package:webhtv_pc/ui/app.dart';
+import 'package:webhtv_pc/ui/tmdb_detail_view.dart';
 import 'package:webhtv_pc/ui/theme.dart';
+import 'package:webhtv_pc/ui/tmdb_widgets.dart';
 
 void evidence(String message) =>
     debugPrint('PHASE6-EVIDENCE history-visual $message');
@@ -330,6 +334,151 @@ void main() {
     await capture(
       tester,
       relativePath: 'docs/phase6/evidence/history-multi-select.png',
+    );
+    expect(tester.takeException(), isNull);
+  });
+  // -------------------------------------------------------------------------
+  // plans/03：季度按钮常驻 + 选集区间条（`docs/phase6/design/03` §2、§4.3）
+  // -------------------------------------------------------------------------
+
+  /// 一张季集卡片（`TmdbEpisodeCard` 的构造**不是** `const`）。
+  TmdbEpisodeCard epCard(int number) =>
+      TmdbEpisodeCard(number: number, title: '第$number集');
+
+  testWidgets('季度按钮常驻（dark，1440x900）', (tester) async {
+    final temp = Directory.systemTemp.createTempSync('webhtv-p6-season');
+    final state = await _bootState(temp, seed: false);
+    addTearDown(() {
+      state.dispose();
+      try {
+        temp.deleteSync(recursive: true);
+      } catch (_) {}
+    });
+
+    // 单季场景：按钮仍常驻（这是改绑的唯一入口）。
+    final tmdb = state.tmdb;
+    // 直接驱动 TmdbState 到「已匹配单季」需要真实 TMDB 服务；本 harness
+    // 不发外网，因此用 `SeasonChipStrip` 直接渲染同一行形态并截图。
+    // **诚实标注**：这张图证明的是**组件形态**（按钮 + chip 条），
+    // 不是线上数据流；数据流的正确性由 `phase6_season_controls_test` 锁定。
+    evidence('season-button 说明=组件形态截图，数据流由 L2 锁定');
+
+    useViewport(tester, const Size(1440, 900));
+    await tester.pumpWidget(
+      MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: buildAppTheme(Brightness.dark),
+        home: Scaffold(
+          body: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const SizedBox(height: 24),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Text('单季：季度按钮常驻'),
+              ),
+              SizedBox(
+                height: tmdbSeasonSelectorHeight,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: () {},
+                      iconAlignment: IconAlignment.end,
+                      icon: const Icon(Icons.expand_more, size: 18),
+                      label: const Text('第 1 季'),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Text('多季：按钮在左，chip 条在右'),
+              ),
+              SeasonChipStrip(
+                seasons: const [1, 2, 3, 0],
+                selectedSeason: 2,
+                selectableSeasons: const [1, 2, 3, 0],
+                onChanged: (_) {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('第 1 季'), findsWidgets);
+    expect(
+      find.byKey(const ValueKey('tmdb-season-switcher')),
+      findsOneWidget,
+    );
+    await capture(
+      tester,
+      relativePath: 'docs/phase6/evidence/season-button.png',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('选集区间条（dark，1440x900）', (tester) async {
+    useViewport(tester, const Size(1440, 900));
+    // 400 集：阶梯 50（被 cardPageMaxSize 封顶）→ 8 个区间，
+    // 正好演示「每页上限 50 + 阶梯分组」（`design/03` §4.1）。
+    final ranges = EpisodeRangePolicy.build(400, 120, false);
+    expect(ranges.length, 8, reason: '400 集必须是 8 个区间');
+
+    await tester.pumpWidget(
+      MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: buildAppTheme(Brightness.dark),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: 24),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Text(
+                    '选集 · 线路一 · ${ranges.length} 个区间（400 集）',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TmdbEpisodeStrip(
+                  keyPrefix: 'tmdb-episode-card-线路一',
+                  cards: [for (var i = 1; i <= 400; i++) epCard(i)],
+                  ranges: ranges,
+                  rangeIndex: 2,
+                  onRangeChanged: (_) {},
+                  // 网格模式：`shrinkWrap` + 不可滚会构建全部子项，
+                  // 截图里能看到一整页的 50 张卡（横向条只挂载 ~6 张）。
+                  gridMode: true,
+                  cardWidth: 150,
+                  height: 170,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('tmdb-episode-card-线路一-range-strip')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('tmdb-episode-card-线路一-range-2')),
+      findsOneWidget,
+    );
+    evidence('episode-ranges=${ranges.length} labels=${ranges.map((r) => r.label).join(",")}');
+    await capture(
+      tester,
+      relativePath: 'docs/phase6/evidence/episode-ranges.png',
     );
     expect(tester.takeException(), isNull);
   });
