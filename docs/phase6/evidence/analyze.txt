@@ -1,0 +1,7 @@
+WebHTV PC Phase 6 plans/01 静态分析证据
+时间：2026-10-16T14:16:14+08:00
+HEAD：2248e0e 证据：历史页卡片与两种删除模式截图（design/05 §6）
+命令：flutter analyze
+
+Analyzing desktop-flutter...                                    
+No issues found! (ran in 8.5s)

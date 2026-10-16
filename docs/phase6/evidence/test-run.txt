@@ -1,0 +1,8 @@
+WebHTV PC Phase 6 plans/01 全量单测证据
+时间：2026-10-16T14:06:31+08:00
+HEAD：2248e0e 证据：历史页卡片与两种删除模式截图（design/05 §6）
+命令：flutter test
+
+09:18 +1762: C:/Users/Maple/orca/workspaces/webhtv-pc/dev1/apps/desktop-flutter/test/phase6_history_page_test.dart: 点击分流（design/01 §4、§5） 多选态下点卡片不跳详情页
+09:20 +1763: C:/Users/Maple/orca/workspaces/webhtv-pc/dev1/apps/desktop-flutter/test/phase6_history_page_test.dart: 点击分流（design/01 §4、§5） play 模式下站点不在配置中同样给提示
+09:23 +1764: All tests passed!
