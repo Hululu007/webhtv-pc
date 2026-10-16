@@ -459,3 +459,74 @@ bool _canMapFlatEpisodeNumbers(
   }
   return null;
 }
+
+/// AI 集季分析服务（`docs/phase6/design/04` §6.1）。
+///
+/// **手动触发、必经确认**：不存在"自动应用 AI 判断"的路径。
+class AiEpisodeSeasonService {
+  AiEpisodeSeasonService({AiConfig? config, AiCompletionClient? client})
+    : _config = (config ?? const AiConfig()).sanitized(),
+      _client = client ?? AiCompletionClient(),
+      _ownsClient = client == null;
+
+  final AiConfig _config;
+  final AiCompletionClient _client;
+  final bool _ownsClient;
+
+  bool _canceled = false;
+
+  /// 取消在途分析。取消后 [analyze] 立即短路，不改动任何绑定。
+  void cancel() => _canceled = true;
+
+  /// 分析一条线路的集季结构。
+  Future<AiSeasonAnalysis> analyze({
+    required String title,
+    required String flagName,
+    required List<VodEpisode> episodes,
+    required Map<int, int> seasonCounts,
+  }) async {
+    if (_canceled) return AiSeasonAnalysis.failure(AiSeasonFailure.canceled);
+    if (!_config.isReady) {
+      return AiSeasonAnalysis.failure(AiSeasonFailure.configIncomplete);
+    }
+    final seasons = _sortedSeasons(seasonCounts);
+    if (episodes.isEmpty || seasons.isEmpty) {
+      return AiSeasonAnalysis.failure(AiSeasonFailure.noEpisodes);
+    }
+
+    final samples = sampleAiEpisodes(episodes);
+    final prompt = buildAiSeasonPrompt(
+      title: title,
+      flagName: flagName,
+      episodes: episodes,
+      seasonCounts: seasonCounts,
+      samples: samples,
+    );
+
+    final result = await _client.complete(config: _config, prompt: prompt);
+    if (_canceled) return AiSeasonAnalysis.failure(AiSeasonFailure.canceled);
+    if (!result.ok) return AiSeasonAnalysis.failure(_failureOf(result));
+    return parseAiSeasonResponse(
+      text: result.text,
+      episodes: episodes,
+      seasonCounts: seasonCounts,
+      samples: samples,
+    );
+  }
+
+  /// 把补全失败翻译成对用户有意义的原因。
+  static AiSeasonFailure _failureOf(AiCompletionResult result) {
+    if (result.message.contains('超时')) return AiSeasonFailure.timeout;
+    if (result.message.contains('网络')) return AiSeasonFailure.network;
+    if (result.statusCode >= 300) return AiSeasonFailure.http;
+    // 2xx 但没有抽到可用文本：上游此时会退到 `parseResponse(原始 body)`，
+    // 最终仍落回 `invalidJson`。PC 端 `AiCompletionResult` 不暴露原始 body
+    // （Task 3 已定），所以这里直接判 `invalidJson` —— 不要谎报 `http`。
+    return AiSeasonFailure.invalidJson;
+  }
+
+  /// 释放自建的 client（注入的 client 归调用方所有）。
+  void dispose() {
+    if (_ownsClient) _client.close();
+  }
+}
