@@ -1074,15 +1074,21 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
                   title: '暂无播放记录',
                   message: '播放任意剧集后会自动记录进度。',
                 )
-              : GridView.builder(
-                  key: const ValueKey('history-grid'),
-                  padding: const EdgeInsets.all(_historyGridPadding),
-                  gridDelegate: _historyGridDelegate(
-                    MediaQuery.sizeOf(context).width,
+              // **必须用 `LayoutBuilder` 拿内容区宽度，不要用
+              // `MediaQuery.sizeOf(context).width`**（`design/01` §2.2 第 2 条）：
+              // 后者是**整窗宽**，而壳层有 76px 左栏 + 1px 分隔线，
+              // 于是同一窗口下列数比首页海报墙**偏多约 0.5 列**，两处卡片大小不一致。
+              // 首页用的就是 `LayoutBuilder(constraints.maxWidth)`
+              // （`browse_pages.dart:623`、`:652`）。
+              : LayoutBuilder(
+                  builder: (context, constraints) => GridView.builder(
+                    key: const ValueKey('history-grid'),
+                    padding: const EdgeInsets.all(AppSpace.lg),
+                    gridDelegate: _historyGridDelegate(constraints.maxWidth),
+                    itemCount: items.length,
+                    itemBuilder: (context, index) =>
+                        _buildHistoryCard(context, items[index]),
                   ),
-                  itemCount: items.length,
-                  itemBuilder: (context, index) =>
-                      _buildHistoryCard(context, items[index]),
                 ),
         ),
 ```
@@ -1097,7 +1103,7 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
   /// 压成非 2:3 或被裁切。这里列宽已知，格子高度就能精确算成
   /// 「海报 2:3 + 文字区」。
   static SliverGridDelegate _historyGridDelegate(double maxWidth) {
-    final usable = maxWidth - _historyGridPadding * 2;
+    final usable = maxWidth - AppSpace.lg * 2;
     final columns = (usable / (_historyCardTargetWidth + _historyCardSpacing))
         .round()
         .clamp(2, 12);
@@ -1106,8 +1112,8 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
     return SliverGridDelegateWithFixedCrossAxisCount(
       crossAxisCount: columns,
       crossAxisSpacing: _historyCardSpacing,
-      mainAxisSpacing: 8,
-      mainAxisExtent: cellWidth * 1.5 + 8 + _historyCaptionHeight,
+      mainAxisSpacing: AppSpace.sm,
+      mainAxisExtent: cellWidth * 1.5 + AppSpace.sm + _historyCaptionHeight,
     );
   }
 
@@ -1156,20 +1162,53 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
             ),
           ),
           const SizedBox(height: AppSpace.xs),
-          Text(
-            item.vodName,
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodyMedium,
-          ),
-          Text(
-            item.episodeName,
-            textAlign: TextAlign.center,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
+          // **必须夹住文字缩放**（`design/01` §2.2 第 3 条）：
+          // caption 高度是**固定值**（`_historyCaptionHeight = 40`），不夹住时
+          // 无障碍放大字号就会溢出格子。
+          //
+          // **光加 clamp 不够：字号/行高必须同时对齐首页 `_VodCard`**
+          // （`fontSize: 13, height: 1.2` 与 `11 / 1.2`，而不是 M3 默认的 14/1.43
+          // 与 12/1.33）。这是 1.25 能不能成立的**算术前提**：
+          //   首页度量 13/1.2 + 11/1.2 → 本征 28.8px ×1.25 = 36.0px → 余 4px ✅
+          //   M3 默认 14/1.43 + 12/1.33 → 本征 35.98px ×1.25 = 44.98px → 溢出 5px ❌
+          // （后者已实测：clamp 1.25 + M3 默认度量在 textScale 1.5/2.0 下均溢出 5px。）
+          // 两块海报墙要么度量与 clamp 都对齐，要么名义上复用、实际仍是两套尺度。
+          //
+          // 首页海报墙有同样的一层（`browse_pages.dart:836-839`，值同为 1.25），
+          // 其注释写明理由：「放大字号（无障碍）时只缩不放：文字区高度是固定值，
+          // 不夹住就会溢出格子」。**包文字区，不要包海报**。
+          //
+          // 去掉 clamp 时（首页度量）：textScale 1.5 溢出 3px、2.0 溢出 17px。
+          Expanded(
+            child: MediaQuery.withClampedTextScaling(
+              maxScaleFactor: _historyTextScaleMax,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    item.vodName,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontSize: 13,
+                      height: 1.2,
+                    ),
+                  ),
+                  Text(
+                    item.episodeName,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      fontSize: 11,
+                      height: 1.2,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -1187,12 +1226,18 @@ const double _historyCardTargetWidth = 150;
 /// 历史卡片列间距。
 const double _historyCardSpacing = 14;
 
-/// 历史网格内边距。
-const double _historyGridPadding = 16;
-
 /// 历史卡片海报下方的文字区高度（片名 + 集名两行）。
 const double _historyCaptionHeight = 40;
+
+/// 文字区允许的**最大**放大倍数（无障碍字号只缩不放）。
+///
+/// 与首页 `_VodCard` 同值同理由：文字区是固定高度，放大时不让步就会溢出格子。
+const double _historyTextScaleMax = 1.25;
 ```
+
+> **`_historyGridPadding` 不新增**（实现时回填）：它与 `AppSpace.lg` 完全同值，
+> 而 `library_pages.dart` 的既有代码本就用 `AppSpace`，再引入一个同义常量只是重复。
+> 直接用 `AppSpace.lg`。
 
 (d) 加进度角标组件（放在 `library_pages.dart` 顶层，`FavoritesPage` 之前）：
 
@@ -1241,7 +1286,25 @@ $env:GIT_CONFIG_COUNT=$null; $env:GIT_CONFIG_VALUE_0=$null; $env:GIT_CONFIG_VALU
 & 'C:\Users\Maple\.puro\envs\webhtv\flutter\bin\flutter.bat' test test/phase6_history_page_test.dart
 ```
 
-预期：`All tests passed!`（7 个用例）。
+预期：`All tests passed!`（12 个用例）。
+
+> **计数回填（实现后）**：文件原有 4 个用例（Task 4 的「默认选中 X」组）→
+> 本轮 +4（brief 给的 4 条）+3（变异自检补的钉子）= **12**。brief 写的「7」
+> 与任何口径都对不上（4+4=8）。
+>
+> - 变异自检发现 **1 处真缺口**：把 `columns` 写死成 3 时，brief 给的 4 条
+>   用例**全绿**（1400 宽下写死列数仍能给出精确 2:3 的海报，因为格子高度是按
+>   `cellWidth` 算的）。补钉子「列数随窗口宽自适」应（1400→8 列、700→4 列）。
+> - 首轮实现了 **`MediaQuery.sizeOf(context).width`**（brief 原文），
+>   与 `design/01` §2.2 第 2 条冲突 → 修复轮改为
+>   `LayoutBuilder(constraints.maxWidth)`，并补钉子「壳层下 1100 宽 → 6 列
+>   而不是 7 列」（去掉 `LayoutBuilder` 时该用例如期转红）。
+> - 首轮卡片**没有 clamp**（brief 原文）→ 修复轮补上，
+>   并同时把字号/行高对齐首页（否则 1.25 仍溢出 5px，见上面 (b) 的注释）；
+>   补 2 档钉子（textScale 1.5 / 2.0 不溢出）。
+>
+> 修复轮提交：`3ccef0b`。**首轮提交 `e93a2e6` 与修复轮 `3ccef0b`
+> 应视为同一个 Task 5**（审阅时以 `3ccef0b` 为准）。
 
 - [ ] **Step 5: 提交**
 
