@@ -471,7 +471,8 @@ abstract final class TmdbEpisodeRenderPolicy {
   /// 按季度过滤线路剧集。
   ///
   /// - `availableSeasons` 为空 → 返回全部（退化为扁平列表）；
-  /// - 否则只保留 `season == selectedSeason` 的集**以及所有未分类的集**。
+  /// - 否则只保留 `season == selectedSeason` 的集**以及所有未分类的集**；
+  /// - **过滤结果为空时返回全部集**（`design/03` §5.2）：详见函数末尾注释。
   static List<VodEpisode> filter({
     required List<VodEpisode> episodes,
     required List<int> availableSeasons,
@@ -485,7 +486,12 @@ abstract final class TmdbEpisodeRenderPolicy {
       // 未分类的集无法被证明不属于当前季 → 必须保留（不得丢集）
       if (season < 0 || season == selectedSeason) result.add(episode);
     }
-    return result;
+    // 过滤结果为空 → 回退全部集（`docs/phase6/design/03` §5.2）。
+    //
+    // 宁可显示「可能不对季」的集，也不能显示空白——用户会以为剧集丢了。
+    // 这与 `DESIGN.md` 的「不丢集」纪律一致，也对齐上游
+    // `computeVisibleEpisodes` 的 `visible.isEmpty() ? episodes : visible`。
+    return result.isEmpty ? episodes : result;
   }
 
   /// 强制断言辅助：渲染数量必须等于该季线路剧集数（不得补集）。

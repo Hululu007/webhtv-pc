@@ -1001,4 +1001,53 @@ void main() {
       expect(find.text('40-1'), findsWidgets);
     });
   });
+
+  group('切季行为（design/03 §5.1）', () {
+    test('selectSeason 自增 seasonEpoch', () async {
+      final tmdb = await matchedState(
+        episodeCount: 5,
+        tmdbSeasons: const [1, 2],
+        seasonCounts: const {1: 3, 2: 2},
+      );
+      final before = tmdb.seasonEpoch;
+      tmdb.selectSeason(2);
+      expect(tmdb.seasonEpoch, greaterThan(before));
+      tmdb.dispose();
+    });
+
+    test('重复选同一季不自增', () async {
+      final tmdb = await matchedState(
+        episodeCount: 5,
+        tmdbSeasons: const [1, 2],
+        seasonCounts: const {1: 3, 2: 2},
+      );
+      final before = tmdb.seasonEpoch;
+      tmdb.selectSeason(tmdb.selectedSeason);
+      expect(tmdb.seasonEpoch, before);
+      tmdb.dispose();
+    });
+
+    // 选一个**不在** availableSeasons 里的季度不得自增（否则 UI 会误重置区间）。
+    test('选不可用季度不自增', () async {
+      final tmdb = await matchedState(
+        episodeCount: 5,
+        tmdbSeasons: const [1, 2],
+        seasonCounts: const {1: 3, 2: 2},
+      );
+      final before = tmdb.seasonEpoch;
+      tmdb.selectSeason(99);
+      expect(tmdb.seasonEpoch, before);
+      tmdb.dispose();
+    });
+
+    test('初始 seasonEpoch 是 0', () async {
+      final tmdb = await matchedState(
+        episodeCount: 3,
+        tmdbSeasons: const [1],
+        seasonCounts: const {1: 3},
+      );
+      expect(tmdb.seasonEpoch, 0);
+      tmdb.dispose();
+    });
+  });
 }

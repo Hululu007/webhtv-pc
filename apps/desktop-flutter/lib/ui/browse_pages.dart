@@ -7,6 +7,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../core/app_error.dart';
+import '../core/episode_range.dart';
 import '../core/history_view.dart';
 import '../core/poster_badge.dart';
 import '../core/protocol.dart';
@@ -1002,6 +1003,21 @@ class _DetailPageState extends State<DetailPage> {
   /// 剧集是否网格模式（对齐上游 `@id/episodeViewMode`）。
   bool _episodeGridMode = false;
 
+  /// 选集区间下标（`docs/phase6/design/03` §4.4）。
+  ///
+  /// 页面级临时状态（与 `_episodesReversed` / `_episodeGridMode` 同级），
+  /// **不进 `AppState`**：它是纯展示状态，跨页面保留没有意义。
+  int _rangeIndex = 0;
+
+  /// 用户是否**手动**点过区间 chip。
+  ///
+  /// 手动选过之后切集不再重置区间（对齐上游 `manualEpisodeRange`）：
+  /// 用户的显式意图优先于自动跟随。
+  bool _manualRange = false;
+
+  /// 上一次渲染时的季度序号，用于检测切季（`design/03` §5.1）。
+  int _lastSeasonEpoch = -1;
+
   @override
   void initState() {
     super.initState();
@@ -1749,6 +1765,34 @@ class _DetailPageState extends State<DetailPage> {
     final episodes = _renderEpisodes(rawLine, active: true);
     final ordered = _episodesReversed ? episodes.reversed.toList() : episodes;
 
+    // 切季 → 区间回到该季第一集所在区间（`docs/phase6/design/03` §5.1）。
+    //
+    // 用季度序号检测而不是回调链：`build` 会被多次通知触发，回调容易
+    // 在时序上漏掉或多触发。
+    if (_lastSeasonEpoch != tmdb.seasonEpoch) {
+      _lastSeasonEpoch = tmdb.seasonEpoch;
+      _rangeIndex = 0;
+      _manualRange = false;
+    }
+
+    // 区间分组（`docs/phase6/design/03` §4.1）。
+    //
+    // 未手动选过时，区间跟随「用户关注的那一集」：优先历史命中的集，
+    // 否则第 0 集——否则用户从历史续播进来会看到第 1 页而当前集在第 4 页。
+    final ranges = _rangeLabels(
+      ordered,
+      EpisodeRangePolicy.build(
+        ordered.length,
+        _manualRange
+            ? _rangeIndex * EpisodeRangePolicy.groupSize(ordered.length)
+            : _focusIndex(vod, rawLine, ordered),
+        _episodesReversed,
+      ),
+    );
+    final rangeIndex = _manualRange
+        ? _rangeIndex.clamp(0, ranges.length - 1)
+        : EpisodeRangePolicy.selectedPosition(ranges);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1778,11 +1822,68 @@ class _DetailPageState extends State<DetailPage> {
           cardWidth: _episodeCardWidth(context, episodes.length),
           gridMode: _episodeGridMode,
           recentIndex: _recentRenderedIndex(vod, rawLine, ordered),
+          ranges: ranges,
+          rangeIndex: rangeIndex,
+          onRangeChanged: (index) => setState(() {
+            _rangeIndex = index;
+            _manualRange = true;
+          }),
           onTap: (index, _) =>
               _playEpisodeAt(vod, rawLine, line, ordered, index),
         ),
       ],
     );
+  }
+
+  /// 自动跟随的焦点集在**渲染列表**里的下标。
+  ///
+  /// 优先「历史命中的那一集」，否则第 0 集。
+  int _focusIndex(Vod vod, VodPlayLine rawLine, List<VodEpisode> ordered) {
+    if (ordered.isEmpty) return 0;
+    final recent = _recentRenderedIndex(vod, rawLine, ordered);
+    return recent < 0 ? 0 : recent;
+  }
+
+  /// 用**真实集号**修正区间标签（`docs/phase6/design/03` §4.2）。
+  ///
+  /// 集号可能不连续（缺号、重复号），直接用列表下标会误导
+  /// （对齐上游 `buildCardEpisodeRanges` 的标签修正）。
+  List<EpisodeRange> _rangeLabels(
+    List<VodEpisode> ordered,
+    List<EpisodeRange> ranges,
+  ) {
+    final corrected = <EpisodeRange>[];
+    for (final range in ranges) {
+      final slice = EpisodeRangePolicy.slice(ordered, range);
+      if (slice.isEmpty) {
+        corrected.add(range);
+        continue;
+      }
+      final first = _episodeNumberOr(slice.first, ordered, range.start + 1);
+      final last = _episodeNumberOr(slice.last, ordered, range.end);
+      corrected.add(
+        EpisodeRange(
+          label: first == last ? '$first' : '$first-$last',
+          start: range.start,
+          end: range.end,
+          selected: range.selected,
+        ),
+      );
+    }
+    return corrected;
+  }
+
+  /// TMDB 富集的集号；取不到时退回 [fallback]（列表下标 + 1）。
+  ///
+  /// 复用既有的 [_tmdbEpisodeNumberOf]（它取不到时返回 -1），
+  /// 不另写一份重复实现（对齐上游 `numbers.getOrDefault(first, start + 1)`）。
+  int _episodeNumberOr(
+    VodEpisode episode,
+    List<VodEpisode> ordered,
+    int fallback,
+  ) {
+    final number = _tmdbEpisodeNumberOf(episode);
+    return number > 0 ? number : fallback;
   }
 
   /// 按**渲染下标**播放（卡片下标 → 线路原始下标）。

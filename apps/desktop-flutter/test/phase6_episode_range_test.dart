@@ -19,6 +19,8 @@ library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webhtv_pc/core/episode_range.dart';
+import 'package:webhtv_pc/core/protocol.dart';
+import 'package:webhtv_pc/ui/tmdb_widgets.dart';
 
 void main() {
   group('分组阶梯（defaultGroupSize，逐条对齐上游）', () {
@@ -322,6 +324,98 @@ void main() {
       expect(next.end, 20);
       expect(next.selected, isTrue);
       expect(range.selected, isFalse, reason: '原对象不可变');
+    });
+  });
+
+  group('季度过滤为空时回退全部集（design/03 §5.2）', () {
+    VodEpisode episodeOf(String name) =>
+        VodEpisode(name: name, url: 'http://x/$name');
+
+    test('过滤结果非空时按季度过滤', () {
+      final episodes = [
+        episodeOf('第1季第1集'),
+        episodeOf('第2季第1集'),
+      ];
+      final result = TmdbEpisodeRenderPolicy.filter(
+        episodes: episodes,
+        availableSeasons: const [1, 2],
+        selectedSeason: 1,
+        seasonOf: (episode) => episode.name.startsWith('第2季') ? 2 : 1,
+      );
+      expect(result.length, 1);
+      expect(result.single.name, '第1季第1集');
+    });
+
+    test('过滤结果为空时回退全部集，不显示空白', () {
+      final episodes = [
+        episodeOf('第1季第1集'),
+        episodeOf('第1季第2集'),
+      ];
+      final result = TmdbEpisodeRenderPolicy.filter(
+        episodes: episodes,
+        availableSeasons: const [1, 2],
+        selectedSeason: 2,
+        // 全部集都判为 S1 → 选 S2 时过滤结果为空。
+        seasonOf: (_) => 1,
+      );
+      expect(
+        result.length,
+        2,
+        reason: '宁可显示"可能不对季"的集，也不能显示空白（不丢集纪律）',
+      );
+    });
+
+    test('availableSeasons 为空时返回全部', () {
+      final episodes = [episodeOf('第1集')];
+      final result = TmdbEpisodeRenderPolicy.filter(
+        episodes: episodes,
+        availableSeasons: const [],
+        selectedSeason: 1,
+        seasonOf: (_) => -1,
+      );
+      expect(result.length, 1);
+    });
+
+    // 未分类的集（season < 0）永远保留（`02` §9.4「不丢集」）。
+    test('未分类的集永远保留', () {
+      final episodes = [
+        episodeOf('已分类'),
+        episodeOf('未分类'),
+      ];
+      final result = TmdbEpisodeRenderPolicy.filter(
+        episodes: episodes,
+        availableSeasons: const [1, 2],
+        selectedSeason: 1,
+        seasonOf: (e) => e.name == '未分类' ? -1 : 1,
+      );
+      expect(result.length, 2);
+    });
+
+    // 回退时**不得**丢掉顺序与同一性（不是重新排序，是原列表）。
+    test('回退时返回的仍是原列表实例（顺序与同一性不变）', () {
+      final episodes = [
+        episodeOf('第1季第1集'),
+        episodeOf('第1季第2集'),
+      ];
+      final result = TmdbEpisodeRenderPolicy.filter(
+        episodes: episodes,
+        availableSeasons: const [1, 2],
+        selectedSeason: 2,
+        seasonOf: (_) => 1,
+      );
+      expect(identical(result, episodes), isTrue);
+    });
+
+    test('空输入 + 非空季度 → 仍是空（不抛异常）', () {
+      expect(
+        TmdbEpisodeRenderPolicy.filter(
+          episodes: const [],
+          availableSeasons: const [1],
+          selectedSeason: 1,
+          seasonOf: (_) => 1,
+        ),
+        isEmpty,
+      );
     });
   });
 }

@@ -894,12 +894,27 @@ class TmdbState extends ChangeNotifier {
     if (!_availableSeasons.contains(seasonNumber)) return;
     if (_selectedSeason == seasonNumber) return;
     _selectedSeason = seasonNumber;
+    // 季度切换序号（`docs/phase6/design/03` §5.1）：UI 据此把选集区间
+    // 重置到该季第一集所在区间。
+    //
+    // 为什么用序号而不是回调：详情页的 `build` 会被 `AppState` 与 `TmdbState`
+    // 的多次通知触发，回调链容易在时序上漏掉或多触发。
+    // 上面两个提前 return 保证这里只在**真正**换季时自增。
+    _seasonEpoch++;
     // 记住本线路的选择，换走再回来时恢复（见 _lineSeasonMemory）。
     _rememberLineSeason(_selectedLineFlag, seasonNumber);
     // 清空旧季度剧集，避免残留（`04` §4.3）
     _episodes = const [];
     notifyListeners();
   }
+
+  /// 季度切换序号（`docs/phase6/design/03` §5.1）。
+  ///
+  /// 每次**真正**切换季度时自增（重复选同一季、或选不可用季度都不自增）。
+  /// UI 侧据此重置选集区间下标：切季后应回到该季第一集所在区间，
+  /// 而不是停在上一季的页码上。
+  int get seasonEpoch => _seasonEpoch;
+  int _seasonEpoch = 0;
 
   /// 应用剧集元数据到线路（`02` §9）。
   ///
