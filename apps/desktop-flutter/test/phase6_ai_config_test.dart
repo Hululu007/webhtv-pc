@@ -3,8 +3,16 @@
 /// 纯逻辑：不依赖 Flutter，也不发任何网络请求。
 library;
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:webhtv_pc/core/ai_config.dart';
+import 'package:webhtv_pc/services/app_paths.dart';
+import 'package:webhtv_pc/services/log_service.dart';
+import 'package:webhtv_pc/services/ai_config_store.dart';
+import 'package:webhtv_pc/state/app_state.dart';
 
 void main() {
   group('协议常量', () {
@@ -295,6 +303,251 @@ void main() {
       expect(config.enabled, isFalse);
       expect(config.protocol, AiProtocol.defaultProtocol);
       expect(config.apiKey, '');
+    });
+  });
+
+  group('AiConfigStore：settings.json 的 ai 段（§4）', () {
+    late Directory dir;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('webhtv-ai-store');
+    });
+
+    tearDown(() async {
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    String pathOf() => p.join(dir.path, 'settings.json');
+
+    test('文件不存在时用默认配置，不抛异常', () async {
+      final store = AiConfigStore(path: pathOf());
+      await store.load();
+      expect(store.config.protocol, AiProtocol.defaultProtocol);
+      expect(store.config.enabled, isFalse);
+      expect(store.loaded, isTrue);
+    });
+
+    test('保存后可重新读回', () async {
+      final store = AiConfigStore(path: pathOf());
+      await store.load();
+      await store.save(
+        const AiConfig(
+          enabled: true,
+          protocol: 'openai_chat',
+          endpoint: 'https://api.deepseek.com/v1',
+          apiKey: 'sk-abc',
+          model: 'deepseek-chat',
+        ),
+      );
+
+      final again = AiConfigStore(path: pathOf());
+      await again.load();
+      expect(again.config.enabled, isTrue);
+      expect(again.config.protocol, 'openai_chat');
+      expect(again.config.apiKey, 'sk-abc');
+      expect(again.config.model, 'deepseek-chat');
+    });
+
+    test('不污染其他段', () async {
+      final file = File(pathOf());
+      await file.writeAsString(
+        '{"ui":{"themeMode":"light"},"tmdb":{"enabled":true},'
+        '"sync":{"serverEnabled":true}}',
+      );
+      final store = AiConfigStore(path: pathOf());
+      await store.load();
+      await store.save(const AiConfig(enabled: true, apiKey: 'k'));
+
+      final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
+      expect(raw.containsKey('ai'), isTrue);
+      expect((raw['ui']! as Map)['themeMode'], 'light');
+      expect(raw.containsKey('tmdb'), isTrue);
+      expect(raw.containsKey('sync'), isTrue);
+    });
+
+    test('文件损坏时不抛异常，回落默认', () async {
+      final file = File(pathOf());
+      await file.writeAsString('{ not json');
+      final store = AiConfigStore(path: pathOf());
+      await store.load();
+      expect(store.config.protocol, AiProtocol.defaultProtocol);
+    });
+
+    test('连续两次保存都生效（串行化写盘）', () async {
+      final store = AiConfigStore(path: pathOf());
+      await store.load();
+      // **两次 save 必须都返回 true**：并行写盘没有队列时，两个 `_doPersist`
+      // 会在同一个 `.tmp` 上互踩（Windows 上 delete/rename 原子性差），
+      // 其中一个会失败。原断言只检查「文件里有 k1 或 k2」，
+      // 即使**只有一个成功**也绿——变异自检抓到的缺口。
+      final results = await Future.wait([
+        store.save(const AiConfig(apiKey: 'k1')),
+        store.save(const AiConfig(apiKey: 'k2')),
+      ]);
+      expect(
+        results,
+        everyElement(isTrue),
+        reason: '串行化后两次写盘都应成功（无队列时并发会互相踩 .tmp）',
+      );
+      // 且落盘结果必须是**一份可解析的完整 JSON**（不是两个半截文件）。
+      final raw = jsonDecode(await File(pathOf()).readAsString());
+      expect(raw, isA<Map<String, Object?>>());
+      final ai = (raw as Map<String, Object?>)['ai']! as Map;
+      expect(ai['apiKey'], anyOf('k1', 'k2'), reason: '最后一次写盘胜出');
+
+      final again = AiConfigStore(path: pathOf());
+      await again.load();
+      expect(again.config.apiKey, isNotEmpty);
+      expect(again.config.apiKey, anyOf('k1', 'k2'));
+    });
+
+    // `save` 必须把配置归一化后再落盘（与 `load` 同一口径）。
+    //
+    // **必须直接读原始 JSON**：`AiConfig.fromJson` 末尾会调 `sanitized()`，
+    // 因此「save → 新建 store 读回」这条路经会把脏值屏蔽掉，
+    // 测不出 `save` 是否归一化（变异 M1 正是这样存活的）。
+    test('save 落盘前归一化（非法协议不写入磁盘）', () async {
+      final store = AiConfigStore(path: pathOf());
+      await store.load();
+      await store.save(
+        const AiConfig(enabled: true, protocol: 'nonsense', apiKey: 'k'),
+      );
+
+      final raw = jsonDecode(await File(pathOf()).readAsString())
+          as Map<String, Object?>;
+      final ai = (raw['ai']! as Map).cast<String, Object?>();
+      expect(
+        ai['protocol'],
+        AiProtocol.defaultProtocol,
+        reason: '磁盘上的值必须已归一化（否则旧值会被写进 settings.json）',
+      );
+    });
+
+    // 同理：空端点/空模型也必须在落盘前就被默认值填上。
+    test('save 落盘前把空端点与空模型填成默认值', () async {
+      final store = AiConfigStore(path: pathOf());
+      await store.load();
+      await store.save(const AiConfig(enabled: true, apiKey: 'k'));
+
+      final raw = jsonDecode(await File(pathOf()).readAsString())
+          as Map<String, Object?>;
+      final ai = (raw['ai']! as Map).cast<String, Object?>();
+      expect(ai['endpoint'], isNotEmpty);
+      expect(ai['model'], AiProtocol.defaultModel);
+    });
+
+    // 旧文件损坏时**不得**把损坏内容带进新文件（否则整份 settings.json 失效）。
+    test('旧文件损坏时保存会覆盖它，不让损坏内容扩散', () async {
+      final file = File(pathOf());
+      await file.writeAsString('{ not json');
+      final store = AiConfigStore(path: pathOf());
+      await store.load();
+      await store.save(const AiConfig(enabled: true, apiKey: 'k'));
+
+      final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
+      expect(raw.containsKey('ai'), isTrue);
+      expect(
+        (raw['ai']! as Map)['apiKey'],
+        'k',
+        reason: '保存后必须是一份可解析的新文件',
+      );
+    });
+
+    // 写盘是「写 tmp → 删旧 → 改名」三步，因此磁盘上不得残留 `.tmp`。
+    test('保存后不残留 .tmp 临时文件', () async {
+      final store = AiConfigStore(path: pathOf());
+      await store.load();
+      await store.save(const AiConfig(enabled: true, apiKey: 'k'));
+
+      expect(
+        File('${pathOf()}.tmp').existsSync(),
+        isFalse,
+        reason: '临时文件必须已被 rename 掉',
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // AppState 接线（`docs/phase6/design/04` §4、§7）
+  //
+  // 本文件**没有** `testWidgets`，因此可以放心做真实文件 I/O
+  // （与 `phase2_last_site_test` 同一约定）。
+  // ---------------------------------------------------------------------------
+  group('AppState 接线（§4）', () {
+    late Directory dir;
+    late AppPaths paths;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('webhtv-ai-appstate');
+      paths = AppPaths.resolve(
+        overrides: {'roaming': dir.path, 'local': dir.path},
+      );
+    });
+
+    tearDown(() async {
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    /// 不调 `bootstrap`（它会开数据库与日志）；只装配 AI store，
+    /// 与 `attachUiPreferences` 同一模式。
+    Future<AppState> build() async {
+      final state = AppState(paths: paths, log: LogService());
+      final store = AiConfigStore(path: paths.settingsPath, log: state.log);
+      await store.load();
+      state.attachAiConfigStore(store);
+      return state;
+    }
+
+    test('aiConfig 暴露 store 的值', () async {
+      final state = await build();
+      addTearDown(state.dispose);
+      expect(state.aiConfig.protocol, AiProtocol.defaultProtocol);
+      expect(state.aiConfig.enabled, isFalse);
+    });
+
+    test('saveAiConfig 真的落盘（同一份 settings.json）', () async {
+      final state = await build();
+      addTearDown(state.dispose);
+      final ok = await state.saveAiConfig(
+        const AiConfig(enabled: true, apiKey: 'sk-live'),
+      );
+      expect(ok, isTrue, reason: '保存应当成功');
+      expect(state.aiConfig.enabled, isTrue);
+      expect(state.aiConfig.apiKey, 'sk-live');
+
+      // 同一路径新建 store → 读回（证明真的写了磁盘，不是只改内存）。
+      final again = AiConfigStore(path: paths.settingsPath);
+      await again.load();
+      expect(again.config.apiKey, 'sk-live');
+      expect(again.config.enabled, isTrue);
+    });
+
+    test('saveAiConfig 通知监听者（UI 必须立刻重建）', () async {
+      final state = await build();
+      addTearDown(state.dispose);
+      var notified = 0;
+      state.addListener(() => notified++);
+
+      await state.saveAiConfig(const AiConfig(enabled: true, apiKey: 'k'));
+      expect(notified, greaterThan(0));
+    });
+
+    test('saveAiConfig 后 getter 已是新值（通知时读到的是新值而非旧值）', () async {
+      final state = await build();
+      addTearDown(state.dispose);
+      String? seenDuringNotify;
+      state.addListener(() => seenDuringNotify = state.aiConfig.apiKey);
+
+      await state.saveAiConfig(const AiConfig(enabled: true, apiKey: 'k-new'));
+      expect(
+        seenDuringNotify,
+        'k-new',
+        reason: 'store 的内存值在 notifyListeners 之前已更新（否则 UI 用旧值重建）',
+      );
     });
   });
 }

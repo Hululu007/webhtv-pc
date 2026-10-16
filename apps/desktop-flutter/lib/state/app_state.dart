@@ -17,6 +17,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart' show Row;
 
 import '../core/android_sync.dart';
+import '../core/ai_config.dart';
 import '../core/app_error.dart';
 import '../core/cat_http.dart';
 import '../core/cat_source.dart';
@@ -47,6 +48,7 @@ import '../services/site_service.dart';
 import '../services/spider_process.dart';
 import '../services/spider_registry.dart';
 import '../services/spider_router.dart';
+import '../services/ai_config_store.dart';
 import '../services/storage.dart';
 import '../services/sync_client.dart';
 import '../services/sync_server.dart';
@@ -375,6 +377,14 @@ class AppState extends ChangeNotifier implements SyncStateHost {
 
   late final TmdbConfigStore _tmdbConfigStore;
 
+  /// AI 配置（`docs/phase6/design/04` §4）。
+  ///
+  /// 与 `_tmdbConfigStore` 同构（两者都是 `settings.json` 里带凭据的独立段）。
+  /// `late final`：在 `bootstrap` 里装配；未 bootstrap 时访问会抛
+  /// `LateInitializationError`——与 TMDB 一致（单测走 `attachAiConfigStore`
+  /// 或 `bootstrap`）。
+  late final AiConfigStore _aiConfigStore;
+
   /// UI 偏好（最近使用的站点）。在 [bootstrap] 里装配。
   ///
   /// 可空而不是 `late final`：单元测试/工具可能**不调 bootstrap** 就直接
@@ -390,6 +400,40 @@ class AppState extends ChangeNotifier implements SyncStateHost {
 
   /// TMDB 设置（当前生效）。
   TmdbConfig get tmdbConfig => _tmdbConfigStore.config;
+
+  /// AI 配置（`docs/phase6/design/04` §4）。
+  AiConfig get aiConfig => _aiConfigStore.config;
+
+  /// 持久化 AI 配置。
+  ///
+  /// 与 `saveTmdbConfig` 同构：写盘失败**不影响**当前会话（store 的内存值已
+  /// 生效），但无论如何都通知 UI 重建。
+  ///
+  /// **API Key 不得进日志**（Global Constraints）：只记脱敏值与就绪状态。
+  Future<bool> saveAiConfig(AiConfig config) async {
+    final saved = await _aiConfigStore.save(config);
+    if (saved) {
+      log.info(
+        'AI 设置已更新 enabled=${config.enabled} '
+        'protocol=${config.protocol} ready=${config.isReady} '
+        'key=${config.redactedApiKey}',
+        scope: 'ai',
+      );
+    } else {
+      log.warning('AI 设置保存失败（内存已生效）', scope: 'ai');
+    }
+    notifyListeners();
+    return saved;
+  }
+
+  /// 测试口子：不经 bootstrap 直接装配 AI 配置 store。
+  ///
+  /// 与 [attachUiPreferences] 同理（单测不调 bootstrap）。
+  /// 生产代码不得调用；bootstrap 是唯一的正规装配点。
+  @visibleForTesting
+  void attachAiConfigStore(AiConfigStore store) {
+    _aiConfigStore = store;
+  }
 
   /// TMDB 服务（纯 TMDB 详情页直接使用，`04` §6）。
   TmdbService get tmdbService => _tmdbService;
@@ -610,6 +654,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     // TMDB 设置（`03` §5.3）：读取失败不阻塞启动，退回默认配置。
     _tmdbConfigStore = TmdbConfigStore(path: paths.settingsPath, log: log);
     await _tmdbConfigStore.load();
+
+    // AI 配置（`docs/phase6/design/04` §4）：同样不阻塞启动。
+    _aiConfigStore = AiConfigStore(path: paths.settingsPath, log: log);
+    await _aiConfigStore.load();
 
     // UI 偏好（最近使用的站点）：同样不阻塞启动。
     final uiPreferences = UiPreferencesStore(
