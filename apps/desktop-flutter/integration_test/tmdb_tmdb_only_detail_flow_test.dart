@@ -120,14 +120,20 @@ void main() {
     await tester.pump();
 
     // 2) 季度选择器显示 TMDB 全部季度（含不可播放季度：特别篇 + S1 + S2）。
+    //
+    // 季度 UI 于 2026-10-16 统一为 chip 条（`docs/phase6/design/03` §3）：
+    // 纯 TMDB 页原先用海报卡片条（`seasonKeyPrefix: 'tmdb-only-season'`），
+    // 现在与站点页共用 `SeasonChipStrip`，chip 的 key 是
+    // `tmdb-detail-season-<n>`（容器是 `tmdb-detail-season-switcher`）。
+    // 本节的两处断言随之更新——这是**有意的测试变更**。
     await drainRealIo(
       tester,
       until: () =>
-          find.byKey(const ValueKey('tmdb-only-season-0')).evaluate().isNotEmpty,
+          find.byKey(const ValueKey('tmdb-detail-season-0')).evaluate().isNotEmpty,
     );
     for (final season in [0, 1, 2]) {
       expect(
-        find.byKey(ValueKey('tmdb-only-season-$season')),
+        find.byKey(ValueKey('tmdb-detail-season-$season')),
         findsOneWidget,
         reason: '缺少 TMDB 季度 $season',
       );

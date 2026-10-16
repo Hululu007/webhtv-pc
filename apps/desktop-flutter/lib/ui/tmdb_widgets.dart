@@ -247,6 +247,87 @@ String tmdbSeasonButtonLabel(TmdbState state) {
   return '选择季度';
 }
 
+/// 季度 chip 条（`docs/phase6/design/03` §3）。
+///
+/// 站点详情页与纯 TMDB 详情页**共用**这一个实现：同一个概念只有一种视觉。
+/// 它是纯展示组件（不依赖 `TmdbState`），因此两页都能用。
+///
+/// ## [selectableSeasons] 的语义（保留既有约定）
+///
+/// **空 = 全部不可点击（只展示）**，与 `TmdbDetailView` 原有语义一致
+/// （`tmdb_detail_view.dart` 的该字段注释：「为空但 `seasons` 非空时只展示不可切换」）。
+///
+/// 注意**不要**写成 `selectableSeasons.isEmpty || contains(...)`：
+/// 纯 TMDB 页传的是「已解析的可选季度」，解析不出时就是空——
+/// 「空即可点」会让用户选到未确证的季度。
+/// 站点页的季度本来就都是可选的，它显式传全量（见 `TmdbSeasonSelector`）。
+class SeasonChipStrip extends StatelessWidget {
+  const SeasonChipStrip({
+    super.key,
+    required this.seasons,
+    required this.selectedSeason,
+    this.selectableSeasons = const [],
+    this.onChanged,
+    this.padding = const EdgeInsets.symmetric(horizontal: 16),
+    this.switcherKey = 'tmdb-season-switcher',
+    this.chipKeyPrefix = 'tmdb-season',
+  });
+
+  /// 全部季度号（升序）。
+  final List<int> seasons;
+
+  /// 当前选中的季度。
+  final int selectedSeason;
+
+  /// 可切换的季度号；**为空表示全部不可切换**（只展示）。
+  final List<int> selectableSeasons;
+
+  final ValueChanged<int>? onChanged;
+
+  /// 内容内边距。
+  final EdgeInsets padding;
+
+  /// chip 条容器的 key。站点页与纯 TMDB 页各用各的字面值，避免同树冲突。
+  final String switcherKey;
+
+  /// 各季 chip 的 key 前缀。
+  ///
+  /// **与 [switcherKey] 分开**而不是从它推导：站点页的既有字面值是
+  /// 容器 `tmdb-season-switcher` + chip `tmdb-season-<n>`
+  /// （`phase4_tmdb_ui_test` 按它们断言），推导会算出 `tmdb-season-switcher-1`。
+  final String chipKeyPrefix;
+
+  @override
+  Widget build(BuildContext context) {
+    // 单季无 chip 条（与站点页一致）：一个 chip 的「切换」没有意义。
+    if (seasons.length <= 1) return const SizedBox.shrink();
+    return SizedBox(
+      height: tmdbSeasonSelectorHeight,
+      child: ListView.separated(
+        key: ValueKey(switcherKey),
+        scrollDirection: Axis.horizontal,
+        padding: EdgeInsets.symmetric(
+          horizontal: padding.horizontal / 2,
+          vertical: 6,
+        ),
+        itemCount: seasons.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final season = seasons[index];
+          final selectable =
+              selectableSeasons.contains(season) && onChanged != null;
+          return ChoiceChip(
+            key: ValueKey('$chipKeyPrefix-$season'),
+            label: Text(_seasonLabel(season)),
+            selected: season == selectedSeason,
+            onSelected: selectable ? (_) => onChanged!(season) : null,
+          );
+        },
+      ),
+    );
+  }
+}
+
 /// 季度选择器（`04` §4.1）。
 class TmdbSeasonSelector extends StatelessWidget {
   const TmdbSeasonSelector({
@@ -361,25 +442,19 @@ class TmdbSeasonSelector extends StatelessWidget {
             child: _seasonButton(context),
           ),
           Expanded(
-            child: ListView.separated(
-              key: const ValueKey('tmdb-season-switcher'),
-              scrollDirection: Axis.horizontal,
-              padding: EdgeInsets.symmetric(
-                horizontal: padding.horizontal / 2,
-                vertical: 6,
-              ),
-              itemCount: seasons.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 8),
-              itemBuilder: (context, index) {
-                final season = seasons[index];
-                final selected = season == state.selectedSeason;
-                return ChoiceChip(
-                  key: ValueKey('tmdb-season-$season'),
-                  label: Text(_seasonLabel(season)),
-                  selected: selected,
-                  onSelected: (_) => onChanged?.call(season),
-                );
-              },
+            child: SeasonChipStrip(
+              seasons: seasons,
+              selectedSeason: state.selectedSeason,
+              // 站点页的季度**本来就都是可选的**（`availableSeasons` 已经过
+              // 可播放季度解析），因此显式传全量而不是留空——
+              // `SeasonChipStrip` 的空值语义是「只展示不可切换」。
+              selectableSeasons: seasons,
+              onChanged: onChanged,
+              padding: padding,
+              // 站点页沿用既有 key 字面值：`phase4_tmdb_ui_test` 按
+              // `tmdb-season-switcher` / `tmdb-season-<n>` 断言，不得改名。
+              switcherKey: 'tmdb-season-switcher',
+              chipKeyPrefix: 'tmdb-season',
             ),
           ),
         ],

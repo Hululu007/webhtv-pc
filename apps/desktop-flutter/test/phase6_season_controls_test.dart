@@ -18,11 +18,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:webhtv_pc/core/protocol.dart';
 import 'package:webhtv_pc/core/tmdb_config.dart';
+import 'package:webhtv_pc/core/tmdb_detail_model.dart';
 import 'package:webhtv_pc/services/tmdb_enrichment_service.dart';
 import 'package:webhtv_pc/services/tmdb_identity_service.dart';
 import 'package:webhtv_pc/services/tmdb_season_service.dart';
 import 'package:webhtv_pc/services/tmdb_service.dart';
 import 'package:webhtv_pc/state/tmdb_state.dart';
+import 'package:webhtv_pc/ui/tmdb_detail_view.dart';
 import 'package:webhtv_pc/ui/tmdb_widgets.dart';
 
 /// 假 HTTP 客户端：按路径后缀返回预置 JSON（与 `phase4_tmdb_ui_test` 同构）。
@@ -139,6 +141,7 @@ void main() {
     WidgetTester tester,
     TmdbState tmdb, {
     VoidCallback? onSelectManual,
+    ValueChanged<int>? onChanged,
     EdgeInsets padding = const EdgeInsets.symmetric(horizontal: 16),
     bool showManualEntry = true,
   }) async {
@@ -153,6 +156,7 @@ void main() {
         home: Scaffold(
           body: TmdbSeasonSelector(
             state: tmdb,
+            onChanged: onChanged,
             onSelectManual: onSelectManual,
             padding: padding,
             showManualEntry: showManualEntry,
@@ -170,12 +174,67 @@ void main() {
         tmdbSeasons: const [1, 2],
         seasonCounts: const {1: 3, 2: 2},
       );
-      await pumpSelector(tester, tmdb);
+      await pumpSelector(tester, tmdb, onChanged: (_) {});
 
       expect(find.byKey(const ValueKey('tmdb-season-button')), findsOneWidget);
       expect(find.byKey(const ValueKey('tmdb-season-switcher')), findsOneWidget);
       expect(find.byKey(const ValueKey('tmdb-season-1')), findsOneWidget);
       expect(find.byKey(const ValueKey('tmdb-season-2')), findsOneWidget);
+      tmdb.dispose();
+    });
+
+    // **站点页的 chip 必须真的可点**（`onSelected != null`）。
+    //
+    // 变异自检抓到的缺口：原用例只断言 chip **存在**，不断言可点——
+    // 把站点页的 `selectableSeasons: seasons` 改成 `const []`
+    // （于是 chip 全部不可点、切季功能静默失效）时，全部用例照样绿。
+    testWidgets('多季：站点页 chip 真的可点并回调', (tester) async {
+      final tmdb = await matchedState(
+        episodeCount: 5,
+        tmdbSeasons: const [1, 2],
+        seasonCounts: const {1: 3, 2: 2},
+      );
+      int? picked;
+      await pumpSelector(tester, tmdb, onChanged: (s) => picked = s);
+
+      for (final season in const [1, 2]) {
+        final chip = tester.widget<ChoiceChip>(
+          find.byKey(ValueKey('tmdb-season-$season')),
+        );
+        expect(
+          chip.onSelected,
+          isNotNull,
+          reason:
+              '站点页的季度本来就都是可选的，chip 必须可点。'
+              '传空 selectableSeasons 会让切季静默失效。',
+        );
+      }
+
+      await tester.tap(find.byKey(const ValueKey('tmdb-season-2')));
+      await tester.pump();
+      expect(picked, 2);
+      tmdb.dispose();
+    });
+
+    // 未传 `onChanged` 时 chip 必须**禁用**（不能点了没反应）。
+    // 变异自检抓到的缺口：`selectable` 若漏判 `onChanged != null`，
+    // chip 会显示为可点但点了什么都不发生。
+    testWidgets('未传 onChanged 时 chip 禁用', (tester) async {
+      final tmdb = await matchedState(
+        episodeCount: 5,
+        tmdbSeasons: const [1, 2],
+        seasonCounts: const {1: 3, 2: 2},
+      );
+      await pumpSelector(tester, tmdb);
+
+      final chip = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-season-1')),
+      );
+      expect(
+        chip.onSelected,
+        isNull,
+        reason: '没有回调就不应该显得可点（一个点了没反应的按钮比没有更糟）',
+      );
       tmdb.dispose();
     });
 
@@ -422,6 +481,221 @@ void main() {
             '若这条失败，说明状态机变了，需要补 §2.2 的中间行文案逻辑。',
       );
       tmdb.dispose();
+    });
+  });
+
+  group('季度 UI 统一（design/03 §3）', () {
+    TmdbDetailData detailData() => const TmdbDetailData(
+      title: '剧名',
+      overview: '',
+      posterUrl: null,
+      backdropUrls: [],
+      rating: 0,
+    );
+
+    const twoSeasons = [
+      TmdbSeasonInfo(number: 1, episodeCount: 3, name: '第 1 季'),
+      TmdbSeasonInfo(number: 2, episodeCount: 2, name: '第 2 季'),
+    ];
+
+    Future<void> pumpDetailView(
+      WidgetTester tester, {
+      List<int> selectableSeasons = const [1, 2],
+      ValueChanged<int>? onSeasonChanged,
+      Size viewport = const Size(1400, 2400),
+    }) async {
+      // 视口默认给到 2400 高：`TmdbDetailView` 的内容区是
+      // 「满屏 hero → 信息表 → 季度 → 剧集」，季度 chip 在 1200 高时
+      // 落在视口外，`tap` 会报 *would not hit test*。
+      tester.view.physicalSize = viewport;
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: TmdbDetailView(
+                data: detailData(),
+                seasons: twoSeasons,
+                selectedSeason: 1,
+                selectableSeasons: selectableSeasons,
+                onSeasonChanged: onSeasonChanged,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('TmdbDetailView 的季度区块是 chip 条，不是海报卡片条', (tester) async {
+      // **必须指定 anchor**：裸 `find.byType(RepaintBoundary)` 不适用，
+      // 这里要直接点 chip —— 而 `TmdbDetailView` 的内容区很长
+      // （头部 hero + 信息表 + 季度 + 剧集），chip 默认落在 1200 高视口之外。
+      // 先设高视口把季度条带进视口，再断言与点击。
+      await pumpDetailView(tester, viewport: const Size(1400, 2400));
+
+      expect(
+        find.byKey(const ValueKey('tmdb-section-seasons')),
+        findsOneWidget,
+        reason: '区块 key 必须保留',
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-season-strip')),
+        findsNothing,
+        reason: '海报卡片条已改为 chip 条',
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-detail-season-switcher')),
+        findsOneWidget,
+        reason: '改为 chip 条后必须有自己的容器 key',
+      );
+      expect(find.byKey(const ValueKey('tmdb-detail-season-1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('tmdb-detail-season-2')), findsOneWidget);
+      expect(tester.takeException(), isNull, reason: '不得溢出');
+    });
+
+    // 旧的海报卡片 key 不得残留（它们是两套 UI 并存的痕迹）。
+    testWidgets('不再有 tmdb-season-card-* 海报卡片', (tester) async {
+      await pumpDetailView(tester);
+
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'tmdb-season-card-',
+              ),
+        ),
+        findsNothing,
+      );
+    });
+
+    // **既有语义**（`tmdb_detail_view.dart:944`）：
+    // 「可切换的季度号；为空但 seasons 非空时**只展示不可切换**」。
+    // 这条是 pre-flight 发现的 brief 缺陷（brief 的 SeasonChipStrip 把空
+    // 当成「全部可切换」，与既有语义相反）。
+    testWidgets('selectableSeasons 为空 → chip 只展示不可切换（既有语义）', (tester) async {
+      var changed = 0;
+      await pumpDetailView(
+        tester,
+        selectableSeasons: const [],
+        onSeasonChanged: (_) => changed++,
+      );
+
+      final chip = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-detail-season-2')),
+      );
+      expect(
+        chip.onSelected,
+        isNull,
+        reason:
+            '空 selectableSeasons = 只展示。brief 的 '
+            '`isEmpty || contains` 会让它变成可点，纯 TMDB 页因此能选到'
+            '未确证的季度。',
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('tmdb-detail-season-2')),
+        warnIfMissed: false,
+      );
+      await tester.pump();
+      expect(changed, 0);
+    });
+
+    testWidgets('selectableSeasons 含该季 → 可点并回调', (tester) async {
+      int? selected;
+      await pumpDetailView(
+        tester,
+        selectableSeasons: const [2],
+        onSeasonChanged: (season) => selected = season,
+      );
+
+      // 第 1 季不在 selectable 里 → 禁点击。
+      final chip1 = tester.widget<ChoiceChip>(
+        find.byKey(const ValueKey('tmdb-detail-season-1')),
+      );
+      expect(chip1.onSelected, isNull);
+
+      // **必须先 `ensureVisible`**：`TmdbDetailView` 的内容区是
+      // 「满屏 hero → 信息表 → 季度 → 剧集」，季度 chip 的 y 约 2500，
+      // 在 2400 高视口下仍在屏外，直接 `tap` 会报 *would not hit test*。
+      final chip2 = find.byKey(const ValueKey('tmdb-detail-season-2'));
+      await tester.ensureVisible(chip2);
+      await tester.pumpAndSettle();
+      await tester.tap(chip2);
+      await tester.pump();
+      expect(selected, 2);
+    });
+
+    testWidgets('季度数为 1 时不渲染 chip 条', (tester) async {
+      tester.view.physicalSize = const Size(1400, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: TmdbDetailView(
+                data: detailData(),
+                seasons: const [
+                  TmdbSeasonInfo(number: 1, episodeCount: 3, name: '第 1 季'),
+                ],
+                selectedSeason: 1,
+                selectableSeasons: const [1],
+                onSeasonChanged: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('tmdb-detail-season-switcher')),
+        findsNothing,
+        reason: '单季无 chip 条（与站点页一致）',
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-section-seasons')),
+        findsOneWidget,
+        reason: '区块头仍在，只是没有 chip',
+      );
+    });
+
+    // 未确定季度时区块头带「选择季度」入口（既有行为，不得因改 UI 而丢）。
+    testWidgets('未确定季度 → 区块头有「选择季度」入口', (tester) async {
+      tester.view.physicalSize = const Size(1400, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: TmdbDetailView(
+                data: detailData(),
+                seasons: twoSeasons,
+                selectedSeason: -1,
+                selectableSeasons: const [1, 2],
+                onSeasonChanged: (_) {},
+                onSelectSeason: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('tmdb-choose-season')), findsOneWidget);
     });
   });
 }

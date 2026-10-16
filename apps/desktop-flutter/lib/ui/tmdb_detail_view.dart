@@ -38,7 +38,8 @@ import '../services/tmdb_service.dart';
 import 'app.dart' show PosterImage;
 import 'common.dart';
 import 'tokens.dart';
-import 'tmdb_widgets.dart' show TmdbLoadPhase, TmdbVideoTile;
+import 'tmdb_widgets.dart'
+    show TmdbLoadPhase, TmdbVideoTile, SeasonChipStrip;
 
 /// 动态背景轮播（`04` §3.1：用剧集海报/剧照当动态背景）。
 ///
@@ -902,7 +903,6 @@ class TmdbDetailView extends StatelessWidget {
     this.selectableSeasons = const [],
     this.onSeasonChanged,
     this.onSelectSeason,
-    this.seasonKeyPrefix = 'tmdb-season-card',
     this.episodeKeyPrefix = 'tmdb-episode-card',
     this.episodeActionLabel = '播放',
     this.onEpisodeTap,
@@ -948,8 +948,6 @@ class TmdbDetailView extends StatelessWidget {
   /// 「选择季度」入口（未确定季度时，`04` §4.1）。
   final VoidCallback? onSelectSeason;
 
-  /// 季度卡片的 key 前缀（纯 TMDB 页用 `tmdb-only-season`）。
-  final String seasonKeyPrefix;
   final String episodeKeyPrefix;
 
   /// 剧集卡片的动作文案（`播放` / `搜索站源`）；空串表示无动作。
@@ -1011,29 +1009,20 @@ class TmdbDetailView extends StatelessWidget {
                         )
                       : null,
                 ),
-                SizedBox(
-                  height: 214,
-                  child: ListView.separated(
-                    key: const ValueKey('tmdb-season-strip'),
-                    scrollDirection: Axis.horizontal,
-                    itemCount: seasons.length,
-                    separatorBuilder: (_, _) => const SizedBox(width: 10),
-                    itemBuilder: (context, index) {
-                      final season = seasons[index];
-                      final selectable = selectableSeasons.contains(
-                        season.number,
-                      );
-                      return _SeasonCard(
-                        key: ValueKey('$seasonKeyPrefix-${season.number}'),
-                        season: season,
-                        selected: season.number == selectedSeason,
-                        selectable: selectable && onSeasonChanged != null,
-                        onTap: selectable && onSeasonChanged != null
-                            ? () => onSeasonChanged!.call(season.number)
-                            : null,
-                      );
-                    },
-                  ),
+                // 季度 UI 统一为 chip 条（`docs/phase6/design/03` §3）：
+                // 原先这里的海报卡片条与站点页的 chip 条是两套实现，
+                // 同一概念两种视觉。现在两页共用 `SeasonChipStrip`。
+                //
+                // `padding: EdgeInsets.zero`：本视图的外层已用 `padding`（`AppSpace.lg`）
+                // 缩进过，这里再缩一次会与上方 `SectionHeader` 不对齐。
+                SeasonChipStrip(
+                  seasons: [for (final season in seasons) season.number],
+                  selectedSeason: selectedSeason,
+                  selectableSeasons: selectableSeasons,
+                  onChanged: onSeasonChanged,
+                  padding: EdgeInsets.zero,
+                  switcherKey: 'tmdb-detail-season-switcher',
+                  chipKeyPrefix: 'tmdb-detail-season',
                 ),
               ],
               if (infoRows.isNotEmpty) ...[
@@ -1401,74 +1390,6 @@ class _InfoCell extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 季度卡片
-// ---------------------------------------------------------------------------
-
-class _SeasonCard extends StatelessWidget {
-  const _SeasonCard({
-    super.key,
-    required this.season,
-    required this.selected,
-    required this.selectable,
-    this.onTap,
-  });
-
-  final TmdbSeasonInfo season;
-  final bool selected;
-  final bool selectable;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return SizedBox(
-      width: 128,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(
-              height: 170,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  width: selected ? 2 : 1,
-                  color: selected
-                      ? theme.colorScheme.primary
-                      : theme.colorScheme.outlineVariant,
-                ),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(7),
-                child: PosterImage(url: season.posterUrl),
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              season.label,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                color: selectable ? null : theme.colorScheme.onSurfaceVariant,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            Text(
-              season.subtitle,
-              style: theme.textTheme.bodySmall,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

@@ -307,7 +307,6 @@ class _TmdbDetailPageState extends State<TmdbDetailPage> {
         selectedSeason: _selectedSeason,
         selectableSeasons: _tmdbSeasons,
         onSeasonChanged: (season) => _selectSeason(season),
-        seasonKeyPrefix: 'tmdb-only-season',
         episodeKeyPrefix: 'tmdb-only-episode',
         episodeTitle: '剧集',
         reversed: _episodesReversed,
