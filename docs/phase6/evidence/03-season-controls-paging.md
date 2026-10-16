@@ -23,7 +23,7 @@
 
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
-| 全量单测 | `flutter test` | **1849 通过 / 0 失败**（plans/01 后是 1764，+85） |
+| 全量单测 | `flutter test` | **1853 通过 / 0 失败**（plans/01 后是 1764，+89）。另有一次全量出现 1 失败（`phase2_ipc_test`），**单独跑 31/31 全绿** → 属 `design/05` §7.1 已知 flaky 集合，按规则重跑取得 1853/0 |
 | 静态分析 | `flutter analyze` | `No issues found!` |
 | 季度与选集门禁 | `flutter test test/phase4_tmdb_ui_test.dart test/phase4_tmdb_detail_view_test.dart test/phase4_tmdb_available_seasons_test.dart` | **90/90 通过** |
 | L3 TMDB 详情 | `flutter test integration_test/tmdb_detail_flow_test.dart -d windows` | **1/1 通过**（修了既有滚动缺陷后） |

@@ -1,8 +1,9 @@
-WebHTV PC Phase 6 plans/03 全量单测证据
-时间：2026-10-16T17:01:01+08:00
-HEAD：f4a2979 修：tmdb_detail_flow_test 的季度 chip 需先滚进视口（既有缺陷，非本轮回归）
+WebHTV PC Phase 6 plans/03 全量单测证据（终次）
+时间：2026-10-16T17:34:39+08:00
+HEAD：45496cd 证据：plans/03 季度按钮与选集区间条截图 + 验收证据（C1-C18）
 命令：flutter test
 
-05:04 +1847: C:/Users/Maple/orca/workspaces/webhtv-pc/dev1/apps/desktop-flutter/test/phase5_sync_ui_test.dart: 设备接入历史与自动接入（用户反馈 2026-10-09） 未接入过设备时 tryAutoConnect 不动（不扫局域网、零打扰）
-05:05 +1848: C:/Users/Maple/orca/workspaces/webhtv-pc/dev1/apps/desktop-flutter/test/phase5_sync_ui_test.dart: 设备接入历史与自动接入（用户反馈 2026-10-09） 自动接入：最近线路可达时探到设备；不可达时安静返回 null
-05:08 +1849: All tests passed!
+06:10 +1853: All tests passed!
+
+（另一次全量出现 1 失败：phase2_ipc_test 的「sidecar 崩溃时孙进程被一并终止」；
+  单独跑 31/31 全绿 → design/05 §7.1 已知 flaky 集合，按规则重跑取得 1853/0）
