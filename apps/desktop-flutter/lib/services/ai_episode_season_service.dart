@@ -173,3 +173,289 @@ String _sanitize(String text) {
 
 String _truncate(String text, int maxLength) =>
     text.length <= maxLength ? text : text.substring(0, maxLength);
+
+/// AI 建议的绑定模式（`docs/phase6/design/04` §6.4）。
+enum AiSeasonMode { singleSeason, flatByCounts, keepOriginal, explicitMapping }
+
+/// 失败原因。
+enum AiSeasonFailure {
+  none,
+  configIncomplete,
+  noEpisodes,
+  http,
+  network,
+  timeout,
+  canceled,
+  invalidJson,
+  invalidMode,
+  invalidSeason,
+  unsafeFlatMapping,
+  invalidMapping,
+}
+
+/// 逐集映射的一项。
+class AiEpisodeMapping {
+  const AiEpisodeMapping({
+    required this.sourceIndex,
+    required this.seasonNumber,
+    required this.episodeNumber,
+  });
+
+  final int sourceIndex;
+  final int seasonNumber;
+  final int episodeNumber;
+}
+
+/// 一次分析的结果。
+class AiSeasonAnalysis {
+  const AiSeasonAnalysis({
+    required this.success,
+    required this.reason,
+    this.mode,
+    this.seasonNumber = -1,
+    this.confidence = 0,
+    this.summary = '',
+    this.warnings = const [],
+    this.mappings = const [],
+  });
+
+  final bool success;
+  final AiSeasonFailure reason;
+  final AiSeasonMode? mode;
+  final int seasonNumber;
+  final double confidence;
+  final String summary;
+  final List<String> warnings;
+  final List<AiEpisodeMapping> mappings;
+
+  static const AiSeasonAnalysis failed = AiSeasonAnalysis(
+    success: false,
+    reason: AiSeasonFailure.none,
+  );
+
+  static AiSeasonAnalysis failure(AiSeasonFailure reason) =>
+      AiSeasonAnalysis(success: false, reason: reason);
+}
+
+AiSeasonMode? _modeFrom(String value) => switch (value.trim().toUpperCase()) {
+  'SINGLE_SEASON' => AiSeasonMode.singleSeason,
+  'FLAT_BY_COUNTS' => AiSeasonMode.flatByCounts,
+  'KEEP_ORIGINAL' => AiSeasonMode.keepOriginal,
+  'EXPLICIT_MAPPING' => AiSeasonMode.explicitMapping,
+  _ => null,
+};
+
+/// 解析 AI 响应并做硬校验（`docs/phase6/design/04` §6.4）。
+///
+/// **任一条校验不满足即失败**：宁可让用户重试，也不把不合法的映射写进绑定。
+AiSeasonAnalysis parseAiSeasonResponse({
+  required String text,
+  required List<VodEpisode> episodes,
+  required Map<int, int> seasonCounts,
+  List<AiEpisodeSample>? samples,
+}) {
+  final json = _extractJsonObject(text);
+  if (json == null) return AiSeasonAnalysis.failure(AiSeasonFailure.invalidJson);
+
+  final mode = _modeFrom('${json['mode'] ?? ''}');
+  if (mode == null) return AiSeasonAnalysis.failure(AiSeasonFailure.invalidMode);
+
+  final seasonNumber = _asInt(json['seasonNumber'], -1);
+  final confidence = _asDouble(json['confidence'], 0).clamp(0.0, 1.0);
+  final summary = _truncate(_sanitize('${json['summary'] ?? ''}'), 280);
+  final warnings = _stringList(json['warnings'], maxItems: 8, maxLength: 160);
+
+  final sampled = samples ?? sampleAiEpisodes(episodes);
+  final sourceEpisodeCount = episodes.length;
+  final completeSamples = sourceEpisodeCount == sampled.length;
+  final sourceNumbers = [
+    for (final episode in episodes) parseEpisodeNumber(episode.name),
+  ];
+
+  final mappings = _parseMappings(json['mappings']);
+
+  if (mode == AiSeasonMode.explicitMapping && !completeSamples) {
+    return AiSeasonAnalysis.failure(AiSeasonFailure.invalidMapping);
+  }
+
+  if (mode == AiSeasonMode.singleSeason) {
+    final count = seasonCounts[seasonNumber] ?? 0;
+    if (seasonNumber < 0 ||
+        count <= 0 ||
+        sourceEpisodeCount > count) {
+      return AiSeasonAnalysis.failure(AiSeasonFailure.invalidSeason);
+    }
+  }
+
+  if (mode == AiSeasonMode.flatByCounts) {
+    final seasons = _sortedSeasons(seasonCounts);
+    if (sourceNumbers.length != sourceEpisodeCount ||
+        !_canMapFlatEpisodeNumbers(sourceNumbers, seasons, seasonCounts)) {
+      return AiSeasonAnalysis.failure(AiSeasonFailure.unsafeFlatMapping);
+    }
+  }
+
+  if (mode == AiSeasonMode.explicitMapping &&
+      !_validExplicitMappings(mappings, sourceEpisodeCount, seasonCounts)) {
+    return AiSeasonAnalysis.failure(AiSeasonFailure.invalidMapping);
+  }
+
+  return AiSeasonAnalysis(
+    success: true,
+    reason: AiSeasonFailure.none,
+    mode: mode,
+    seasonNumber: seasonNumber,
+    confidence: confidence,
+    summary: summary,
+    warnings: warnings,
+    mappings: mappings,
+  );
+}
+
+/// 从可能带 Markdown 包裹的文本里抽出 JSON 对象。
+Map<String, Object?>? _extractJsonObject(String text) {
+  var value = text.trim();
+  if (value.startsWith('```')) {
+    value = value.replaceFirst(RegExp(r'^```[a-zA-Z]*'), '');
+    value = value.replaceFirst(RegExp(r'```$'), '').trim();
+  }
+  final start = value.indexOf('{');
+  final end = value.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    final decoded = jsonDecode(value.substring(start, end + 1));
+    return decoded is Map ? decoded.cast<String, Object?>() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+int _asInt(Object? value, int fallback) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  if (value is String) return int.tryParse(value) ?? fallback;
+  return fallback;
+}
+
+double _asDouble(Object? value, double fallback) {
+  if (value is num) return value.toDouble();
+  if (value is String) return double.tryParse(value) ?? fallback;
+  return fallback;
+}
+
+List<String> _stringList(
+  Object? value, {
+  required int maxItems,
+  required int maxLength,
+}) {
+  if (value is! List) return const [];
+  final result = <String>[];
+  for (final item in value) {
+    if (result.length >= maxItems) break;
+    if (item is! String) continue;
+    final text = _truncate(_sanitize(item), maxLength);
+    if (text.isNotEmpty) result.add(text);
+  }
+  return result;
+}
+
+List<AiEpisodeMapping> _parseMappings(Object? value) {
+  if (value is! List) return const [];
+  final result = <AiEpisodeMapping>[];
+  for (final item in value) {
+    if (item is! Map) {
+      result.add(
+        const AiEpisodeMapping(
+          sourceIndex: -1,
+          seasonNumber: -1,
+          episodeNumber: -1,
+        ),
+      );
+      continue;
+    }
+    final map = item.cast<Object?, Object?>();
+    result.add(
+      AiEpisodeMapping(
+        sourceIndex: _asInt(map['sourceIndex'], -1),
+        seasonNumber: _asInt(map['seasonNumber'], -1),
+        episodeNumber: _asInt(map['episodeNumber'], -1),
+      ),
+    );
+  }
+  result.sort((a, b) => a.sourceIndex.compareTo(b.sourceIndex));
+  return result;
+}
+
+/// 逐集映射的完整性约束（对齐上游 `validExplicitMappings`）。
+bool _validExplicitMappings(
+  List<AiEpisodeMapping> mappings,
+  int episodeCount,
+  Map<int, int> seasonCounts,
+) {
+  if (episodeCount <= 0 || mappings.length != episodeCount) return false;
+  final seenSources = List<bool>.filled(episodeCount, false);
+  final targets = <String>{};
+  var previousSeason = -1;
+  var previousEpisode = -1;
+  for (final mapping in mappings) {
+    if (mapping.sourceIndex < 0 ||
+        mapping.sourceIndex >= episodeCount ||
+        seenSources[mapping.sourceIndex]) {
+      return false;
+    }
+    final count = seasonCounts[mapping.seasonNumber] ?? 0;
+    if (mapping.seasonNumber < 0 || count <= 0) return false;
+    if (mapping.episodeNumber <= 0 || mapping.episodeNumber > count) {
+      return false;
+    }
+    if (!targets.add('${mapping.seasonNumber}:${mapping.episodeNumber}')) {
+      return false;
+    }
+    // 季集号必须**严格递增**。
+    if (previousSeason > mapping.seasonNumber ||
+        (previousSeason == mapping.seasonNumber &&
+            previousEpisode >= mapping.episodeNumber)) {
+      return false;
+    }
+    seenSources[mapping.sourceIndex] = true;
+    previousSeason = mapping.seasonNumber;
+    previousEpisode = mapping.episodeNumber;
+  }
+  for (final seen in seenSources) {
+    if (!seen) return false;
+  }
+  return true;
+}
+
+/// 扁平集号能否完整映射到各季（与 `core/tmdb_season.dart` 同语义）。
+bool _canMapFlatEpisodeNumbers(
+  List<int> numbers,
+  List<int> seasons,
+  Map<int, int> seasonCounts,
+) {
+  if (numbers.isEmpty || seasons.isEmpty) return false;
+  for (final number in numbers) {
+    if (_mapFlatEpisodeNumber(number, seasons, seasonCounts) == null) {
+      return false;
+    }
+  }
+  return true;
+}
+
+({int seasonNumber, int episodeNumber})? _mapFlatEpisodeNumber(
+  int number,
+  List<int> seasons,
+  Map<int, int> seasonCounts,
+) {
+  if (number <= 0) return null;
+  var remaining = number;
+  for (final season in seasons) {
+    final count = seasonCounts[season] ?? 0;
+    if (count <= 0) return null;
+    if (remaining <= count) {
+      return (seasonNumber: season, episodeNumber: remaining);
+    }
+    remaining -= count;
+  }
+  return null;
+}

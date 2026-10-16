@@ -2002,6 +2002,7 @@ git commit -m "新增：AI 集季采样与提示词（design/04 §6.2、§6.3）
     );
 
     test('SINGLE_SEASON 合法 → 成功', () {
+      // 3 集恰好填满第 1 季（§6.4：集数 > 该季集数才判 invalidSeason，正好相等合法）。
       final result = parse(
         jsonOf({
           'mode': 'SINGLE_SEASON',
@@ -2011,6 +2012,7 @@ git commit -m "新增：AI 集季采样与提示词（design/04 §6.2、§6.3）
           'warnings': <String>[],
           'mappings': <Object?>[],
         }),
+        episodeCount: 3,
       );
       expect(result.success, isTrue);
       expect(result.mode, AiSeasonMode.singleSeason);

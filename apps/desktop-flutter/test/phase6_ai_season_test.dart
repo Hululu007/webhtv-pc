@@ -1,6 +1,8 @@
 /// AI 集季分析服务的采样与提示词（`docs/phase6/design/04` §6.2、§6.3）。
 library;
 
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webhtv_pc/core/protocol.dart';
 import 'package:webhtv_pc/services/ai_episode_season_service.dart';
@@ -223,4 +225,219 @@ void main() {
       expect(prompt, contains('"flagName":"${'F' * 120}"'));
     });
   });
+
+  group('响应解析（§6.4）', () {
+    String jsonOf(Map<String, Object?> value) => jsonEncode(value);
+
+    AiSeasonAnalysis parse(
+      String text, {
+      int episodeCount = 5,
+      Map<int, int> seasonCounts = const {1: 3, 2: 2},
+    }) => parseAiSeasonResponse(
+      text: text,
+      episodes: episodesOf(episodeCount),
+      seasonCounts: seasonCounts,
+    );
+
+    test('SINGLE_SEASON 合法 → 成功', () {
+      // 3 集恰好填满第 1 季（§6.4：集数 > 该季集数才判 invalidSeason，正好相等合法）。
+      final result = parse(
+        jsonOf({
+          'mode': 'SINGLE_SEASON',
+          'seasonNumber': 1,
+          'confidence': 0.9,
+          'summary': '看起来是第 1 季',
+          'warnings': <String>[],
+          'mappings': <Object?>[],
+        }),
+        episodeCount: 3,
+      );
+      expect(result.success, isTrue);
+      expect(result.mode, AiSeasonMode.singleSeason);
+      expect(result.seasonNumber, 1);
+      expect(result.confidence, closeTo(0.9, 0.001));
+      expect(result.summary, '看起来是第 1 季');
+    });
+
+    test('Markdown 代码块包裹的 JSON 也能解析', () {
+      final result = parse(
+        '```json\n'
+        '${jsonOf({'mode': 'KEEP_ORIGINAL', 'seasonNumber': -1, 'confidence': 0.5, 'summary': '', 'warnings': <String>[], 'mappings': <Object?>[]})}'
+        '\n```',
+      );
+      expect(result.success, isTrue);
+      expect(result.mode, AiSeasonMode.keepOriginal);
+    });
+
+    test('抽不出 JSON → invalidJson', () {
+      expect(parse('完全不是 JSON').reason, AiSeasonFailure.invalidJson);
+    });
+
+    test('mode 不在 4 个值内 → invalidMode', () {
+      final result = parse(jsonOf({'mode': 'GUESS', 'confidence': 0.5}));
+      expect(result.reason, AiSeasonFailure.invalidMode);
+    });
+
+    test('SINGLE_SEASON 季号不在 TMDB 季里 → invalidSeason', () {
+      final result = parse(
+        jsonOf({
+          'mode': 'SINGLE_SEASON',
+          'seasonNumber': 99,
+          'confidence': 0.9,
+        }),
+      );
+      expect(result.reason, AiSeasonFailure.invalidSeason);
+    });
+
+    test('SINGLE_SEASON 集数超过该季集数 → invalidSeason', () {
+      // 5 集，但说 S2（只有 2 集）。
+      final result = parse(
+        jsonOf({
+          'mode': 'SINGLE_SEASON',
+          'seasonNumber': 2,
+          'confidence': 0.9,
+        }),
+      );
+      expect(result.reason, AiSeasonFailure.invalidSeason);
+    });
+
+    test('FLAT_BY_COUNTS 集号不能完整映射 → unsafeFlatMapping', () {
+      // 集名解析不出集号（全 -1）→ 不能映射。
+      final episodes = [
+        VodEpisode(name: '无编号', url: 'http://x/a'),
+        VodEpisode(name: '也无编号', url: 'http://x/b'),
+      ];
+      final result = parseAiSeasonResponse(
+        text: jsonOf({
+          'mode': 'FLAT_BY_COUNTS',
+          'seasonNumber': -1,
+          'confidence': 0.9,
+        }),
+        episodes: episodes,
+        seasonCounts: const {1: 3, 2: 2},
+      );
+      expect(result.reason, AiSeasonFailure.unsafeFlatMapping);
+    });
+
+    test('FLAT_BY_COUNTS 集号完整映射 → 成功', () {
+      final result = parse(
+        jsonOf({
+          'mode': 'FLAT_BY_COUNTS',
+          'seasonNumber': -1,
+          'confidence': 0.8,
+        }),
+        episodeCount: 5,
+        seasonCounts: const {1: 3, 2: 2},
+      );
+      expect(result.success, isTrue);
+      expect(result.mode, AiSeasonMode.flatByCounts);
+    });
+
+    test('采样不全时 EXPLICIT_MAPPING → invalidMapping', () {
+      final result = parse(
+        jsonOf({
+          'mode': 'EXPLICIT_MAPPING',
+          'confidence': 0.9,
+          'mappings': <Object?>[],
+        }),
+        episodeCount: 500,
+        seasonCounts: const {1: 300, 2: 200},
+      );
+      expect(
+        result.reason,
+        AiSeasonFailure.invalidMapping,
+        reason: 'sourceTruncated 时禁止逐集映射',
+      );
+    });
+
+    test('EXPLICIT_MAPPING 季集号非递增 → invalidMapping', () {
+      final result = parse(
+        jsonOf({
+          'mode': 'EXPLICIT_MAPPING',
+          'confidence': 0.9,
+          'mappings': [
+            {'sourceIndex': 0, 'seasonNumber': 2, 'episodeNumber': 1},
+            {'sourceIndex': 1, 'seasonNumber': 1, 'episodeNumber': 1},
+            {'sourceIndex': 2, 'seasonNumber': 1, 'episodeNumber': 2},
+            {'sourceIndex': 3, 'seasonNumber': 1, 'episodeNumber': 3},
+            {'sourceIndex': 4, 'seasonNumber': 2, 'episodeNumber': 2},
+          ],
+        }),
+      );
+      expect(result.reason, AiSeasonFailure.invalidMapping);
+    });
+
+    test('EXPLICIT_MAPPING 目标重复 → invalidMapping', () {
+      final result = parse(
+        jsonOf({
+          'mode': 'EXPLICIT_MAPPING',
+          'confidence': 0.9,
+          'mappings': [
+            {'sourceIndex': 0, 'seasonNumber': 1, 'episodeNumber': 1},
+            {'sourceIndex': 1, 'seasonNumber': 1, 'episodeNumber': 1},
+            {'sourceIndex': 2, 'seasonNumber': 1, 'episodeNumber': 2},
+            {'sourceIndex': 3, 'seasonNumber': 1, 'episodeNumber': 3},
+            {'sourceIndex': 4, 'seasonNumber': 2, 'episodeNumber': 1},
+          ],
+        }),
+      );
+      expect(result.reason, AiSeasonFailure.invalidMapping);
+    });
+
+    test('EXPLICIT_MAPPING 覆盖不全 → invalidMapping', () {
+      final result = parse(
+        jsonOf({
+          'mode': 'EXPLICIT_MAPPING',
+          'confidence': 0.9,
+          'mappings': [
+            {'sourceIndex': 0, 'seasonNumber': 1, 'episodeNumber': 1},
+          ],
+        }),
+      );
+      expect(result.reason, AiSeasonFailure.invalidMapping);
+    });
+
+    test('EXPLICIT_MAPPING 合法 → 成功', () {
+      final result = parse(
+        jsonOf({
+          'mode': 'EXPLICIT_MAPPING',
+          'confidence': 0.95,
+          'mappings': [
+            {'sourceIndex': 0, 'seasonNumber': 1, 'episodeNumber': 1},
+            {'sourceIndex': 1, 'seasonNumber': 1, 'episodeNumber': 2},
+            {'sourceIndex': 2, 'seasonNumber': 1, 'episodeNumber': 3},
+            {'sourceIndex': 3, 'seasonNumber': 2, 'episodeNumber': 1},
+            {'sourceIndex': 4, 'seasonNumber': 2, 'episodeNumber': 2},
+          ],
+        }),
+      );
+      expect(result.success, isTrue);
+      expect(result.mode, AiSeasonMode.explicitMapping);
+      expect(result.mappings.length, 5);
+    });
+
+    test('confidence 夹到 0..1', () {
+      final result = parse(
+        jsonOf({
+          'mode': 'KEEP_ORIGINAL',
+          'seasonNumber': -1,
+          'confidence': 5.0,
+        }),
+      );
+      expect(result.confidence, 1.0);
+    });
+
+    test('warnings 最多 8 条', () {
+      final result = parse(
+        jsonOf({
+          'mode': 'KEEP_ORIGINAL',
+          'seasonNumber': -1,
+          'confidence': 0.5,
+          'warnings': [for (var i = 0; i < 20; i++) 'w$i'],
+        }),
+      );
+      expect(result.warnings.length, 8);
+    });
+  });
+
 }
