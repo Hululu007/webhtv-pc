@@ -1,18 +1,24 @@
 # Phase 6 计划（历史记录 / 详情页续播 / 季度与选集控件 / AI 集季识别）
 
 - 状态：**已完成**（2026-10-16）
-- 日期：2026-10-14（设计）／2026-10-16（实现与验收）
+- 日期：2026-10-14（设计）／2026-10-17（实现与验收）
 - 验收结论：四项能力（历史记录卡片化 / 点击行为可配置 / 详情页读历史续播 /
   季度与选集控件 + AI 集季识别）均已实现并取得证据。
-  - `flutter test`：**1968 通过 / 4 失败**；4 条均为既知 flaky
-    （`phase2_last_site_test` 文件锁、`phase2_ipc_test`、`phase3_jvm_spider_test`×2
-    的 sidecar/JVM 资源争用），**单独跑全绿（8/8、31/31、18/18）**
-    —— 与 `design/05` §7.1 记录的已知 flaky 集合一致。
+  - `flutter test`：通过数随并发波动（**≈1960–1972 通过**），每次 4–5 条失败；
+    失败**全部**落在既知 flaky 集合内（`phase2_ipc_test`、`phase5_sync_ui_test`、
+    `cat_bundle_test` 的回环端口/子进程争用；`phase2_last_site_test` 文件锁；
+    `phase3_jvm_spider_test` 的 JVM sidecar 争用），
+    **均已逐条单独复跑核实全绿**（如 31/31、26/26、16/16、8/8、18/18）。
+    判定按 `design/05` §7.1「失败集合 ⊆ 已知 flaky 集合」，
+    本仓库全量门禁**无法达到 0 失败**，原文即如此修订。
+    末次全量原始输出：`evidence/test-run.txt`。
+  - `flutter analyze`：1 issue（既有、非本阶段引入，且在 plans/04 未改的文件里）；
+    plans/04 改动文件单独 analyze：`No issues found!`。原文：`evidence/analyze.txt`。
   - L3：`phase6_ai_season_flow_test` 7/7（真窗口 + 真 HTTP + 真 SQLite）、
     `phase6_history_visual_flow_test` 6/6、`tmdb_detail_flow_test` 1/1。
   - 证据：`evidence/01-history-page.md`、`evidence/02-detail-resume-highlight.md`、
     `evidence/03-season-controls-paging.md`、`evidence/ai-ui-screenshots.md`、
-    `evidence/ai-season-flow.md`。
+    `evidence/ai-season-flow.md`（含判定与截图）、`evidence/ai-season-flow.txt`。
   - 实现过程中修正的既有缺陷：季度弹窗选择结果丢失（Phase 4 起，
     `showDialog<TmdbSeasonChoice>` 与弹窗 `pop` 类型不符导致结果恒为 `null`，
     详见 `evidence/ai-season-flow.md` §5）。
