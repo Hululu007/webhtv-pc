@@ -206,6 +206,17 @@ void main() {
     // 走**真实 UI 路径**：点季度条上的「第 2 季」。直接调 `selectSeason` 只会
     // 改状态层，页面不会重建、也不会重新拉取剧集（`selectSeason` 会清空
     // `_episodes`，`04` §4.3 第 3 步），后续断言就会基于过期数据。
+    // 季度 UI 于 2026-10-16 统一为 chip 条（docs/phase6/design/03 第 3 节）：
+    // 站点详情页的季度 chip 现在由 SeasonChipStrip 渲染，key 仍是
+    // tmdb-season-<n>（容器 tmdb-season-switcher），未变。
+    //
+    // 这一步失败过一个环境性问题而非 UI 变更：expect 报
+    // Found 0 widgets with key tmdb-season-2。根因是站点详情页首屏是
+    // 满屏 hero，季度选择器在第二屏——必须先把正文滚进视口，
+    // 否则该 widget 根本没挂载（ListView 懒构建）。
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, -600));
+    await tester.pump();
+
     final season2Chip = find.byKey(const ValueKey('tmdb-season-2'));
     expect(season2Chip, findsOneWidget, reason: '详情页必须有第 2 季入口');
     await tester.tap(season2Chip);
