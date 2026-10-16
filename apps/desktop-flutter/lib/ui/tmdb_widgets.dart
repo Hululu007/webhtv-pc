@@ -29,11 +29,14 @@ import 'common.dart';
 /// 此处重导出，使 UI 层与既有门禁用例只需依赖一个模块。
 export '../core/tmdb_season.dart'
     show
+        TmdbSeasonAi,
+        TmdbSeasonAiSettings,
         TmdbSeasonAuto,
         TmdbSeasonAutoSlice,
         TmdbSeasonChoice,
         TmdbSeasonKeepOriginal,
-        TmdbSeasonNumber;
+        TmdbSeasonNumber,
+        bindingModeOf;
 
 /// 加载阶段（`04` §3.3）。
 enum TmdbLoadPhase {
@@ -691,6 +694,7 @@ class TmdbSeasonDialog extends StatelessWidget {
     required this.sourceEpisodeCount,
     this.currentSeason,
     this.canAutoSlice = false,
+    this.aiReady = false,
   });
 
   final List<int> tmdbSeasons;
@@ -700,6 +704,9 @@ class TmdbSeasonDialog extends StatelessWidget {
 
   /// `canSliceBySeasonCounts` 为真时「按集号自动切片」可用。
   final bool canAutoSlice;
+
+  /// AI 服务是否就绪。未就绪时 AI 项引导去设置页（`04` §7.1）。
+  final bool aiReady;
 
   /// 风险提示阈值：`|季度集数 - 线路集数| > max(2, 20%)`。
   static bool needsRiskWarning({
@@ -719,8 +726,14 @@ class TmdbSeasonDialog extends StatelessWidget {
       title: const Text('选择 TMDB 季度'),
       content: SizedBox(
         width: 480,
-        height: 360,
         child: ListView(
+          // 高度由内容决定，并由 `AlertDialog` 的可用空间封顶（两者取小）。
+          //
+          // 【为什么不再写死 360】`docs/phase6/design/04` §7.1 要求在「保持原始
+          // 集列表」与「各季」之间插入 AI 项，固定 360 会把「各季」顶出可视区：
+          // phase4 的「选择季度返回语义化结果」正是靠「不用滚动就能点到第 2 季」
+          // 锁住季度选择的语义。改成按内容定高后，空间够就全展开，不够才滚动。
+          shrinkWrap: true,
           children: [
             ListTile(
               key: const ValueKey('tmdb-season-auto'),
@@ -743,6 +756,25 @@ class TmdbSeasonDialog extends StatelessWidget {
               key: const ValueKey('tmdb-season-keep-original'),
               title: const Text('保持原始集列表'),
               onTap: () => Navigator.of(context).pop(_SeasonChoice.keepOriginal),
+            ),
+            // AI 项（`docs/phase6/design/04` §7.1）。
+            //
+            // 位置：在「保持原始集列表」之后、「各季」之前——AI 是**另一条**
+            // 取得绑定的途径（结果仍需预览确认），与上面三个手动项同组，
+            // 而不属于下面那一列“直接选定某一季”。
+            //
+            // 未配置时不隐藏这一项而是引导去设置：隐藏会让用户永远不知道
+            // 有 AI 能力（Phase 4 的 TMDB 入口就是在这一点上踩过坑）。
+            ListTile(
+              key: const ValueKey('tmdb-season-ai'),
+              leading: const Icon(Icons.auto_awesome),
+              title: const Text('AI 识别剧集/季度'),
+              subtitle: aiReady
+                  ? null
+                  : const Text('未配置 AI 服务，点击前往设置'),
+              onTap: () => Navigator.of(context).pop(
+                aiReady ? _SeasonChoice.ai : _SeasonChoice.aiSettings,
+              ),
             ),
             const Divider(),
             for (final season in tmdbSeasons)
@@ -780,7 +812,7 @@ class TmdbSeasonDialog extends StatelessWidget {
 }
 
 /// 季度绑定弹窗的选择结果。
-enum _SeasonChoice { auto, autoSlice, keepOriginal }
+enum _SeasonChoice { auto, autoSlice, keepOriginal, ai, aiSettings }
 
 /// 把弹窗返回值翻译为语义化结果。
 ///
@@ -793,6 +825,8 @@ TmdbSeasonChoice? decodeSeasonChoice(Object? value) {
       _SeasonChoice.auto => const TmdbSeasonAuto(),
       _SeasonChoice.autoSlice => const TmdbSeasonAutoSlice(),
       _SeasonChoice.keepOriginal => const TmdbSeasonKeepOriginal(),
+      _SeasonChoice.ai => const TmdbSeasonAi(),
+      _SeasonChoice.aiSettings => const TmdbSeasonAiSettings(),
     };
   }
   return null;

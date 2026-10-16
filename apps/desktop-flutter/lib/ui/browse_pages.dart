@@ -16,10 +16,12 @@ import '../core/tmdb_identity.dart';
 import '../core/tmdb_media.dart';
 import '../core/tmdb_playback.dart';
 import '../core/tmdb_title.dart';
+import '../services/ai_episode_season_service.dart';
 import '../services/spider_router.dart';
 import '../services/storage.dart';
 import '../state/app_state.dart';
 import '../state/tmdb_state.dart';
+import 'ai_settings_page.dart';
 import 'app.dart';
 import 'config_pages.dart';
 import 'player_page.dart';
@@ -1105,13 +1107,241 @@ class _DetailPageState extends State<DetailPage> {
         sourceEpisodeCount: line?.episodeCount ?? 0,
         currentSeason: tmdb.selectedSeason >= 0 ? tmdb.selectedSeason : null,
         canAutoSlice: tmdb.canAutoSlice,
+        aiReady: state.aiReady,
       ),
     );
     if (choice == null || !mounted) return;
+
+    // **分流必须在 bindTmdbSeason 之前**（`docs/phase6/design/04` §7.1.1）：
+    // `bindingModeOf` 对 AI 两项返回 null，与 `TmdbSeasonAuto` 同值，而 null 的
+    // 含义是「清除手动绑定」。直接喂给 bindTmdbSeason 会让用户点「AI 识别」
+    // 或「去配置 AI」时把已有绑定静默清掉。
+    if (choice is TmdbSeasonAiSettings) {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => AiSettingsPage(state: state)),
+      );
+      return;
+    }
+    if (choice is TmdbSeasonAi) {
+      await _runAiSeasonAnalysis();
+      return;
+    }
+
     await state.bindTmdbSeason(choice);
     if (!mounted) return;
     await state.reloadTmdb();
   }
+
+  /// 跑一次 AI 集季分析并走预览确认（`docs/phase6/design/04` §7.2–§7.5）。
+  Future<void> _runAiSeasonAnalysis() async {
+    final state = widget.state;
+    final tmdb = state.tmdb;
+    final vod = _currentVod;
+    final tmdbLine = tmdb.sourceLine;
+    if (vod == null || tmdbLine == null || tmdbLine.episodeCount == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('当前线路没有可分析的剧集')),
+      );
+      return;
+    }
+
+    // 用 tmdb 线路自己的集名重建集列表，而**不是**取 UI 的 `_activeLine`：
+    // 这样 `episodes.length` 与快照里的 `episodeCount` 必然同源（§7.5 的
+    // 前后比对才有意义），也不会因 UI 线路选中态与 tmdb 态短暂不一致而错位。
+    final episodes = [
+      for (var i = 0; i < tmdbLine.episodeNames.length; i++)
+        VodEpisode(
+          name: tmdbLine.episodeNames[i],
+          url: i < tmdbLine.episodeUrls.length ? tmdbLine.episodeUrls[i] : '',
+        ),
+    ];
+
+    // 快照（`04` §7.5）：分析可能耗时几十秒，期间用户可能切了线路或换了站点，
+    // 应用前必须比对，否则会把结果写到新线路上。
+    final snapshotFlagKey = tmdbLine.flagKey;
+    final snapshotCount = tmdbLine.episodeCount;
+
+    final service = AiEpisodeSeasonService(config: state.aiConfig);
+    var canceled = false;
+    unawaited(
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          key: const ValueKey('ai-season-progress'),
+          title: const Text('AI 正在分析剧集结构…'),
+          content: const Text('分析期间不会改动任何绑定。'),
+          actions: [
+            TextButton(
+              key: const ValueKey('ai-season-cancel'),
+              onPressed: () {
+                canceled = true;
+                service.cancel();
+                Navigator.of(dialogContext).pop();
+              },
+              child: const Text('取消'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final result = await service.analyze(
+      title: vod.vodName,
+      flagName: tmdbLine.sourceFlag,
+      episodes: episodes,
+      seasonCounts: tmdb.seasonEpisodeCounts,
+    );
+    service.dispose();
+
+    // 只在取消路径下**跳过**关闭进度框。
+    //
+    // 【缺陷修正】顺序不能照抄成「先 `maybePop()` 再判 canceled」：用户点取消时
+    // 进度框已由取消按钮自己 pop 掉了，此时 `maybePop()` 弹掉的是**详情页本身**
+    // （用户点「取消」却被退出详情页）。
+    if (!canceled && mounted) {
+      Navigator.of(context, rootNavigator: true).maybePop();
+    }
+    if (canceled || !mounted) return;
+
+    if (!result.success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_aiFailureText(result.reason))),
+      );
+      return;
+    }
+
+    await _showAiPreview(
+      result: result,
+      snapshotFlagKey: snapshotFlagKey,
+      snapshotCount: snapshotCount,
+    );
+  }
+
+  /// AI 结果预览确认（§7.3）与应用（§7.4）。**必经确认才落盘。**
+  Future<void> _showAiPreview({
+    required AiSeasonAnalysis result,
+    required String snapshotFlagKey,
+    required int snapshotCount,
+  }) async {
+    final previewOnly = result.mode == AiSeasonMode.explicitMapping;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const ValueKey('ai-season-preview'),
+        title: const Text('AI 剧集 / 季度分析建议'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${_aiModeLabel(result.mode)} · '
+                '${(result.confidence * 100).round()}%',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              if (result.seasonNumber >= 0)
+                Text(
+                  result.seasonNumber == 0
+                      ? '特别篇'
+                      : '第 ${result.seasonNumber} 季',
+                ),
+              if (result.summary.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(result.summary),
+              ],
+              for (final warning in result.warnings) ...[
+                const SizedBox(height: 4),
+                Text('• $warning'),
+              ],
+              if (previewOnly) ...[
+                const SizedBox(height: 12),
+                Text(
+                  '本版本仅预览，不会写入绑定。',
+                  key: const ValueKey('ai-season-preview-only'),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text(previewOnly ? '知道了' : '取消'),
+          ),
+          if (!previewOnly)
+            FilledButton(
+              key: const ValueKey('ai-season-apply'),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('应用建议'),
+            ),
+        ],
+      ),
+    );
+    if (confirmed != true || previewOnly || !mounted) return;
+
+    // 快照校验（`04` §7.5）。
+    final current = widget.state.tmdb.sourceLine;
+    if (current == null ||
+        current.flagKey != snapshotFlagKey ||
+        current.episodeCount != snapshotCount) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('线路已变化，AI 建议不再适用，请重新分析')),
+      );
+      return;
+    }
+
+    switch (result.mode) {
+      case AiSeasonMode.singleSeason:
+        await widget.state.bindTmdbSeason(
+          TmdbSeasonNumber(result.seasonNumber),
+        );
+      case AiSeasonMode.keepOriginal:
+        await widget.state.bindTmdbSeason(const TmdbSeasonKeepOriginal());
+      case AiSeasonMode.flatByCounts:
+        // 应用前**再校验一次**（`04` §7.4）：AI 说可以，本地校验不过就拒绝。
+        if (!widget.state.tmdb.canAutoSlice) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('当前线路集数与 TMDB 季集数不匹配，无法安全自动切分'),
+            ),
+          );
+          return;
+        }
+        await widget.state.bindTmdbSeason(const TmdbSeasonAutoSlice());
+      case AiSeasonMode.explicitMapping:
+        return; // 上面已短路，这里只为穷尽 switch。
+      case null:
+        return;
+    }
+    if (!mounted) return;
+    await widget.state.reloadTmdb();
+  }
+
+  static String _aiModeLabel(AiSeasonMode? mode) => switch (mode) {
+    AiSeasonMode.singleSeason => '单季',
+    AiSeasonMode.flatByCounts => '按集数切片',
+    AiSeasonMode.keepOriginal => '保持原始集列表',
+    AiSeasonMode.explicitMapping => '逐集映射',
+    null => '未知',
+  };
+
+  static String _aiFailureText(AiSeasonFailure reason) => switch (reason) {
+    AiSeasonFailure.configIncomplete => 'AI 服务未配置完成',
+    AiSeasonFailure.noEpisodes => '没有可分析的剧集',
+    AiSeasonFailure.http => 'AI 接口返回错误',
+    AiSeasonFailure.network => 'AI 网络错误',
+    AiSeasonFailure.timeout => 'AI 请求超时',
+    AiSeasonFailure.canceled => '已取消',
+    AiSeasonFailure.invalidJson => 'AI 返回的不是合法 JSON',
+    AiSeasonFailure.invalidMode => 'AI 返回的模式无法识别',
+    AiSeasonFailure.invalidSeason => 'AI 给出的季度与 TMDB 不符',
+    AiSeasonFailure.unsafeFlatMapping => 'AI 给出的集号映射不完整，已拒绝',
+    AiSeasonFailure.invalidMapping => 'AI 的逐集映射不合法，已拒绝',
+    AiSeasonFailure.none => 'AI 分析失败',
+  };
 
   /// 本页要用的历史记录。
   ///

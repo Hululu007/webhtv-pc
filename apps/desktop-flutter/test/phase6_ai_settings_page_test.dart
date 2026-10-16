@@ -10,6 +10,7 @@ import 'package:webhtv_pc/services/log_service.dart';
 import 'package:webhtv_pc/state/app_state.dart';
 import 'package:webhtv_pc/ui/ai_settings_page.dart';
 import 'package:webhtv_pc/ui/diagnostics_pages.dart';
+import 'package:webhtv_pc/ui/tmdb_widgets.dart';
 
 void main() {
   late Directory tempDir;
@@ -126,4 +127,109 @@ void main() {
     );
     expect(field.obscureText, isTrue, reason: '凭据默认遮蔽');
   });
+
+  group('季度弹窗 AI 项与返回值契约（design/04 §7.1.1）', () {
+    testWidgets('弹窗有 AI 项，未配置时提示去设置', (tester) async {
+      tester.view.physicalSize = const Size(1200, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: TmdbSeasonDialog(
+              tmdbSeasons: const [1, 2],
+              seasonCounts: const {1: 3, 2: 2},
+              sourceEpisodeCount: 5,
+              aiReady: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('tmdb-season-ai')), findsOneWidget);
+      expect(find.textContaining('未配置 AI 服务'), findsOneWidget);
+    });
+
+    testWidgets('已配置时不显示「未配置」提示', (tester) async {
+      tester.view.physicalSize = const Size(1200, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: TmdbSeasonDialog(
+              tmdbSeasons: const [1, 2],
+              seasonCounts: const {1: 3, 2: 2},
+              sourceEpisodeCount: 5,
+              aiReady: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('tmdb-season-ai')), findsOneWidget);
+      expect(find.textContaining('未配置 AI 服务'), findsNothing);
+    });
+
+    testWidgets('选项顺序：自动 / 按集数 / 保持原始 / AI / 各季', (tester) async {
+      tester.view.physicalSize = const Size(1200, 1400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: TmdbSeasonDialog(
+              tmdbSeasons: const [1, 2],
+              seasonCounts: const {1: 3, 2: 2},
+              sourceEpisodeCount: 5,
+              aiReady: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final auto = tester
+          .getTopLeft(find.byKey(const ValueKey('tmdb-season-auto')))
+          .dy;
+      final slice = tester
+          .getTopLeft(find.byKey(const ValueKey('tmdb-season-auto-slice')))
+          .dy;
+      final keep = tester
+          .getTopLeft(find.byKey(const ValueKey('tmdb-season-keep-original')))
+          .dy;
+      final ai = tester
+          .getTopLeft(find.byKey(const ValueKey('tmdb-season-ai')))
+          .dy;
+      final season = tester
+          .getTopLeft(find.byKey(const ValueKey('tmdb-season-option-1')))
+          .dy;
+
+      expect(auto, lessThan(slice));
+      expect(slice, lessThan(keep));
+      expect(keep, lessThan(ai), reason: 'AI 项在「保持原始」之后');
+      expect(ai, lessThan(season), reason: 'AI 项在「各季」之前');
+    });
+
+    test('TmdbSeasonAiSettings 的 bindingModeOf 返回 null（= 清除绑定）', () {
+      // 这是**危险**的：调用方必须先分流，绝不能直接喂给 bindTmdbSeason。
+      expect(bindingModeOf(const TmdbSeasonAiSettings()), isNull);
+    });
+
+    test('TmdbSeasonAi 的 bindingModeOf 也返回 null（它不是绑定选择）', () {
+      expect(bindingModeOf(const TmdbSeasonAi()), isNull);
+    });
+  });
+
 }

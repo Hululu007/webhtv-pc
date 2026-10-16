@@ -226,6 +226,23 @@ class TmdbSeasonNumber extends TmdbSeasonChoice {
   final int seasonNumber;
 }
 
+/// 请求 AI 识别集季结构（`docs/phase6/design/04` §7.1）。
+///
+/// **不是绑定选择**：用户点它表示“跑一次 AI 分析”，分析结果还要经预览确认
+/// 才可能落盘。因此 [bindingModeOf] 对它返回 `null`（与 `TmdbSeasonAuto`
+/// 同值），调用方**必须**在 `bindingModeOf` 之前先分流，否则会被误解成
+/// 「清除手动绑定」。
+class TmdbSeasonAi extends TmdbSeasonChoice {
+  const TmdbSeasonAi();
+}
+
+/// 请求前往 AI 设置页（`docs/phase6/design/04` §7.1.1）。
+///
+/// 同上：**不是绑定选择**，调用方必须先分流。
+class TmdbSeasonAiSettings extends TmdbSeasonChoice {
+  const TmdbSeasonAiSettings();
+}
+
 /// `02` §8.4：语义化选择 → 绑定模式与季号。
 ///
 /// 返回 `(mode, seasonNumber)`；`TmdbSeasonAuto` 返回 `null`（表示清除绑定）。
@@ -245,6 +262,13 @@ class TmdbSeasonNumber extends TmdbSeasonChoice {
     mode: SeasonBindingMode.manualSeason,
     seasonNumber: seasonNumber,
   ),
+  // AI 两项**不是绑定选择**（`docs/phase6/design/04` §7.1.1）。
+  //
+  // 返回 `null` 与 `TmdbSeasonAuto` 同值，而 `null` 的含义是“清除手动绑定”。
+  // 所以调用方若把它们直接喂给 `bindTmdbSeason`，用户点「AI 识别」或
+  // 「去配置 AI」会把已有绑定静默清掉。分流必须在 `bindingModeOf` 之前。
+  TmdbSeasonAi() => null,
+  TmdbSeasonAiSettings() => null,
 };
 
 /// 证据不足，**不猜测**（`02` §2.3）。
