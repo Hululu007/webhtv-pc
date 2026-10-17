@@ -42,17 +42,42 @@ const Set<String> syncTypes = {'history', 'keep', 'backup'};
 /// `mode` 的合法取值（`design/02` §3.2：`0`=发送、`1`=接收、`2`=都做）。
 const Set<String> syncModes = {'0', '1', '2'};
 
-/// PC 侧理解的 `prefers` 白名单（`design/02` §3.6）。
+/// PC 侧理解的 `prefers` 白名单（`design/02` §3.6；Phase 7 `design/01` §5.1 扩展）。
 ///
-/// 只包含 PC **有对应语义**的键。`tmdb_model` 等 Android 专有键不在其中
-/// —— 同步过去只会是无效设置。
+/// 只包含 PC **有对应语义**的键。`viewing_record_sync_*` 等纯安卓运行时开关
+/// 不在其中——同步过去只会是无效设置。
+///
+/// **Phase 7 追加的三个键**（`tmdb_model` / `ai_title_extraction` /
+/// `ai_ad_detection`）属于「安卓有、PC 无」：它们留在白名单内但**不落库**，
+/// 目的是（a）推送时不丢（PC 能把收到的值原样回推）、
+/// （b）披露时能区分「PC 不支持」与「未授权同步」。
+/// 见 [pcUnsupportedSettingsKeys] 与 [SyncSettings.unsupportedKeys]。
 const List<String> pcSettingsWhitelist = [
   'tmdb_enabled',
   'tmdb_config',
+  'tmdb_model',
+  'ai_config',
+  'ai_title_extraction',
+  'ai_ad_detection',
 ];
 
 /// 含凭据的设置键：默认**不**同步，用户显式确认后才参与（P3、§19）。
-const Set<String> pcSensitiveSettingsKeys = {'tmdb_config'};
+///
+/// `ai_config` 内含 `apiKey`（`design/00` §3.3 实测），因此与 `tmdb_config`
+/// 同列。`tmdb_model` / `ai_title_extraction` / `ai_ad_detection` 是标量开关，
+/// 不含凭据。
+const Set<String> pcSensitiveSettingsKeys = {'tmdb_config', 'ai_config'};
+
+/// 「安卓有、PC 无」的设置键（Phase 7 `design/01` §5.2 注）。
+///
+/// 这些键**在白名单内**（推送时不丢）但**不落库**。与 [SyncSettings.skippedKeys]
+/// 的语义必须区分：`skippedKeys` = 白名单外或未授权，`unsupportedKeys` = 白名单内
+/// 但 PC 不支持。两个集合**互斥**（`design/04` S28）。
+const Set<String> pcUnsupportedSettingsKeys = {
+  'tmdb_model',
+  'ai_title_extraction',
+  'ai_ad_detection',
+};
 
 // ---------------------------------------------------------------------------
 // 哨兵值与单位归一化
@@ -621,20 +646,28 @@ class SyncOptions {
 
 /// 从安卓 `Backup.prefers` 中取出的 PC 设置子集。
 ///
-/// 白名单外的键（`tmdb_model`、`viewing_record_sync_*` 等）一律丢弃；
+/// 白名单外的键（`viewing_record_sync_*` 等）一律丢弃；
 /// 含凭据的键（[pcSensitiveSettingsKeys]）默认丢弃，除非显式
 /// [allowSensitive]（P3 + §19）。
+///
+/// **Phase 7 新增 [unsupportedKeys]**：白名单内但 PC 不支持落库的键
+/// （[pcUnsupportedSettingsKeys]）。它们**不丢**（推送时要原样回推），
+/// 但与 [skippedKeys] 分开放，以便 UI 区分「PC 不支持」与「未授权同步」。
 class SyncSettings {
   const SyncSettings({
     required this.values,
     required this.skippedKeys,
     required this.sensitiveIncluded,
+    this.unsupportedKeys = const [],
+    this.raw = const {},
   });
 
   const SyncSettings.empty()
     : values = const {},
       skippedKeys = const [],
-      sensitiveIncluded = false;
+      sensitiveIncluded = false,
+      unsupportedKeys = const [],
+      raw = const {};
 
   /// 白名单内的键值（键名保留安卓原名，便于回传）。
   final Map<String, Object?> values;
@@ -645,7 +678,20 @@ class SyncSettings {
   /// 本次是否包含含凭据的设置项。
   final bool sensitiveIncluded;
 
-  bool get isEmpty => values.isEmpty;
+  /// 白名单内但 PC **不支持落库**的键（`design/01` §5.2）。
+  ///
+  /// 与 [skippedKeys] **互斥**：一个键不可能同时出现在两个集合里。
+  final List<String> unsupportedKeys;
+
+  /// 白名单内键的**原值**（含 [unsupportedKeys] 的键），用于回推保真。
+  ///
+  /// 为什么不直接用 [values]：`ai_config` 落库时只取 PC 理解的 6 个字段，
+  /// 而安卓侧还有 5 套提示词 × 3 字段（`design/01` §5.3）。回推时必须把
+  /// 本地保存的 `raw` 先铺开、再覆盖 PC 理解的字段，否则会把安卓的提示词
+  /// 一起抹掉（`design/04` S26/S27）。
+  final Map<String, Object?> raw;
+
+  bool get isEmpty => values.isEmpty && unsupportedKeys.isEmpty;
 
   /// 从 `Backup` 顶层对象解析 `prefers`（`design/02` §3.6）。
   static SyncSettings fromBackup(
@@ -655,6 +701,8 @@ class SyncSettings {
     final prefers = asMap(asMap(backup)['prefers']);
     final values = <String, Object?>{};
     final skipped = <String>[];
+    final unsupported = <String>[];
+    final raw = <String, Object?>{};
     for (final entry in prefers.entries) {
       final key = entry.key;
       if (!pcSettingsWhitelist.contains(key)) {
@@ -665,11 +713,19 @@ class SyncSettings {
         skipped.add(key);
         continue;
       }
+      // 白名单内且已授权：无论 PC 是否支持落库，都要保留原值供回推。
+      raw[key] = entry.value;
+      if (pcUnsupportedSettingsKeys.contains(key)) {
+        unsupported.add(key);
+        continue;
+      }
       values[key] = entry.value;
     }
     return SyncSettings(
       values: values,
       skippedKeys: skipped,
+      unsupportedKeys: unsupported,
+      raw: raw,
       sensitiveIncluded: allowSensitive &&
           values.keys.any(pcSensitiveSettingsKeys.contains),
     );
@@ -678,12 +734,14 @@ class SyncSettings {
   Map<String, Object?> toJson() => {
     'values': values,
     'skipped': skippedKeys,
+    'unsupported': unsupportedKeys,
     'sensitiveIncluded': sensitiveIncluded,
   };
 
   /// 脱敏描述：只报键名与数量，**永不输出值**（可能含凭据，`design/02` §7）。
   String describe() =>
       'settings(keys=${values.keys.join(',')} '
+      'unsupported=${unsupportedKeys.join(',')} '
       'sensitive=$sensitiveIncluded skipped=${skippedKeys.length})';
 
   @override
@@ -1020,3 +1078,122 @@ String _encodeQuery(Map<String, String> query) => query.entries
           '${Uri.encodeQueryComponent(entry.value)}',
     )
     .join('&');
+
+// ---------------------------------------------------------------------------
+// 设置值的解包与回推保真（Phase 7 `design/01` §5.2/§5.3）
+// ---------------------------------------------------------------------------
+
+/// 解开安卓侧「值是 JSON 字符串」的设置项（`design/00` §3.1 契约 11）。
+///
+/// **为什么必须单独做**：安卓 `Setting.getTmdbConfig()` / `getAiConfig()`
+/// 把配置以 **JSON 字符串**存进 `prefers`，不是嵌套对象。直接当 Map 读会
+/// 得到 `null`，表现为「设置同步后什么都没变」——而且不会报任何错。
+///
+/// 已解开的 Map 原样返回（兼容第三方服务端直接给对象）；字符串解不出 JSON
+/// 或解出来不是对象时返回 `null`，由调用方保留本地值。
+Map<String, Object?>? decodeAndroidJsonSetting(Object? value) {
+  Object? decoded = value;
+  if (decoded is String) {
+    final text = decoded.trim();
+    if (text.isEmpty) return null;
+    try {
+      decoded = jsonDecode(text);
+    } on FormatException {
+      return null;
+    }
+  }
+  if (decoded is! Map) return null;
+  return decoded.map((key, item) => MapEntry('$key', item));
+}
+
+/// 把 PC 理解的 AI 字段覆盖到安卓原值上，生成**回推保真**的 `ai_config`（`design/01` §5.3）。
+///
+/// 安卓的 `ai_config` 除了 PC 理解的 6 个字段，还有 5 套提示词 × 3 字段
+/// （`recommendPrompt` 等）。若回推时只用 PC 的 6 个字段重新序列化，
+/// 安卓那 5 套提示词会被**静默抹掉**（`design/04` R9 的「静默数据损失」）。
+///
+/// 处置：以 [androidRaw] 为底（本地保存的安卓原值），只覆盖 PC 理解的字段。
+///
+/// [androidRaw] 为空（本地从未收到过安卓的 `ai_config`）时返回 `null`，
+/// 表示「没有可保真的底」——调用方应跳过推送而不是推一个会抹掉提示词的载荷。
+Map<String, Object?>? mergeAiConfigForPush({
+  required Object? androidRaw,
+  required AiConfigLike pcConfig,
+}) {
+  final base = decodeAndroidJsonSetting(androidRaw);
+  if (base == null) return null;
+  return {
+    ...base,
+    'enabled': pcConfig.enabled,
+    'protocol': pcConfig.protocol,
+    'endpoint': pcConfig.endpoint,
+    'apiKey': pcConfig.apiKey,
+    'model': pcConfig.model,
+    'customUserAgent': pcConfig.customUserAgent,
+  };
+}
+
+/// [mergeAiConfigForPush] 需要的 PC 侧 AI 配置视图。
+///
+/// 用最小接口而不是直接依赖 `AiConfig`：`android_sync.dart` 是纯协议层，
+/// 引 `ai_config.dart` 会让「协议 → 具体设置实现」产生反向依赖，
+/// 也会让本文件的单测被迫构造完整配置。
+class AiConfigLike {
+  const AiConfigLike({
+    required this.enabled,
+    required this.protocol,
+    required this.endpoint,
+    required this.apiKey,
+    required this.model,
+    required this.customUserAgent,
+  });
+
+  final bool enabled;
+  final String protocol;
+  final String endpoint;
+  final String apiKey;
+  final String model;
+  final String customUserAgent;
+}
+
+/// 把安卓 `ai_config` 映射成 PC 可落库的字段视图（`design/01` §5.3）。
+///
+/// 返回 `null` 表示值不是可解开的对象（保留本地配置）。
+/// **凭据为空时保留本地**：把能用的 API Key 清空比不同步更糟
+/// （与 Phase 5 的 `tmdb_config` 同策略）。
+AiConfigLike? mapAiConfigFromAndroid(
+  Object? value, {
+  required AiConfigLike local,
+}) {
+  final map = decodeAndroidJsonSetting(value);
+  if (map == null) return null;
+  String text(Object? raw) => raw is String ? raw.trim() : '';
+  final apiKey = text(map['apiKey']);
+  return AiConfigLike(
+    enabled: map['enabled'] == true,
+    // 协议别名：安卓侧可能用 `apiFormat` / `format`（`design/01` §5.3 表）。
+    protocol: _firstNonEmpty([
+      text(map['protocol']),
+      text(map['apiFormat']),
+      text(map['format']),
+      local.protocol,
+    ]),
+    endpoint: _firstNonEmpty([text(map['endpoint']), local.endpoint]),
+    apiKey: apiKey.isEmpty ? local.apiKey : apiKey,
+    model: _firstNonEmpty([text(map['model']), local.model]),
+    // 别名：`userAgent` / `ua`。
+    customUserAgent: _firstNonEmpty([
+      text(map['customUserAgent']),
+      text(map['userAgent']),
+      text(map['ua']),
+      local.customUserAgent,
+    ]),
+  );
+}
+
+String _firstNonEmpty(List<String> candidates) {
+  for (final candidate in candidates) {
+    if (candidate.isNotEmpty) return candidate;
+  }
+  return '';
+}

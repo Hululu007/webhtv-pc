@@ -2531,11 +2531,13 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     });
   }
 
-  /// 应用对端推来的设置（白名单子集，`design/02` §3.6）。
+  /// 应用对端推来的设置（白名单子集，`design/02` §3.6；Phase 7 `design/01` §5 扩展）。
   ///
-  /// 只有 `tmdb_enabled` 与 `tmdb_config` 在 PC 白名单内，其余键在解析阶段
-  /// 已被 `SyncSettings` 丢弃。凭据类字段若对端未提供，**保留本机原值**
-  /// ——把能用的凭据清空比不同步更糟。
+  /// Phase 7 后白名单含 AI 段四个键。其中三个（`tmdb_model` /
+  /// `ai_title_extraction` / `ai_ad_detection`）是「安卓有、PC 无」——
+  /// 它们不在这里落库，只保留在 `settings.raw` 里供回推（`design/01` §5.2）。
+  ///
+  /// 凭据类字段若对端未提供，**保留本机原值**——把能用的凭据清空比不同步更糟。
   @override
   Future<void> applySyncedSettings(SyncSettings settings) async {
     if (settings.isEmpty) return;
@@ -2544,20 +2546,13 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     final enabled = settings.values['tmdb_enabled'];
     if (enabled != null) next = next.copyWith(enabled: asFlag(enabled));
 
+    // `tmdb_config` 的值是 **JSON 字符串**（`design/00` §3.1 契约 11），
+    // 必须解字符串再映射，不能当对象读。
     final raw = settings.values['tmdb_config'];
     if (raw != null) {
-      Object? decoded = raw;
-      if (raw is String) {
-        try {
-          decoded = jsonDecode(raw);
-        } on FormatException {
-          decoded = null;
-        }
-      }
-      if (decoded is Map) {
-        final incoming = TmdbConfig.fromMap(
-          decoded.map((key, value) => MapEntry('$key', value)),
-        );
+      final decoded = decodeAndroidJsonSetting(raw);
+      if (decoded != null) {
+        final incoming = TmdbConfig.fromMap(decoded);
         next = incoming.copyWith(
           apiKey: incoming.apiKey.isEmpty ? next.apiKey : incoming.apiKey,
           accessToken: incoming.accessToken.isEmpty
@@ -2568,8 +2563,39 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     }
 
     await saveTmdbConfig(next);
+
+    // AI 段（Phase 7 新增）。同样先解 JSON 字符串再映射。
+    final aiRaw = settings.values['ai_config'];
+    if (aiRaw != null) {
+      final local = aiConfig;
+      final mapped = mapAiConfigFromAndroid(
+        aiRaw,
+        local: AiConfigLike(
+          enabled: local.enabled,
+          protocol: local.protocol,
+          endpoint: local.endpoint,
+          apiKey: local.apiKey,
+          model: local.model,
+          customUserAgent: local.customUserAgent,
+        ),
+      );
+      if (mapped != null) {
+        await saveAiConfig(
+          AiConfig(
+            enabled: mapped.enabled,
+            protocol: mapped.protocol,
+            endpoint: mapped.endpoint,
+            apiKey: mapped.apiKey,
+            model: mapped.model,
+            customUserAgent: mapped.customUserAgent,
+          ),
+        );
+      }
+    }
+
     log.info(
-      '已应用中端同步设置（TMDB）：keys=${settings.values.keys.join(',')} '
+      '已应用中端同步设置：keys=${settings.values.keys.join(',')} '
+      'unsupported=${settings.unsupportedKeys.join(',')} '
       'sensitive=${settings.sensitiveIncluded}',
       scope: 'sync',
     );
