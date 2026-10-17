@@ -259,11 +259,45 @@ GET /api/playback/sync?since=<cursor>&limit=<n>
 >
 > | 探测结果 | PC 行为 |
 > | --- | --- |
-> | `/api/playback/history` 存在（200） | 正常轮询（路径 A 完整可用） |
-> | 404/405 | 降级：只打 `/api/playback/current`，**UI 明示**"仅能同步正在播放的记录" |
-> | 两者都 404 | 路径 A 不可用，提示升级安卓端 |
+> | `/api/playback/history` 存在 | 正常轮询（路径 A 完整可用） |
+> | 不存在，但 `/current` 存在 | 降级：只打 `/api/playback/current`，**UI 明示**"仅能同步正在播放的记录" |
+> | 两者都不存在 | 路径 A 不可用，提示升级安卓端 |
 >
 > 降级探测结果必须**缓存**（60 s）并在 UI 常驻显示当前处于哪种模式（P5）。
+>
+> #### 🛑 第二个阻塞性发现（2026-10-17 真机实测）：端点不存在时返回 **200**，不是 404
+>
+> 上表初稿假设「不存在 → 404/405」。**实测推翻**：
+>
+> | 请求 | 真机响应 |
+> | --- | --- |
+> | `GET /api/playback/__nope__`（未匹配任何路由） | `200 OK` + `application/octet-stream` + `Content-Length: 0` |
+> | `GET /api/playback/current?siteKey=__nope__`（端点存在、未播放） | `404` + `application/json` + `{"code":404,...}` |
+>
+> **根因**：`Nano.serve()` 在没有任何 `Process` 匹配时落到 `getAssets()`
+> （`Nano.java:96`），而 NanoHTTPD 对缺失资产返回
+> `200 + octet-stream + 空体`（`Nano.java:128-130` 的 `catch` 分支只处理
+> `Asset.open()` 抛异常的情况，未覆盖此路径）。
+>
+> **后果（若只看状态码）**：旧版安卓上路径 A 会「探测成功」（200）
+> 但每次读取都静默拿到空结果——用户看到「同步成功但 0 条」，
+> 而实际是端点根本不存在。这正是 P5 禁止的「把不可用伪装成无数据」。
+>
+> **处置**：探测必须按 **状态码 + `Content-Type` + 体长度** 三者判定，
+> 见 `EndpointProbeResult` / `classifyEndpointProbe()`：
+>
+> | 状态码 | Content-Type | 判定 | 端点存在？ |
+> | --- | --- | --- | --- |
+> | 200 | JSON | `ok` | ✅ |
+> | 200 | 非 JSON（`octet-stream`/空体） | `missing` | ❌ |
+> | 400 | JSON | `badRequest`（参数不对但端点存在） | ✅ |
+> | 404 | JSON | `notFound`（未播放，合法形态） | ✅ |
+> | 405 / 501 | — | `methodNotAllowed` | ✅ |
+> | 5xx | — | `missing`（保守：假装可用会让下轮读取失败） | ❌ |
+>
+> 另一个必须遵守的推论：**只有降级端点**（`/current`）的 404 才允许
+> 静默成空结果。`/history` 对任一 `siteKey` 都返回 200+空数组、从不 404，
+> 因此它一旦缺失必须报 `realtimePullUnsupported`。
 
 **`/api/playback/history` 的响应形态**（安卓侧设计 §5.1）：
 
