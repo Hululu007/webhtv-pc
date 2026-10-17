@@ -297,7 +297,72 @@ GET /api/playback/sync?since=<cursor>&limit=<n>
 | `completed` | — | 用于判定；PC 侧重新按 `position>=duration-5000` 计算 |
 | `tmdbId`/`mediaType`/`seasonNumber`/`tmdbEpisodeNumber` | `raw` | 保留在 `raw`，不落库（PC 无对应列） |
 | `speed`/`speedOverride`/`state`/`progress` | `raw` | 保留 |
+| **`updatedAt`** | **`updatedAt`** | **⚠️ 见下方「阻塞性发现」——本表初稿漏了这一行** |
 
+> ### 🛑 阻塞性发现（2026-10-17 真机实测）：`/api/playback/history` **不返回记录更新时间**
+>
+> **本表初稿漏了 `updatedAt` 这一行**，而 `SyncHistoryItem.matchKey` 之外，
+> 合并算法完全依赖 `updatedAt`（`design/01` §4.2 的「旧不覆盖新」、§4.3 的
+> 删除墓碑比较、§4.2 第 5 步的游标推进）。
+>
+> #### 实测证据（设备 `192.168.50.3:5561`，2026-10-17）
+>
+> | 观测 | 结果 |
+> | --- | --- |
+> | 响应字段集 | 含 `timestamp`，**不含** `createTime` / `updatedAt` |
+> | 4 条记录的 `timestamp` 分布 | 全部落在 **30 ms 内**（1792220502225–1792220502253） |
+> | 同 4 条记录的库里真实 `createTime` | 跨度约 **16 小时**（1791959887462–1791975857695） |
+> | 间隔 6 s 再请求一次 | 每条 `timestamp` 都**前进了 6183–6196 ms**（≈ 真实墙钟间隔） |
+>
+> #### 源码级根因
+>
+> | 事实 | 证据 |
+> | --- | --- |
+> | `PlaybackRecord` **没有** `createTime` 字段 | `grep createTime PlaybackRecord.java` → 0 命中 |
+> | `PlaybackRecord.from()` **从不**读 `History.getCreateTime()` | `PlaybackRecord.java:110-140` |
+> | 构造器把 `timestamp` 设为**序列化时刻** | `PlaybackRecord.java:78` `this.timestamp = System.currentTimeMillis();` |
+> | `apiSafe()` 放行 `timestamp`（在 `PROTOCOL` 集内）但**不放行** `createTime` | `PlaybackFieldPolicy.java:9,25-30` |
+>
+> **结论**：`timestamp` 的语义是「这份 JSON 何时被生成」，**不是**「这条记录何时被更新」。
+>
+> #### 对 PC 的后果（若直接拿 `timestamp` 当 `updatedAt`）
+>
+> | 环节 | 后果 |
+> | --- | --- |
+> | `decideHistoryMerge` | `incoming.updatedAt > local.updatedAt` **恒成立** → 每轮全量 upsert，**永不幂等** |
+> | 游标推进（§4.2 第 5 步） | 游标每次跳到「现在」，增量拉取退化为全量 |
+> | 删除墓碑比较（§4.3） | `item.updatedAt <= deletedAt` 几乎不成立 → 已删记录可能被复活 |
+> | 反向验证 #6 | 会**假绿**——它断言的是「部分失败不推进游标」，与这个缺陷正交 |
+>
+> **路径 B 不受影响**：`PlaybackProgressInput` 有独立的 `updatedAt` 字段
+> （`PlaybackProgressInput.java:66`），且 `PlaybackProgressWriter` 用它做
+> `setCreateTime`（`:227`）与冲突裁决（`:200`）。缺口**只在路径 A 的读取端点**。
+>
+> #### 处置（PC 侧，两层）
+>
+> 1. **PC 必须按能力探测处理**（与 §4.1 的端点探测同一模式）：
+>    `updatedAt` 的取值优先级 = `updatedAt` → `createTime` → `timestamp`，
+>    并记录来源（`raw['_updatedAtSource']`）。只有 `timestamp` 可用时，
+>    置降级状态 `realtimePullTimestampUnreliable` 并在 UI 常驻披露
+>    「安卓端未提供记录更新时间，『旧不覆盖新』不可用」。
+> 2. **降级路径必须保住幂等**：不能只靠时间戳判等。追加**内容等价判定**
+>    （`positionMs`/`durationMs`/`completed` 全等 → skip），
+>    使「重复同步不产生重复记录」在无可靠时间戳时仍成立。
+>
+> #### 建议的安卓侧修复（待批准）
+>
+> 在 `PlaybackRecord` 新增 `updatedAt` 字段，由 `from()` 从
+> `history.getCreateTime()` 赋值，并加入 `apiSafe()`。
+>
+> | 项 | 说明 |
+> | --- | --- |
+> | 改动量 | 小（一个字段 + `from()` 一行 + `apiSafe()` 一行 + 单测） |
+> | 为什么用新字段而不是改 `timestamp` | `timestamp` 在 `PROTOCOL` 集内，事件/webhook 路径依赖它表示「事件发生时刻」；改它会影响既有语义 |
+> | 命名 | `updatedAt` 与路径 B 的 `PlaybackProgressInput.updatedAt` 对齐，两端同义 |
+> | 风险 | 低（纯追加字段，不影响既有断言） |
+>
+> ---
+>
 > **警告（必须处理）**：PC 的 `SyncHistoryItem.matchKey` 是
 > `(siteKey, vodId, flag, episodeId)`。`episodeId` 为空会让**同一剧的所有集**
 > 塌缩成同一个 `matchKey`，造成"看第 3 集把第 1 集的记录覆盖掉"。
