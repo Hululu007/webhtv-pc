@@ -32,6 +32,7 @@ import 'package:flutter/foundation.dart';
 import '../core/android_bridge.dart';
 import '../core/android_sync.dart';
 import '../core/app_error.dart';
+import '../core/playback_identity.dart';
 import '../core/protocol.dart';
 import '../core/realtime_sync.dart';
 import '../services/android_bridge_service.dart';
@@ -194,7 +195,11 @@ class SyncState extends ChangeNotifier {
   }) : _bridge = bridgeService ?? AndroidBridgeService(log: log),
        _client = client ?? SyncClient(log: log),
        _serverFactory = serverFactory ?? _defaultServerFactory(log),
-       _random = random ?? Random.secure();
+       _random = random ?? Random.secure() {
+    _playbackIdentity = PlaybackIdentityStore(
+      onChanged: () => unawaited(_persist()),
+    );
+  }
 
   final LogService log;
   final SyncStateHost host;
@@ -228,6 +233,12 @@ class SyncState extends ChangeNotifier {
   /// T7 会接入设置页写入，因此保留可变。
   // ignore: prefer_final_fields
   String _realtimePullToken = '';
+
+  /// 身份解析注册表（`design/01` §3.2.1）。
+  ///
+  /// 变更后立即落盘：安卓的 `adopt` 结论决定它把哪把键当正式身份，
+  /// 丢了注册表就会在下次解析时「新造一个身份」，两端键永久错开。
+  late PlaybackIdentityStore _playbackIdentity;
   bool _settingsSyncEnabled = false;
   String _deviceUuid = '';
   String _deviceName = '';
@@ -367,6 +378,12 @@ class SyncState extends ChangeNotifier {
           .toList()
         ..sort((a, b) => b.lastUsedMs.compareTo(a.lastUsedMs));
       _lastBridgeAddress = asNonEmptyString(section['lastBridge']) ?? '';
+      // 身份注册表（`design/01` §3.2.1）。读不出来就当空表开始：
+      // 空表最坏只会退化成「重新走一次 create」，不会错配身份。
+      _playbackIdentity = PlaybackIdentityStore.fromJson(
+        section['identity'],
+        onChanged: () => unawaited(_persist()),
+      );
       _loaded = true;
       if (section.isEmpty) {
         // 首次运行：把生成的 uuid 落盘，保证重启后安卓仍认同一台设备。
@@ -986,7 +1003,33 @@ class SyncState extends ChangeNotifier {
           )
         : null,
     pullToken: _realtimePullToken,
+    // 身份解析（`design/01` §3.2.1）。不注入会让安卓把 PC 标记成
+    // `unsupported`（跨设备身份匹配永久失效）。
+    playbackIdentity: _playbackIdentity,
+    playbackCounts: _realtimeCounts,
   );
+
+  /// `sync/status` 的本地计数（`design/01` §3.2.1）。
+  ///
+  /// 游标取**历史与墓碑的最大值**（与 [buildSyncPullBatch] 的 `nextSince`
+  /// 同口径）：它告诉客户端「本机最新变更到哪了」。
+  SyncPlaybackCounts _realtimeCounts() {
+    final database = host.syncDatabase;
+    var nextSince = 0;
+    final history = host.syncHistoryItems();
+    for (final item in history) {
+      if (item.updatedAt > nextSince) nextSince = item.updatedAt;
+    }
+    var tombstones = 0;
+    if (database != null) {
+      final index = database.historyDeletionIndex();
+      tombstones = index.length;
+      for (final deletedAt in index.values) {
+        if (deletedAt > nextSince) nextSince = deletedAt;
+      }
+    }
+    return (items: history.length, tombstones: tombstones, nextSince: nextSince);
+  }
 
   /// 删除墓碑 → 安卓形态的 `historyKey`（`design/01` §3.2.2）。
   ///
@@ -1084,42 +1127,71 @@ class SyncState extends ChangeNotifier {
 
   // ---------------------------------------------------------------- 持久化
 
+  /// 写入串行化：`_writeSettings` 是「写 .tmp → 删旧 → rename」，两个并发的
+  /// 写会互相踩：后一个的 `delete` 会把前一个刚 rename 出来的文件删掉，
+  /// 结果**文件直接消失**（不是内容旧）。身份注册表的 `onChanged` 是
+  /// fire-and-forget（不能阻塞 HTTP 响应），与开关变更天然会并发。
+  ///
+  /// **为什么用标志位而不是 `Future` 链**：链式 `then` 会把回调调度到
+  /// 「创建该 Future 的 zone」，而 widget 测试的 fake-async zone 与
+  /// `tester.runAsync` 的真实 zone 不同——一跳区就永久挂起（本仓库踩过多次）。
+  /// 标志位 + 循环保持每次调用在自己的 zone 里 await。
+  bool _persisting = false;
+  bool _persistPending = false;
+
   Future<void> _persist() async {
+    if (_persisting) {
+      // 已有写在跑：置位待重写，让最后的状态是被写完的。
+      _persistPending = true;
+      return;
+    }
+    _persisting = true;
     try {
-      final file = File(settingsPath);
-      await file.parent.create(recursive: true);
-      final root = <String, Object?>{};
-      if (await file.exists()) {
-        try {
-          final decoded = jsonDecode(await file.readAsString());
-          if (decoded is Map) {
-            root.addAll(decoded.map((key, value) => MapEntry('$key', value)));
-          }
-        } catch (_) {
-          // 旧文件损坏 → 直接覆盖，不把损坏内容带进新文件。
-        }
-      }
-      root['sync'] = {
-        'version': 1,
-        'deviceUuid': _deviceUuid,
-        'deviceName': _deviceName,
-        'serverEnabled': _serverEnabled,
-        'pushEnabled': _pushEnabled,
-        'settingsSyncEnabled': _settingsSyncEnabled,
-        'peers': _peers.map((peer) => peer.toJson()).toList(),
-        'devices': _deviceHistory.map((item) => item.toJson()).toList(),
-        'lastBridge': _lastBridgeAddress,
-      };
-      final temporary = File('$settingsPath.tmp');
-      await temporary.writeAsString(
-        const JsonEncoder.withIndent('  ').convert(root),
-        flush: true,
-      );
-      if (await file.exists()) await file.delete();
-      await temporary.rename(settingsPath);
+      do {
+        _persistPending = false;
+        await _writeSettings();
+      } while (_persistPending);
     } catch (error) {
       log.warning('保存同步设置失败：$error', scope: 'sync');
+    } finally {
+      _persisting = false;
     }
+  }
+
+  Future<void> _writeSettings() async {
+    final file = File(settingsPath);
+    await file.parent.create(recursive: true);
+    final root = <String, Object?>{};
+    if (await file.exists()) {
+      try {
+        final decoded = jsonDecode(await file.readAsString());
+        if (decoded is Map) {
+          root.addAll(decoded.map((key, value) => MapEntry('$key', value)));
+        }
+      } catch (_) {
+        // 旧文件损坏 → 直接覆盖，不把损坏内容带进新文件。
+      }
+    }
+    root['sync'] = {
+      'version': 1,
+      'deviceUuid': _deviceUuid,
+      'deviceName': _deviceName,
+      'serverEnabled': _serverEnabled,
+      'pushEnabled': _pushEnabled,
+      'settingsSyncEnabled': _settingsSyncEnabled,
+      'peers': _peers.map((peer) => peer.toJson()).toList(),
+      'devices': _deviceHistory.map((item) => item.toJson()).toList(),
+      'lastBridge': _lastBridgeAddress,
+      // 身份注册表（`design/01` §3.2.1）：`adopt` 的结论必须跨重启可用。
+      'identity': _playbackIdentity.toJson(),
+    };
+    final temporary = File('$settingsPath.tmp');
+    await temporary.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(root),
+      flush: true,
+    );
+    if (await file.exists()) await file.delete();
+    await temporary.rename(settingsPath);
   }
 
   /// 稳定 uuid：16 字节十六进制（重启后不变，`design/02` §8 Q5）。

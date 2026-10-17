@@ -25,6 +25,7 @@ import 'dart:typed_data' show BytesBuilder;
 import '../core/android_bridge.dart';
 import '../core/android_sync.dart';
 import '../core/app_error.dart';
+import '../core/playback_identity.dart';
 import '../core/protocol.dart';
 import '../core/realtime_sync.dart';
 import 'log_service.dart';
@@ -42,6 +43,8 @@ class SyncServerHost {
     this.onPullRequest,
     this.realtimePull,
     this.pullToken,
+    this.playbackIdentity,
+    this.playbackCounts,
   });
 
   /// PC 的稳定 uuid（首次启动生成并持久化，`design/02` §8 Q5）。
@@ -81,7 +84,21 @@ class SyncServerHost {
   ///
   /// 为空时只允许 `uuid` 白名单内的对端（局域网默认形态）。
   final String? pullToken;
+
+  /// 身份解析注册表（`design/01` §3.2.1）。
+  ///
+  /// 为 `null` 时 `/api/playback/identity/resolve` 回 **404**——安卓据此进入
+  /// `unsupported` 旧服务端兼容模式（跨设备身份匹配永久失效）。
+  final PlaybackIdentityStore? playbackIdentity;
+
+  /// `sync/status` 要报的本地计数（`design/01` §3.2.1）。
+  ///
+  /// 必须由状态层提供：只有它知道历史库与删除墓碑。
+  final SyncPlaybackCounts Function()? playbackCounts;
 }
+
+/// `sync/status` 的本机计数。
+typedef SyncPlaybackCounts = ({int items, int tombstones, int nextSince});
 
 /// 路径 B 的取数回调签名。
 ///
@@ -225,9 +242,16 @@ class SyncServer {
         // 路径 B（`design/01` §3.2.2）：安卓的「远端同步源」就是客户端定时拉
         // HTTP 端点，PC 暴露这个端点即可获得「安卓侧实时」。
         '/api/playback/sync' || '/playback/sync' => _handleRealtimePull(request),
+        // 身份解析与能力声明（`design/01` §3.2.1）。安卓在同步前必打
+        // `identity/resolve`，缺它会被**永久**标记为 `unsupported`。
+        '/api/playback/sync/status' ||
+        '/playback/sync/status' => _handlePlaybackStatus(request),
+        '/api/playback/identity/resolve' ||
+        '/playback/identity/resolve' => await _handleIdentityResolve(request),
         _ => const SyncResponse(
           404,
-          '未知路径（仅支持 /device、/action 与 /api/playback/sync）',
+          '未知路径（仅支持 /device、/action、/api/playback/sync、'
+          '/api/playback/sync/status 与 /api/playback/identity/resolve）',
         ),
       };
       await _write(request, response);
@@ -437,6 +461,153 @@ class SyncServer {
       scope: 'realtime',
     );
     return SyncResponse(200, jsonEncode(batch.toJson()), isJson: true);
+  }
+
+  /// `POST /api/playback/identity/resolve`（`design/01` §3.2.1）。
+  ///
+  /// 安卓同步前必打这个端点（`PlaybackIdentityResolver.resolve()`）。
+  /// 响应 404/405/501 会被它写成 **永久的** `unsupported`，所以未接线时
+  /// 我们宁可回 404 也不回 200 假成功。
+  ///
+  /// **不要求「向安卓推送」已开启**：本端点只返回身份键（不返回任何播放
+  /// 数据），拒绝它反而会制造上面那个永久后遗症。
+  Future<SyncResponse> _handleIdentityResolve(HttpRequest request) async {
+    if (request.method != 'POST') {
+      return const SyncResponse(405, '仅支持 POST');
+    }
+    final store = host.playbackIdentity;
+    if (store == null) {
+      return const SyncResponse(
+        404,
+        '未实现 /api/playback/identity/resolve',
+      );
+    }
+
+    // 先验授权再读体：未授权对端不该有机会让我们读 8 MiB。
+    final peerAddress = request.connectionInfo?.remoteAddress.address ?? '';
+    final auth = validateSyncPullAuth(
+      pushEnabled: host.isEnabled(),
+      configuredToken: host.pullToken,
+      providedToken: request.headers.value('x-webhtv-token'),
+      peerAuthorized: host.isPeerAuthorized(peerAddress),
+      disabledMessage: '同步服务未开启（请在 WebHTV PC 的设置中开启 Android 同步）',
+    );
+    if (!auth.allowed) {
+      log.warning(
+        '身份解析被拒绝 status=${auth.status} peer=${_maskAddress(peerAddress)} '
+        'reason=${auth.message}',
+        scope: 'realtime',
+      );
+      return SyncResponse(auth.status, auth.message ?? '请求被拒绝');
+    }
+
+    final bytes = await _readBody(request);
+    if (bytes == null) {
+      return SyncResponse(
+        413,
+        '请求体超过上限 ${syncMaxPayloadBytes ~/ (1024 * 1024)} MiB',
+      );
+    }
+    final decoded = _decode(utf8.decode(bytes, allowMalformed: true));
+    final body = asMap(decoded);
+    if (body.isEmpty) {
+      return _invalidIdentity('Invalid identity request');
+    }
+    final input = PlaybackIdentityInput.parse(
+      body,
+      headerInterfaceKey: request.headers.value('x-webhtv-config-key'),
+    );
+    if (input == null) {
+      return _invalidIdentity('identity key is invalid');
+    }
+    if (input.schema != playbackIdentitySchema || input.operation != 'resolve') {
+      return _invalidIdentity(
+        'Unsupported identity request（schema=${input.schema} '
+        'operation=${input.operation}）',
+        input: input,
+      );
+    }
+
+    final result = store.resolve(input);
+    log.info(
+      '身份解析 configType=${input.configType} '
+      'action=${result.body['action']} '
+      'matchedBy=${result.body['matchedBy']} '
+      'epoch=${result.body['identityEpoch']} peer=${_maskAddress(peerAddress)}',
+      scope: 'realtime',
+    );
+    return SyncResponse(
+      result.statusCode,
+      jsonEncode(result.body),
+      isJson: true,
+    );
+  }
+
+  /// `GET /api/playback/sync/status`（`design/01` §3.2.1）。
+  ///
+  /// 安卓本身**不调用**它（只按同步 URL 推导 `identity/resolve`），但
+  /// `design/04` 的 6c 门禁要用它断言能力声明，第三方客户端也靠它探测。
+  SyncResponse _handlePlaybackStatus(HttpRequest request) {
+    if (request.method != 'GET') {
+      return const SyncResponse(405, '仅支持 GET');
+    }
+    final peerAddress = request.connectionInfo?.remoteAddress.address ?? '';
+    final auth = validateSyncPullAuth(
+      pushEnabled: host.isEnabled(),
+      configuredToken: host.pullToken,
+      providedToken: request.headers.value('x-webhtv-token'),
+      peerAuthorized: host.isPeerAuthorized(peerAddress),
+      disabledMessage: '同步服务未开启（请在 WebHTV PC 的设置中开启 Android 同步）',
+    );
+    if (!auth.allowed) {
+      return SyncResponse(auth.status, auth.message ?? '请求被拒绝');
+    }
+
+    final counts =
+        host.playbackCounts?.call() ??
+        (items: 0, tombstones: 0, nextSince: 0);
+    final headerKey = (request.headers.value('x-webhtv-config-key') ?? '').trim();
+    final usePrefix = request.uri.path.startsWith('/api/');
+    final hostHeader = request.headers.value('host') ?? '';
+    final origin = hostHeader.isEmpty ? baseUrl : 'http://$hostHeader';
+    final body = buildPlaybackSyncStatus(
+      configKey: headerKey.isEmpty ? host.deviceUuid : headerKey,
+      // 如实声明：拉取关闭时 `playbackSync` 就是 false（不谎报能力）。
+      playbackSyncEnabled: host.realtimePull != null,
+      items: counts.items,
+      tombstones: counts.tombstones,
+      nextSince: counts.nextSince,
+      endpoint: '$origin${usePrefix ? '/api' : ''}/playback/sync',
+      identityEpoch: '${host.playbackIdentity?.registryFor('vod').epoch ?? 0}',
+    );
+    return SyncResponse(200, jsonEncode(body), isJson: true);
+  }
+
+  /// 非法身份请求的 400 响应（安卓据此得到 `action=invalid`）。
+  SyncResponse _invalidIdentity(String error, {PlaybackIdentityInput? input}) {
+    final placeholder =
+        input ??
+        const PlaybackIdentityInput(
+          configType: 'vod',
+          interfaceKey: '',
+          strictAddressKeys: [],
+          endpointMatchKeys: [],
+          hostMatchKeys: [],
+          legacyConfigKeys: [],
+          sourceDataState: 'unknown',
+        );
+    log.warning('身份解析请求非法：$error', scope: 'realtime');
+    return SyncResponse(
+      400,
+      jsonEncode(
+        playbackIdentityResponse(
+          'invalid',
+          placeholder,
+          extra: {'error': error},
+        ),
+      ),
+      isJson: true,
+    );
   }
 
   /// 从表单里取对端自报的 uuid（`device` JSON 优先，其次平铺字段）。

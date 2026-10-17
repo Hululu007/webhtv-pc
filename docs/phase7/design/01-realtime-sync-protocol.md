@@ -177,6 +177,43 @@ HTTP 端点**。PC 只要暴露一个兼容端点，安卓就会按它自己的�
 **参考实现**：`F:/Workspace/webtv4/webhtv/serverless/webhtv-remote-go/playback_identity.go`
 （完整）+ `serverless/playback-identity-fixtures/`（共享 fixture）。
 
+##### PC 侧实现要点（T5：`lib/core/playback_identity.dart`）
+
+代码归属：纯逻辑在 `lib/core/playback_identity.dart`，HTTP 在
+`lib/services/sync_server.dart`，注册表落盘在 `lib/state/sync_state.dart`。
+
+| 事项 | PC 的做法 | 为什么 |
+| --- | --- | --- |
+| 键算法 | **只校验、不复算**：字符集 `[a-z0-9._:-]`、长度 ≤128、每类 ≤32 项，规范化 = trim + 小写 | 键由安卓 `PlaybackConfigIdentity.material()` 算出；服务端复算只会算出不同的键 |
+| 幂等 | **结构性幂等**：同一请求重放时 `interfaceKey` 已登记 → 命中 `keep`，`canonicalInterfaceKey` 不变 | 安卓每次用新生成的随机 `X-WebHTV-Request-Id`，请求级缓存的收益为零 |
+| 原子性 | 服务端请求**串行处理**（`_queue`），注册表变更在单次事件循环内完成 | 两台设备同时首提同一地址时只会有一个 `create`，另一个必得 `adopt` |
+| 数据迁移 | `migrationRequired` / `migrationDone` / `resetSince` 恒 `false`，`nextSince` 恒为空串 | PC 只有**一份全局历史库**（按 `siteKey`/`vodId` 定位，与 `interfaceKey` 无关），没有分区可迁移；Go 是按 `(token, interfaceKey)` 分区存播放数据才需要迁移 |
+| 别名 | 每次成功变更都把所有键登记为别名，且**不覆盖**已指向其它身份的别名 | 同一地址在不同客户端版本里可能被判成不同层（旧版只算 `legacy` URL 哈希），跨层匹配只能靠别名 |
+| 鉴权 | 服务已开启 **且**（配置了 token 就校验 token，否则校验 `uuid`/IP 白名单） | 与 §3.2.2 同一套规则；本端点**不要求**「实时推送」开启——它不返回任何播放数据，拒绝它反而让安卓写死 `unsupported` |
+| `sync/status` | `capabilities.playbackSync` 反映拉取当前是否可用；`retentionDays` 报 `0` | 能力声明必须与实际行为一致；PC 历史库不做时间窗清理，报 `90` 是假话 |
+
+**与 Go 参考实现的两处有意差异**（按协议本意，而不是照抄代码）：
+
+1. **`matchedBy` / `matchedKeys` 返回真实值**。Go 的
+   `playbackIdentityResponse` 用 `if _, exists := response[key]; !exists` 回填，
+   而这两个键已在基线里，于是永远停在 `none` / 空数组——安卓的
+   `addAddressMatchAliases(result.matchedKeys)` 因此一直拿到空数组。
+2. **不缓存请求级响应**。幂等由注册表状态本身保证（见上表），
+   缓存只是多一份需要维护、且重启即失效的状态。
+
+**未接线时回 404**：`SyncServerHost.playbackIdentity == null` 时端点回 404。
+这是**故意**的——安卓把 404/405/501 解释为 `unsupported` 并进入旧服务端兼容
+模式；回 200 假成功会让它以为身份匹配可用，而实际永远是错的。
+
+**注册表落盘**：`settings.json` 的 `sync.identity`（见 §9.1）。
+不落盘的具体后果：安卓按 `adopt` 把自己的 `interfaceKey` 改成正式键，PC 却
+忘了这条身份，下次解析按同一批地址键**新造**一个——两端键永久错开，
+而且**不报错**。
+
+**安卓不调用 `sync/status`**：`PlaybackIdentityResolver` 只按同步 URL 推导
+`identity/resolve`，所以 `sync/status` 的实际读者是第三方客户端与
+`design/04` 的 6c 门禁；即便如此它也必须如实声明能力（P5）。
+
 #### 3.2.2 拉取端点
 
 ```text
@@ -674,6 +711,26 @@ Phase 5 已有三个开关（`serverEnabled` / `pushEnabled` / `settingsSyncEnab
       "lastPushAt": 0,
       "lastHeartbeatAt": 0,
       "consecutiveFailures": 0
+    },
+    "identity": {
+      "vod": {
+        "epoch": 0,
+        "updatedAt": 0,
+        "identities": {
+          "<canonicalInterfaceKey>": {
+            "canonicalInterfaceKey": "...",
+            "strictAddressKeys": [],
+            "endpointMatchKeys": [],
+            "hostMatchKeys": [],
+            "legacyConfigKeys": [],
+            "createdAt": 0,
+            "updatedAt": 0
+          }
+        },
+        "aliases": {
+          "<key>": { "canonicalInterfaceKey": "...", "kind": "strict" }
+        }
+      }
     }
   }
 }
@@ -681,6 +738,12 @@ Phase 5 已有三个开关（`serverEnabled` / `pushEnabled` / `settingsSyncEnab
 
 `version` 1 → 2：旧文件缺 `realtime` 段时按默认值补齐（**不写盘**，沿用
 `UiPreferencesStore` 的"缺席 = 默认"模式，避免污染既有文件）。
+
+`identity`（T5 新增）：身份解析注册表，按 `configType`（`vod`/`live`/`wall`）
+分开。**必须落盘**——安卓按 `adopt` 把自己的 `interfaceKey` 换成正式键，
+PC 丢了注册表就会在下次解析时新造一个身份，两端键永久错开且**不报错**。
+读不出/损坏时退化为空表（最坏是重新走一次 `create`，不会错配）。
+别名指向不存在的身份时**丢弃**（手改文件不会把后续解析引到空身份上）。
 
 ### 9.2 数据库
 

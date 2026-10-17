@@ -1404,19 +1404,25 @@ class SyncPullAuthCheck {
 /// 3. 未配置 token 时：只允许 `uuid` 白名单内的对端（复用 Phase 5
 ///    `isPeerAuthorized`）。
 ///
-/// **为什么 token 与白名单是「或」而不是「与」**：token 是给
+/// - **为什么 token 与白名单是「或」而不是「与」**：token 是给
 /// 「PC 与安卓不在同一网段 / 用户想显式带凭据」的场景；白名单是局域网
 /// 默认形态。两者都要求会让默认配置无法工作。
+///
+/// [disabledMessage] 用于区分端点：路径 B 拉数据时叫「实时推送未开启」，
+/// 而身份解析/能力声明不返回播放数据，文案必须不同（否则用户会看到
+/// 「实时推送未开启」却想不通为何已经开了）。
 SyncPullAuthCheck validateSyncPullAuth({
   required bool pushEnabled,
   required String? configuredToken,
   required String? providedToken,
   required bool peerAuthorized,
+  String? disabledMessage,
 }) {
   if (!pushEnabled) {
-    return const SyncPullAuthCheck(
+    return SyncPullAuthCheck(
       allowed: false,
-      message: '实时推送未开启（请在 WebHTV PC 的「实时同步」中开启）',
+      message:
+          disabledMessage ?? '实时推送未开启（请在 WebHTV PC 的「实时同步」中开启）',
     );
   }
   final expected = (configuredToken ?? '').trim();

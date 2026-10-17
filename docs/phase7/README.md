@@ -1,6 +1,6 @@
 # Phase 7 计划（安卓实时同步 + 保活心跳 + 续播修复）
 
-- 状态：**实施中**（T1–T3、T15–T17 已完成；T4–T14 待做）
+- 状态：**实施中**（T1–T5、T9、T15–T17 已完成；T6–T8、T10–T14 待做）
 - 日期：2026-10-17
 - 对应设计文档章节：本目录 `design/00`–`design/04`、`docs/webhtv-pc-design.md` §29（Phase 7）
 - 上游：`docs/phase5/README.md`（Phase 5：T4 站点桥接 + 历史/设置同步，已完成）、
@@ -18,7 +18,9 @@
 | T16 | `_isGenuineEnd` 接入连播闸门 | ✅ 完成 | `1175ba0` |
 | T17 | 失败回滚 `_request` + `clearCompleted()` + 三出口 | ✅ 完成 | `1175ba0` |
 | T9 | 设置白名单扩展到 AI 段 + `unsupportedKeys` + `raw` 保真 | ✅ 完成 | `68e1c79` |
-| T4–T8 | 读取客户端 / 拉取端点 / 实时引擎 / 状态层 / UI | ⏳ 待做 | — |
+| T4 | 安卓读取客户端 + 降级链（`/history` → `/current`） | ✅ 完成 | `70e2cb4` |
+| T5 | PC 拉取端点 + 身份解析 + 能力声明 | ✅ 完成 | `1063697` + 本提交 |
+| T6–T8 | 实时引擎 / 状态层开关矩阵 / UI | ⏳ 待做 | — |
 | T10–T14 | fixture / 反向验证脚本 / 符号门禁 / 一键验收 / L3 集成 | ⏳ 待做 | — |
 | T19 | 安卓侧契约补齐（A + C） | ✅ 已交付 | 安卓 `e55f19276fb0` |
 
@@ -31,6 +33,10 @@
 | `test/phase7_resume_gate_test.dart` | L1 | R1–R6 |
 | `test/phase7_player_advance_test.dart` | L2 | R7–R15 |
 | `test/phase7_settings_mapping_test.dart` | L2 | S23–S29 |
+| `test/phase7_android_read_client_test.dart` | L2 | T4：路径 A 读取 + 降级 |
+| `test/phase7_pull_endpoint_test.dart` | L2 | T5：S17–S20 + 6（游标/limit/hasMore） |
+| `test/phase7_identity_resolve_test.dart` | L2 | T5：6b/6c（四态 + 幂等 + 能力声明） |
+| `test/phase7_identity_persistence_test.dart` | L2 | T5：注册表跨重启存活 |
 | `integration_test/phase7_resume_flow_test.dart` | L3 | 真实窗口续播 + 闸门 |
 
 已实测的反向验证：`design/04` §3.2 的 **8 项全部完成**——
@@ -38,6 +44,12 @@
 `#4` 三态误归类、`#5` 退避恒定、`#6` 游标过早推进、
 `#7` `ai_config` 当对象读、`#8` 凭据项默认参与。
 （`#1`–`#6`、`#8` 见 `dd0a45e`/`1175ba0`，`#7` 见 `68e1c79`。）
+
+T5 另做两项现场反向验证（本次提交前实测，均「破坏即转红、还原即转绿」）：
+
+- **注册表不登记键别名** → 「同一把键从不同层提交也能命中」用例落到 `create`（红）；
+- **`resolve` 成功变更后不落盘**（去掉 `onChanged`）→ 「`adopt` 结论跨重启存活」
+  用例等不到 `settings.json` 的 `sync.identity`（红）。
 
 ---
 
