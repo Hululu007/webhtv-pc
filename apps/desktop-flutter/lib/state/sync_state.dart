@@ -36,7 +36,9 @@ import '../core/playback_identity.dart';
 import '../core/protocol.dart';
 import '../core/realtime_sync.dart';
 import '../services/android_bridge_service.dart';
+import '../services/android_read_client.dart';
 import '../services/log_service.dart';
+import '../services/realtime_sync_engine.dart';
 import '../services/storage.dart';
 import '../services/sync_client.dart';
 import '../services/sync_server.dart';
@@ -73,6 +75,21 @@ abstract class SyncStateHost {
 
   /// 把白名单内的设置落到本地设置文件（调用方已确认 `settings` 开启）。
   Future<void> applySyncedSettings(SyncSettings settings);
+
+  /// 本轮实时轮询要请求的 `siteKey`（`design/01` §6.1 的 `pollAllSites`）。
+  ///
+  /// [all] = true 返回全部站点；否则返回**最近活跃的** [limit] 个
+  /// （由 `selectPollSites` 按「最近播放优先」取舍）。
+  ///
+  /// 为什么需要宿主提供：只有它知道当前配置里有哪些站点，以及本机
+  /// 最近播过哪些站——后者才是「可能产生新记录」的真实候选集。
+  List<String> syncSiteKeys({required bool all, int limit = 20});
+
+  /// 实时同步已把新记录落库，请刷新内存视图。
+  ///
+  /// 不刷新的后果：历史页/详情页会一直显示旧数据，直到用户手动刷新或重启
+  /// ——同步“成功”了但哪里都看不到，用户会以为没生效。
+  void notifySyncedDataChanged();
 }
 
 /// 一条设备接入历史（用户反馈 2026-10-09：设备接入需要历史记录方便再次使用）。
@@ -191,10 +208,14 @@ class SyncState extends ChangeNotifier {
     AndroidBridgeService? bridgeService,
     SyncClient? client,
     SyncServer Function(SyncServerHost host)? serverFactory,
+    AndroidReadClient? readClient,
+    RealtimeScheduler? realtimeScheduler,
     Random? random,
   }) : _bridge = bridgeService ?? AndroidBridgeService(log: log),
        _client = client ?? SyncClient(log: log),
        _serverFactory = serverFactory ?? _defaultServerFactory(log),
+       _readClient = readClient ?? AndroidReadClient(log: log),
+       _realtimeScheduler = realtimeScheduler ?? realtimeRealScheduler(),
        _random = random ?? Random.secure() {
     _playbackIdentity = PlaybackIdentityStore(
       onChanged: () => unawaited(_persist()),
@@ -208,6 +229,10 @@ class SyncState extends ChangeNotifier {
   final String settingsPath;
   final AndroidBridgeService _bridge;
   final SyncClient _client;
+  final AndroidReadClient _readClient;
+
+  /// 定时器工厂（测试注入手动调度器；生产用真实 `Timer`）。
+  final RealtimeScheduler _realtimeScheduler;
   final SyncServer Function(SyncServerHost host) _serverFactory;
   final Random _random;
 
@@ -228,10 +253,7 @@ class SyncState extends ChangeNotifier {
   /// 路径 B 的可选 token（`design/01` §3.2.2）。
   ///
   /// 为空时只允许 uuid 白名单内的对端（局域网默认形态）。
-  /// 持久化键为 `sync.realtime.pullToken`（T7 接入 UI）。
-  ///
-  /// T7 会接入设置页写入，因此保留可变。
-  // ignore: prefer_final_fields
+  /// 持久化键为 `sync.realtime.pullToken`。
   String _realtimePullToken = '';
 
   /// 身份解析注册表（`design/01` §3.2.1）。
@@ -252,6 +274,22 @@ class SyncState extends ChangeNotifier {
 
   /// 设备历史上限：防异常配置把设置文件撞大。
   static const int maxDeviceHistory = 20;
+
+  // ------------------------------------------------------- 实时同步（T7）
+
+  /// 实时同步开关矩阵与周期（`design/01` §6.1）。全部默认关闭。
+  RealtimeSyncSwitches _realtime = const RealtimeSyncSwitches();
+
+  /// 路径 A 的拉取游标（毫秒；`0` = 从头）。
+  ///
+  /// 与路径 B 的游标**无关**：路径 B 的游标由安卓侧保存（`design/01` §3.3）。
+  int _realtimePullCursorMs = 0;
+
+  /// 读取能力探测缓存（`design/01` §4.1：缓存 60 s）。
+  final RealtimeCapabilityCache _realtimeCapability =
+      RealtimeCapabilityCache();
+
+  RealtimeSyncEngine? _realtimeEngine;
 
   // ------------------------------------------------------------ 运行期状态
 
@@ -378,6 +416,24 @@ class SyncState extends ChangeNotifier {
           .toList()
         ..sort((a, b) => b.lastUsedMs.compareTo(a.lastUsedMs));
       _lastBridgeAddress = asNonEmptyString(section['lastBridge']) ?? '';
+      // 实时同步开关与游标（`design/01` §6.1、§9.1）。
+      // 旧文件缺 `realtime` 段 → 全部默认关闭（“缺席 = 默认”，不写盘）。
+      final realtime = asMap(section['realtime']);
+      _realtime = RealtimeSyncSwitches(
+        enabled: asFlag(realtime['enabled']),
+        pullEnabled: asFlag(realtime['pullEnabled']),
+        pushEnabled: asFlag(realtime['pushEnabled']),
+        settingsEnabled: asFlag(realtime['settingsEnabled']),
+        intervalSeconds:
+            asInt(realtime['intervalSeconds']) ??
+            realtimeDefaultIntervalSeconds,
+        heartbeatSeconds:
+            asInt(realtime['heartbeatSeconds']) ??
+            keepAliveDefaultHeartbeatSeconds,
+        pollAllSites: asFlag(realtime['pollAllSites']),
+      ).normalized();
+      _realtimePullCursorMs = asInt(realtime['pullCursorMs']) ?? 0;
+      _realtimePullToken = asNonEmptyString(realtime['pullToken']) ?? '';
       // 身份注册表（`design/01` §3.2.1）。读不出来就当空表开始：
       // 空表最坏只会退化成「重新走一次 create」，不会错配身份。
       _playbackIdentity = PlaybackIdentityStore.fromJson(
@@ -393,10 +449,15 @@ class SyncState extends ChangeNotifier {
         '同步设置已读取：server=${_serverEnabled ? 'on' : 'off'} '
         'push=${_pushEnabled ? 'on' : 'off'} '
         'settings=${_settingsSyncEnabled ? 'on' : 'off'} '
+        'realtime=$_realtime '
+        'pullCursor=$_realtimePullCursorMs '
         'peers=${_peers.length} devices=${_deviceHistory.length} '
         'lastBridge=${redactUrl(_lastBridgeAddress)}',
         scope: 'sync',
       );
+      // 用户上次已显式开启过实时同步 → 恢复定时器（与 `serverEnabled` 不同：
+      // 路径 A 是**入站拉取**，不监听任何端口，恢复它不扩大攻击面）。
+      if (_realtime.enabled) _syncRealtimeEngine();
     } catch (error) {
       _loaded = true;
       log.warning('读取同步设置失败，使用默认（全部关闭）：$error', scope: 'sync');
@@ -480,6 +541,241 @@ class SyncState extends ChangeNotifier {
     );
     await _persist();
     notifyListeners();
+  }
+
+  // ------------------------------------------------------------- 实时同步
+
+  /// 实时同步开关矩阵（`design/01` §6.1）。
+  RealtimeSyncSwitches get realtime => _realtime;
+
+  /// 引擎状态快照（未启动时为 `null`，UI 据此展示「未开启」）。
+  RealtimeEngineSnapshot? get realtimeSnapshot => _realtimeEngine?.snapshot();
+
+  /// 路径 A 的拉取游标（毫秒）。
+  int get realtimePullCursorMs => _realtimePullCursorMs;
+
+  /// 实时同步当前指向的安卓基址（优先最近接入的线路，其次已授权对端）。
+  String? get realtimeDeviceBase {
+    if (_lastBridgeAddress.isNotEmpty) return _lastBridgeAddress;
+    for (final peer in _peers) {
+      if (peer.address.isNotEmpty) return peer.address;
+    }
+    return null;
+  }
+
+  /// 开关实时同步总开关。
+  ///
+  /// 关闭时**保留**子开关值与游标（`design/01` §6.2 规则 3：下次开启沿用）。
+  Future<bool> setRealtimeEnabled(bool value) =>
+      _applyRealtime(_realtime.copyWith(enabled: value));
+
+  /// 开关实时拉取（路径 A）。
+  Future<bool> setRealtimePull(bool value) =>
+      _applyRealtime(_realtime.copyWith(pullEnabled: value));
+
+  /// 开关实时推送（路径 B：把 PC 的拉取端点暴露给安卓）。
+  Future<bool> setRealtimePush(bool value) =>
+      _applyRealtime(_realtime.copyWith(pushEnabled: value));
+
+  /// 开关设置实时同步（含凭据项，必须已开启 Phase 5 的设置同步）。
+  Future<bool> setRealtimeSettings(bool value) =>
+      _applyRealtime(_realtime.copyWith(settingsEnabled: value));
+
+  /// 设置轮询周期（非法值吸附到最近合法档位并在 UI 回显）。
+  Future<bool> setRealtimeIntervalSeconds(int seconds) =>
+      _applyRealtime(_realtime.copyWith(intervalSeconds: seconds));
+
+  /// 设置心跳周期（同上，且不得大于轮询周期）。
+  Future<bool> setRealtimeHeartbeatSeconds(int seconds) =>
+      _applyRealtime(_realtime.copyWith(heartbeatSeconds: seconds));
+
+  /// 是否轮询全部站点（否则只轮询最近活跃的 N 个）。
+  Future<bool> setRealtimePollAllSites(bool value) =>
+      _applyRealtime(_realtime.copyWith(pollAllSites: value));
+
+  /// 设置路径 B 的可选 token（空串 = 只靠 uuid 白名单）。
+  Future<void> setRealtimePullToken(String token) async {
+    _realtimePullToken = token.trim();
+    _notice = _realtimePullToken.isEmpty
+        ? '已清除 pull token（仅接受已授权设备）'
+        : '已设置 pull token（安卓远端同步源需填同一个）';
+    log.info(
+      'pull token：${_realtimePullToken.isEmpty ? '已清除' : '已设置'}',
+      scope: 'realtime',
+    );
+    // 服务端 host 里的 token 是构造时快照的：必须重建才能生效。
+    await _rebuildServerForTokenChange();
+    await _persist();
+    notifyListeners();
+  }
+
+  /// 应用一组开关变更（联动规则 → 持久化 → 同步引擎）。
+  ///
+  /// 返回 `false` 表示被联动规则**拒绝**（开关值不变，`lastError` 已置位）。
+  Future<bool> _applyRealtime(RealtimeSyncSwitches desired) async {
+    final decision = applyRealtimeSwitchRules(
+      desired: desired,
+      serverEnabled: _serverEnabled || serverRunning,
+      settingsSyncEnabled: _settingsSyncEnabled,
+    );
+    if (decision.rejected) {
+      _lastError = decision.error;
+      _notice = decision.error?.message;
+      log.warning(
+        '实时同步开关被拒绝：${decision.error?.message}',
+        scope: 'realtime',
+      );
+      notifyListeners();
+      return false;
+    }
+
+    _lastError = null;
+    _realtime = decision.switches;
+    log.info('实时同步开关：$_realtime', scope: 'realtime');
+
+    // 规则 1：路径 B 需要服务端在听，否则安卓拉不到。
+    if (decision.autoEnabledServer) {
+      final started = await setServerEnabled(true);
+      if (!started) {
+        // 服务端起不来 → 推送方向不直说已开启，避免给用户假预期。
+        _realtime = _realtime.copyWith(pushEnabled: false);
+        _notice = '「实时推送」需要局域网同步服务，但服务启动失败，已关闭该方向';
+        await _persist();
+        _syncRealtimeEngine();
+        notifyListeners();
+        return false;
+      }
+      _notice = '已自动开启局域网同步服务（「实时推送」需要它）';
+    }
+
+    await _persist();
+    _syncRealtimeEngine();
+    notifyListeners();
+    return true;
+  }
+
+  /// 手动「立即重连」（`design/02` §5.2：失败上限后只能手动恢复）。
+  Future<void> retryRealtimeNow() async {
+    final engine = _realtimeEngine;
+    if (engine == null) {
+      _syncRealtimeEngine();
+      await _realtimeEngine?.retryNow();
+    } else {
+      await engine.retryNow();
+    }
+    await _persist();
+    notifyListeners();
+  }
+
+  /// 重置拉取游标并立即重跑一轮（游标错位 / 安卓重装后的恢复手段）。
+  Future<void> resetRealtimeCursor() async {
+    final engine = _realtimeEngine;
+    if (engine == null) return;
+    await engine.resetCursorAndPoll();
+    _realtimePullCursorMs = engine.cursor;
+    await _persist();
+    notifyListeners();
+  }
+
+  /// 按当前开关与设备可用性启动/停止引擎，并把变更交给运行中的引擎。
+  ///
+  /// **不在这里做安全判定**：能不能跑完全由 [RealtimeSyncSwitches] 决定
+  /// （总开关 + 方向），避免两处各有一套“什么时候该跑”的逻辑。
+  void _syncRealtimeEngine() {
+    final shouldRun =
+        _realtime.enabled && realtimeDeviceBase != null && _loaded;
+    final engine = _realtimeEngine;
+    if (!shouldRun) {
+      engine?.stop();
+      return;
+    }
+    if (engine == null) {
+      _realtimeEngine = RealtimeSyncEngine(
+        log: log,
+        host: _buildRealtimeHost(),
+        scheduler: _realtimeScheduler,
+        switches: _realtime,
+        pullCursorMs: _realtimePullCursorMs,
+      )..start();
+      return;
+    }
+    engine.applySwitches(_realtime);
+    if (!engine.isRunning) engine.start();
+  }
+
+  /// 引擎的 I/O 端口（`design/01` §4、`design/02` §3）。
+  RealtimeEngineHost _buildRealtimeHost() => RealtimeEngineHost(
+    deviceBase: () => realtimeDeviceBase,
+    siteKeys: ({required bool all}) =>
+        host.syncSiteKeys(all: all, limit: realtimeDefaultSiteLimit),
+    probeCapability: (base) async {
+      // 缓存 60 s（`design/01` §4.1）：默认 60 s 轮询下，等于每轮只探一次。
+      final cached = _realtimeCapability.read(DateTime.now());
+      if (cached != null) return cached;
+      final probe = await _readClient.probePullCapability(base);
+      _realtimeCapability.write(probe.capability, DateTime.now());
+      final disclosure = pullCapabilityError(probe.capability);
+      if (disclosure != null) {
+        log.warning('${probe.describe()} ${disclosure.logLine}', scope: 'realtime');
+      }
+      return probe.capability;
+    },
+    readSite:
+        ({
+          required String deviceBase,
+          required String siteKey,
+          required RealtimePullCapability capability,
+          required Map<String, SyncHistoryItem> localByMatchKey,
+        }) async {
+          final result = await _readClient.readHistory(
+            deviceBase: deviceBase,
+            siteKey: siteKey,
+            capability: capability,
+            localByMatchKey: localByMatchKey,
+          );
+          return RealtimeSiteReadResult(
+            items: result.items,
+            failures: result.failures.length,
+            skippedAsUnchanged: result.skippedAsUnchanged,
+            endpoint: result.endpoint,
+            // 降级端点返回空 = 「当前没在放」的合法形态（不是失败）。
+            notFound:
+                result.endpoint == RealtimePullCapability.currentOnly &&
+                result.items.isEmpty &&
+                result.failures.isEmpty,
+          );
+        },
+    mergeHistory: (items) async {
+      final stats = _mergeHistory(
+        SyncHistoryParseResult(items: items, failures: const []),
+      );
+      if (stats.applied > 0) {
+        // 落库后要把内存视图刷新：否则历史页要等用户手动刷新才看得到。
+        host.notifySyncedDataChanged();
+      }
+      _persistRealtimeCursor();
+      return stats;
+    },
+    heartbeat: (base) => _readClient.heartbeat(base),
+    localHistoryByMatchKey: () =>
+        host.syncDatabase?.historySyncIndex() ?? const {},
+  );
+
+  /// 把引擎的游标回写本地并落盘（节流：只在变化时写）。
+  void _persistRealtimeCursor() {
+    final engine = _realtimeEngine;
+    if (engine == null) return;
+    if (engine.cursor == _realtimePullCursorMs) return;
+    _realtimePullCursorMs = engine.cursor;
+    unawaited(_persist());
+  }
+
+  /// token / 身份注册表变化后重建服务端：`SyncServerHost` 是构造时快照的。
+  Future<void> _rebuildServerForTokenChange() async {
+    if (_server == null) return;
+    await _server?.stop();
+    _server = null;
+    if (_serverEnabled) await _startServer();
   }
 
   // ------------------------------------------------------------- 对端白名单
@@ -569,7 +865,24 @@ class SyncState extends ChangeNotifier {
       'history=${_deviceHistory.length}',
       scope: 'bridge',
     );
+    // 设备变了 → 实时引擎的轮询目标跟着变（否则会一直打旧设备）。
+    _realignRealtimeDevice();
     if (persist) await _persist();
+  }
+
+  /// 设备基址变化后重新对齐引擎。
+  ///
+  /// `RealtimeEngineHost.deviceBase` 是回调，引擎会实时读到新值；但引擎
+  /// 若因为「之前没接入设备」而停着，就需要重新启动一次。另外能力缓存
+  /// 必须失效：换设备后旧设备的降级结论不适用（`design/01` §4.1）。
+  void _realignRealtimeDevice() {
+    _realtimeCapability.invalidate();
+    final engine = _realtimeEngine;
+    if (engine != null && engine.isRunning) {
+      // 正在跑：先停再起，让心跳马上用新地址，而不是等到下个周期。
+      engine.stop();
+    }
+    _syncRealtimeEngine();
   }
 
   /// 删除一条设备历史（用户在接入页手动清理）。
@@ -581,6 +894,7 @@ class SyncState extends ChangeNotifier {
     // 用户已经删掉的地址。
     if (!next.any((item) => item.address == _lastBridgeAddress)) {
       _lastBridgeAddress = next.isEmpty ? '' : next.first.address;
+      _realignRealtimeDevice();
     }
     await _persist();
     notifyListeners();
@@ -926,6 +1240,9 @@ class SyncState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _realtimeEngine?.stop();
+    _realtimeEngine = null;
+    _readClient.close();
     final server = _server;
     _server = null;
     if (server != null) {
@@ -991,10 +1308,11 @@ class SyncState extends ChangeNotifier {
     //
     // 游标由安卓侧保存，PC **不推进任何本地游标**。
     //
-    // 门禁：复用 Phase 5 的 `pushEnabled`（语义同为「允许数据离开 PC 去安卓」）。
-    // `design/01` §6.2 的 `realtime.pushEnabled` 子开关属 T7，
-    // 待 T7 落地后改为「`pushEnabled` 且 `realtime.pushEnabled`」。
-    realtimePull: _pushEnabled
+    // 门禁：`realtime.pushEnabled`（`design/01` §6.2/D6）。它已经隐含
+    // 「允许数据离开 PC」的意图（开启时还会自动拉起服务端），
+    // 因此不再叠 Phase 5 的 `pushEnabled`——否则用户明明开了实时推送，
+    // 却因为没开手动推送而拿到 403。
+    realtimePull: _realtime.pushEnabled
         ? ({required int since, required int limit}) => buildSyncPullBatch(
             history: host.syncHistoryItems(),
             deletions: _realtimeDeletions(),
@@ -1181,10 +1499,19 @@ class SyncState extends ChangeNotifier {
       'settingsSyncEnabled': _settingsSyncEnabled,
       'peers': _peers.map((peer) => peer.toJson()).toList(),
       'devices': _deviceHistory.map((item) => item.toJson()).toList(),
-      'lastBridge': _lastBridgeAddress,
-      // 身份注册表（`design/01` §3.2.1）：`adopt` 的结论必须跨重启可用。
-      'identity': _playbackIdentity.toJson(),
-    };
+        'lastBridge': _lastBridgeAddress,
+        // 身份注册表（`design/01` §3.2.1）：`adopt` 的结论必须跨重启可用。
+        'identity': _playbackIdentity.toJson(),
+        // 实时同步开关与游标（`design/01` §9.1）。
+        'realtime': {
+          ..._realtime.toJson(),
+          'pullCursorMs': _realtimePullCursorMs,
+          'pullToken': _realtimePullToken,
+          'lastPullAt': _realtimeEngine?.snapshot().lastPollAtMs ?? 0,
+          'lastHeartbeatAt':
+              _realtimeEngine?.snapshot().lastHeartbeatAtMs ?? 0,
+        },
+      };
     final temporary = File('$settingsPath.tmp');
     await temporary.writeAsString(
       const JsonEncoder.withIndent('  ').convert(root),

@@ -29,6 +29,7 @@ import '../core/playback.dart';
 import '../core/playback_diagnostics.dart';
 import '../core/protocol.dart';
 import '../core/proxy_policy.dart';
+import '../core/realtime_sync.dart';
 import '../core/site_group.dart';
 import '../core/tmdb_config.dart';
 import '../core/tmdb_identity.dart';
@@ -43,6 +44,7 @@ import '../services/epg_service.dart';
 import '../services/log_service.dart';
 import '../services/live_service.dart';
 import '../services/proxy_server.dart';
+import '../services/realtime_sync_engine.dart';
 import '../services/search_suggest_service.dart';
 import '../services/site_service.dart';
 import '../services/spider_process.dart';
@@ -138,6 +140,12 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     SyncClient? syncClient,
     SyncServer Function(SyncServerHost host)? syncServerFactory,
 
+    /// 测试注入的实时定时器工厂（`null` = 真实 `Timer`）。
+    ///
+    /// 与 `syncServerFactory` 同一模式：单测不能创建真实定时器，
+    /// 否则用例结束就残留（`design/04` G12）。
+    RealtimeScheduler? realtimeScheduler,
+
     /// 测试注入的站点 HTTP 客户端（widget/单测不可做真实 socket I/O）。
     /// 与 [liveService]/[epgService] 同一模式：只为可测性开一个口子。
     http.Client? httpClient,
@@ -178,6 +186,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       bridgeService: _injectedBridgeService,
       client: _injectedSyncClient,
       serverFactory: _injectedSyncServerFactory,
+      realtimeScheduler: realtimeScheduler,
     );
     // 把同步状态的变化**转发**到 AppState 自己的监听者。
     //
@@ -2599,6 +2608,44 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       'sensitive=${settings.sensitiveIncluded}',
       scope: 'sync',
     );
+  }
+
+  /// 实时同步已把新记录落库（`design/01` §4.2）：刷新内存历史视图。
+  ///
+  /// 历史页是每次 build 直接读 `recentHistory()` 的，因此这里只需要
+  /// 通知监听者重建；不通知的后果是「库里有了但页面上一直看不到」。
+  @override
+  void notifySyncedDataChanged() {
+    notifyListeners();
+  }
+
+  /// 本轮实时轮询要请求的 `siteKey`（`design/01` §6.1）。
+  ///
+  /// 取舍交给纯逻辑 `selectPollSites`（已有 L1 用例锁定）：
+  /// - `pollAllSites` → 返回当前配置的**全部**站点；
+  /// - 否则 → 「最近播过的站点」优先，不足时用配置里的站点补齐。
+  ///
+  /// **为什么不能只返回配置里的前 20 个**：历史记录只会在「最近看过」的
+  /// 站点上产生，轮询冷站点等于白发请求；而用户可能配了几百个站点。
+  @override
+  List<String> syncSiteKeys({required bool all, int limit = 20}) {
+    final known = [
+      for (final site in _config?.sites ?? const <Site>[]) site.key,
+    ];
+    final recentlyActive = <String>[];
+    for (final row in recentHistory(limit: 200)) {
+      if (!recentlyActive.contains(row.siteKey)) {
+        recentlyActive.add(row.siteKey);
+      }
+    }
+    final selected = selectPollSites(
+      known: known,
+      pollAllSites: all,
+      recentlyActive: recentlyActive,
+      limit: limit,
+    );
+    // `null` = 轮询全部（`pollAllSites` 的语义由 `selectPollSites` 表达）。
+    return selected ?? known;
   }
 
   List<PlaybackHistory> recentHistory({int limit = 100}) {

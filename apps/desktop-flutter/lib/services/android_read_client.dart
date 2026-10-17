@@ -39,6 +39,7 @@ import '../core/app_error.dart';
 import '../core/protocol.dart';
 import '../core/realtime_sync.dart';
 import 'log_service.dart';
+import 'realtime_sync_engine.dart';
 
 /// 一次「按站点读历史」的结果。
 class AndroidHistoryReadResult {
@@ -296,6 +297,162 @@ class AndroidReadClient {
     return decoded is Map ? decoded.map((k, v) => MapEntry('$k', v)) : null;
   }
 
+  /// 心跳探测（`design/02` §3.2、§4 的三步序列）。
+  ///
+  /// 与 [readManageSession] 的区别：后者只回答「能不能读到会话」，
+  /// 本方法要回答「为什么不能」——这三者（端口无人监听 / 进程被冻结 /
+  /// 网络不通）对用户是**三个完全不同的动作**（`design/02` §4）。
+  ///
+  /// 探测序列（每步 2 s，总超时 6 s）：
+  /// `S1 /manage/session` → `S2 /device` → `S3 TCP connect`。
+  /// 判定完全交给 [classifyProbeSteps]（纯逻辑，已由 K 套件锁定）。
+  ///
+  /// **为何要单独一步 TCP connect**：进程被冻结时内核仍会完成 TCP 握手
+  /// （监听队列在内核），只是用户态线程不调度、HTTP 响应出不来；
+  /// 网络不通时握手本身就失败。这是 PC 侧唯一能区分二者的手段。
+  Future<RealtimeHeartbeatProbe> heartbeat(
+    String deviceBase, {
+    Duration stepTimeout = const Duration(seconds: 2),
+  }) async {
+    final base = normalizeBase(deviceBase);
+    final steps = <RealtimeProbeStep>[];
+    Map<String, Object?> session = const <String, Object?>{};
+    int? statusCode;
+    var usedFallback = false;
+
+    // S1：/manage/session（成功即顺手 touch 保活）。
+    final manage = await _stepGet(base, '/manage/session', stepTimeout);
+    statusCode = manage.statusCode;
+    steps.add(manage.step);
+    if (manage.step == RealtimeProbeStep.manageOk) {
+      session = manage.session;
+    } else if (manage.step != RealtimeProbeStep.connectionRefused) {
+      // 端点缺失或超时 → S2。
+      // **拒绝不必继续**：内核已经明确告诉我们「端口无人监听」，
+      // 后两步只会多花 4 s 并得到同一个结论。
+      final device = await _stepGet(base, '/device', stepTimeout);
+      statusCode ??= device.statusCode;
+      steps.add(device.step);
+      usedFallback = device.step == RealtimeProbeStep.deviceOk;
+    }
+
+    // 已经能下结论的两种情况：可达、或被拒绝。
+    final early = classifyProbeSteps(steps);
+    if (early == RealtimePeerState.ok ||
+        early == RealtimePeerState.serviceStopped) {
+      return RealtimeHeartbeatProbe(
+        state: early,
+        statusCode: statusCode,
+        session: session,
+        usedDeviceFallback: usedFallback,
+        detail: hostPortOf(base),
+      );
+    }
+
+    // S3：TCP connect（区分「冻结」与「完全不通」）。
+    final tcp = await _probeTcp(base, stepTimeout);
+    steps.add(tcp);
+    return RealtimeHeartbeatProbe(
+      state: classifyProbeSteps(steps),
+      statusCode: statusCode,
+      session: session,
+      usedDeviceFallback: usedFallback,
+      detail: '${hostPortOf(base)} tcp=${tcp.name}',
+    );
+  }
+
+  /// 心跳里的单步 GET（不抛错，只归类）。
+  Future<({RealtimeProbeStep step, int? statusCode, Map<String, Object?> session})>
+  _stepGet(String base, String path, Duration stepTimeout) async {
+    final hostPort = hostPortOf(base);
+    try {
+      final response = await _client
+          .get(
+            Uri.parse('$base$path'),
+            headers: {'Host': hostPort, 'Accept': 'application/json'},
+          )
+          .timeout(stepTimeout);
+      final probe = classifyEndpointProbe(
+        statusCode: response.statusCode,
+        contentType: response.headers['content-type'],
+        bodyLength: response.bodyBytes.length,
+      );
+      if (!endpointExists(probe)) {
+        // 端点缺失（含「200 + octet-stream」）→ 继续下一步。
+        // 两种缺失（/manage 无、/device 无）在 [classifyProbeSteps] 里
+        // 同义都是「继续」，因此复用 `manageMissing`。
+        return (
+          step: RealtimeProbeStep.manageMissing,
+          statusCode: response.statusCode,
+          session: const <String, Object?> {},
+        );
+      }
+      Map<String, Object?> session = const <String, Object?>{};
+      if (path == '/manage/session') {
+        try {
+          final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+          if (decoded is Map) {
+            session = decoded.map((key, value) => MapEntry('$key', value));
+          }
+        } on Object {
+          // 会话 JSON 坏掉不影响「可达」结论（心跳的价值首先是可达性）。
+        }
+      }
+      return (
+        step: path == '/manage/session'
+            ? RealtimeProbeStep.manageOk
+            : RealtimeProbeStep.deviceOk,
+        statusCode: response.statusCode,
+        session: session,
+      );
+    } on TimeoutException {
+      return (
+        step: RealtimeProbeStep.timeout,
+        statusCode: null,
+        session: const <String, Object?> {},
+      );
+    } on SocketException catch (error) {
+      return (
+        step: _isConnectionRefused(error)
+            ? RealtimeProbeStep.connectionRefused
+            : RealtimeProbeStep.timeout,
+        statusCode: null,
+        session: const <String, Object?> {},
+      );
+    } on Object {
+      return (
+        step: RealtimeProbeStep.timeout,
+        statusCode: null,
+        session: const <String, Object?> {},
+      );
+    }
+  }
+
+  /// S3：TCP connect 探测。
+  Future<RealtimeProbeStep> _probeTcp(
+    String base,
+    Duration stepTimeout,
+  ) async {
+    final uri = Uri.tryParse(base);
+    final host = uri?.host;
+    if (host == null || host.isEmpty) return RealtimeProbeStep.timeout;
+    final port = uri?.port ?? 80;
+    Socket? socket;
+    try {
+      socket = await Socket.connect(host, port, timeout: stepTimeout);
+      // 握手成功但 HTTP 没响应 → 进程被冻结（内核代理了三次握手）。
+      return RealtimeProbeStep.tcpConnectedNoHttp;
+    } on SocketException catch (error) {
+      return _isConnectionRefused(error)
+          ? RealtimeProbeStep.connectionRefused
+          : RealtimeProbeStep.timeout;
+    } on Object {
+      return RealtimeProbeStep.timeout;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
   // ------------------------------------------------------------------ 内部
 
   /// 来源可靠度排序（数值越大越差）。
@@ -513,6 +670,25 @@ class AndroidReadClient {
       );
     }
   }
+}
+
+/// 「连接被拒」判定（`design/02` §4 三态的关键区分）。
+///
+/// 为何不能把 `SocketException` 一律当成「不通」：拒绝说明**端口无人监听**
+/// （用户该去开安卓管理页），而不可达说明**网络不通**（用户该查 WiFi）。
+/// 两者在 PC 侧只能靠 errno / 文案区分：
+///
+/// | 平台 | refused 的 errno |
+/// | --- | --- |
+/// | Windows | 10061（WSAECONNREFUSED） |
+/// | Linux | 111（ECONNREFUSED） |
+/// | macOS/iOS | 61（ECONNREFUSED） |
+bool _isConnectionRefused(SocketException error) {
+  final code = error.osError?.errorCode;
+  if (code == 10061 || code == 111 || code == 61) return true;
+  final message = '${error.message} ${error.osError?.message ?? ''}'
+      .toLowerCase();
+  return message.contains('refused') || message.contains('拒绝');
 }
 
 /// 一次 GET 的原始结果。

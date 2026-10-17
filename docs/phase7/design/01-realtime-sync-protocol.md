@@ -618,6 +618,17 @@ Phase 5 已有三个开关（`serverEnabled` / `pushEnabled` / `settingsSyncEnab
 | `realtime.settingsEnabled=true` 但 `settingsSyncEnabled=false` | **拒绝开启**并提示先开设置同步（避免绕过凭据确认） |
 | `realtime.enabled=false` | 定时器与心跳全部停止；`realtime.*` 子开关值**保留**（下次开启沿用） |
 
+**路径 B 的唯一门禁是 `realtime.pushEnabled`**（T7 落地后固定）：不再叠加
+Phase 5 的 `sync.pushEnabled`。原因：后者是「手动推送」的同意，而实时推送
+是另一件事；两者叠加的结果是「用户明明开了实时推送，安卓却拿到 403」
+——而 403 在 `design/01` §6.3 里是「立即停止」，用户会看到功能永久不工作。
+`realtime.pushEnabled` 开启时会自动拉起服务端（上表第一行），因此攻击面
+不因这个简化而变大（仍然默认关闭 + 仅白名单对端）。
+
+**加载时恢复**：`realtime.enabled=true` 时重启后**直接恢复定时器**（路径 A 是
+入站拉取，不监听端口）；但**不会**因为 `realtime.pushEnabled` 而自动拉起
+服务端——那要等用户再点一次开关（与 Phase 5 的 `serverEnabled` 同口径）。
+
 ### 6.3 失败退避
 
 | 失败类型 | 退避 |
