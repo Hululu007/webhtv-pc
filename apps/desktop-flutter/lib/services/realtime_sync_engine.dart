@@ -606,8 +606,13 @@ class RealtimeSyncEngine {
   ///
   /// **暂停态同样拒绝**：`design/02` §3.3 的暂停就是「不值得再发请求」，
   /// 绕过它（例如残留的定时器回调）只会把退避等成空转。
-  Future<RealtimePollResult?> pollNow() async {
-    if (!_switches.shouldPoll || _pollStopped || _pollPaused) return null;
+  /// [manual] 为 true 时跳过开关/暂停/停止判定——手动「拉取最近记录」
+  /// 是用户在实时同步关着（或方向已被 403 停止）时唯一能读安卓历史的
+  /// 通道（`design/01` §4.4：必须给用户留逃生口）。
+  Future<RealtimePollResult?> pollNow({bool manual = false}) async {
+    if (!manual && (!_switches.shouldPoll || _pollStopped || _pollPaused)) {
+      return null;
+    }
     final base = _deviceBase;
     if (base == null) return null;
 

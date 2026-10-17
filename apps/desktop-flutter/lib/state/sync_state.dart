@@ -291,6 +291,9 @@ class SyncState extends ChangeNotifier {
 
   RealtimeSyncEngine? _realtimeEngine;
 
+  /// 最近一次（实时或手动）拉取结果（UI 披露用）。
+  RealtimePollResult? _lastPollResult;
+
   // ------------------------------------------------------------ 运行期状态
 
   SyncServer? _server;
@@ -676,6 +679,123 @@ class SyncState extends ChangeNotifier {
     await _persist();
     notifyListeners();
   }
+
+  /// 手动「拉取最近记录」（`design/01` §4.4 的 [RealtimeManualPullKind.recentRecords]）。
+  ///
+  /// **不依赖服务端、不要求实时总开关**：它只读安卓的 HTTP 端点，
+  /// 是用户在实时同步关着、或拉取方向被 403 停止时的逃生口。
+  ///
+  /// 引擎没跑时临时建一个（不排定时器），跑完立即停。
+  Future<RealtimePollResult?> manualPullRecentRecords() async {
+    final base = realtimeDeviceBase;
+    final precheck = precheckManualPull(
+      kind: RealtimeManualPullKind.recentRecords,
+      realtimeEnabled: _realtime.enabled,
+      serverEnabled: _serverEnabled || serverRunning,
+      peerReachable: base != null,
+      peerAddress: base ?? '',
+    );
+    if (!precheck.allowed) {
+      _lastError = precheck.error;
+      _notice = precheck.error?.message ?? '尚未接入安卓设备';
+      notifyListeners();
+      return null;
+    }
+
+    _busy = true;
+    _lastError = null;
+    _notice = null;
+    notifyListeners();
+    final engine = _realtimeEngine;
+    final temporary = engine == null;
+    final runner = engine ??
+        RealtimeSyncEngine(
+          log: log,
+          host: _buildRealtimeHost(),
+          scheduler: _realtimeScheduler,
+          switches: _realtime,
+          pullCursorMs: _realtimePullCursorMs,
+        );
+    try {
+      final result = await runner.pollNow(manual: true);
+      _lastPollResult = result;
+      _realtimePullCursorMs = runner.cursor;
+      _notice = result == null
+          ? '没有可拉取的站点（请先导入安卓站源）'
+          : '手动拉取完成：${result.stats.describe()}'
+              '${result.degradedSites.isEmpty ? '' : '（${result.degradedSites.length} 个站点仅能取当前播放）'}';
+      if (result?.error != null) _lastError = result!.error;
+      return result;
+    } on AppError catch (error) {
+      _lastError = error;
+      return null;
+    } finally {
+      // 临时引擎必须立即释放：它身上的定时器一个都不能留（G12）。
+      if (temporary) runner.stop();
+      _busy = false;
+      await _persist();
+      notifyListeners();
+    }
+  }
+
+  /// 手动「请求安卓推送全量」（`Request Android push`）。
+  ///
+  /// 与 [manualPullRecentRecords] 的区别：这条是**让安卓主动推**，
+  /// 因此必须有本机服务端在听、且对端已授权（`design/01` §4.4）。
+  Future<SyncPushResult?> requestAndroidPushFull() async {
+    final base = realtimeDeviceBase;
+    final precheck = precheckManualPull(
+      kind: RealtimeManualPullKind.requestAndroidPush,
+      realtimeEnabled: _realtime.enabled,
+      serverEnabled: _serverEnabled || serverRunning,
+      peerReachable: base != null,
+      peerAddress: base ?? '',
+    );
+    if (!precheck.allowed) {
+      // S22：必须给 `syncDisabled` 而不是网络错误（用户要能看懂该怎么办）。
+      _lastError = precheck.error;
+      _notice = precheck.error?.message;
+      notifyListeners();
+      return null;
+    }
+    final peer = _peerForAddress(base!);
+    if (peer == null) {
+      _lastError = AppError(
+        AppErrorKind.syncPeerUnreachable,
+        '目标设备尚未授权，请先在「已授权对端」中授权',
+        detail: redactUrl(base),
+      );
+      _notice = _lastError!.message;
+      notifyListeners();
+      return null;
+    }
+    return pullFrom(peer);
+  }
+
+  /// 按地址找已授权对端（手动操作需要它的 uuid 与名称）。
+  SyncPeer? _peerForAddress(String address) {
+    final normalized = normalizeBase(address);
+    for (final peer in _peers) {
+      if (normalizeBase(peer.address) == normalized) return peer;
+    }
+    return null;
+  }
+
+  /// 最近一次实时/手动拉取的结果（UI 披露用）。
+  RealtimePollResult? get lastPullResult => _lastPollResult;
+
+  /// 路径 A 当前的能力探测结论（缓存 60 s；未探测过为 `null`）。
+  ///
+  /// 单独暴露：手动拉取用的是**临时**引擎，它的快照不会留在
+  /// `realtimeSnapshot` 里，但「降级/不支持」的披露必须照样上屏（P5）。
+  RealtimePullCapability? get realtimePullCapability =>
+      _realtimeCapability.read(DateTime.now());
+
+  /// 最近一轮走过 `/current` 降级端点的站点。
+  List<String> get realtimeDegradedSites =>
+      _realtimeEngine?.snapshot().degradedSites ??
+      _lastPollResult?.degradedSites ??
+      const [];
 
   /// 按当前开关与设备可用性启动/停止引擎，并把变更交给运行中的引擎。
   ///

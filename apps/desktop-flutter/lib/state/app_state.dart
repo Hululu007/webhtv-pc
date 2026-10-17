@@ -38,6 +38,7 @@ import '../core/tmdb_season.dart';
 import '../services/app_paths.dart';
 import '../services/android_bridge_service.dart';
 import '../services/android_playback_bridge.dart';
+import '../services/android_read_client.dart';
 import '../services/cat_bundle.dart';
 import '../services/cat_runtime.dart';
 import '../services/epg_service.dart';
@@ -146,6 +147,11 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     /// 否则用例结束就残留（`design/04` G12）。
     RealtimeScheduler? realtimeScheduler,
 
+    /// 测试注入的安卓只读客户端（`null` = 真实 HTTP）。
+    ///
+    /// widget 测试不得做真实局域网 I/O，只能靠它接管路径 A 的读取与心跳。
+    AndroidReadClient? androidReadClient,
+
     /// 测试注入的站点 HTTP 客户端（widget/单测不可做真实 socket I/O）。
     /// 与 [liveService]/[epgService] 同一模式：只为可测性开一个口子。
     http.Client? httpClient,
@@ -159,6 +165,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
        _injectedBridgeService = androidBridgeService,
        _injectedSyncClient = syncClient,
        _injectedSyncServerFactory = syncServerFactory,
+       _injectedReadClient = androidReadClient,
        _injectedSearchSuggestService = searchSuggestService {
     if (httpClient != null) _httpClient = HttpApiClient(client: httpClient);
     final cacheDir = this.paths.cacheDir;
@@ -186,6 +193,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       bridgeService: _injectedBridgeService,
       client: _injectedSyncClient,
       serverFactory: _injectedSyncServerFactory,
+      readClient: _injectedReadClient,
       realtimeScheduler: realtimeScheduler,
     );
     // 把同步状态的变化**转发**到 AppState 自己的监听者。
@@ -256,6 +264,9 @@ class AppState extends ChangeNotifier implements SyncStateHost {
 
   /// 测试注入的服务端工厂（widget 测试需固定到回环与测试端口区间）。
   final SyncServer Function(SyncServerHost host)? _injectedSyncServerFactory;
+
+  /// 测试注入的安卓只读客户端（widget 测试不得做真实局域网 I/O）。
+  final AndroidReadClient? _injectedReadClient;
 
   /// 直播源加载服务（§13.1）。懒加载：未打开直播页前不建立连接。
   LiveService? _liveService;

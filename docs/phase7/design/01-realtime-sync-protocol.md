@@ -678,9 +678,29 @@ Phase 5 的 `sync.pushEnabled`。原因：后者是「手动推送」的同意�
 
 「手动操作」区块
   [拉取最近记录]  [请求安卓推送全量]
-  [推送历史]      [推送删除]      [推送设置]
+  [推送历史]      [推送设置]
   说明：拉取最近记录不依赖本机服务端；请求全量推送需要安卓已授权本机。
 ```
+
+**实际落地的符号（T8，`phase7_sync_ui_test.dart` 逐条锁定）**：
+
+| key | 含义 |
+| --- | --- |
+| `realtime-enabled` / `realtime-pull` / `realtime-push` / `realtime-settings` | 四个开关 |
+| `realtime-interval` / `realtime-poll-all-sites` | 周期下拉、轮询全部站点 |
+| `realtime-status` / `realtime-last-pull` / `realtime-manual-result` | 状态与结果快照 |
+| `realtime-attention` / `realtime-retry` | 已停止时的「立即重连」 |
+| `realtime-disclosure-degraded` / `-unsupported` / `-service-stopped` / `-peer-frozen` / `-background-guide` / `-plaintext` | 六条披露 |
+| `realtime-manual-pull` / `-request-push` / `-push-history` / `-push-settings` | 四个手动按钮 |
+
+> **为什么只有 4 个按钮而没有「推送删除」**：`SyncClient` 目前**没有**推送删除墓碑的
+> 接口（Phase 5 只做了历史/收藏/设置三条）。加一个点了就报「未实现」的按钮
+> 比不加更糟。删除传播目前只在**路径 B**（安卓来拉）生效，PC 主动推删除待
+> 安卓侧提供接收接口后再补——已在 §4.3 标为待办。
+>
+> **文件拆分**：状态层用例在 `test/phase7_realtime_state_test.dart`，widget 用例在
+> `test/phase7_sync_ui_test.dart`。设计台账本写的是一个文件，但本仓库的结论是
+> 「真实 I/O 测试与 widget 测试必须分文件」（fake-async zone 与真实回调互卡）。
 
 ### 7.2 必须披露的信息（P5）
 

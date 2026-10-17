@@ -6,7 +6,9 @@ import 'package:flutter/services.dart';
 
 import '../core/android_bridge.dart';
 import '../core/protocol.dart';
+import '../core/realtime_sync.dart';
 import '../core/tmdb_config.dart';
+import '../services/realtime_sync_engine.dart';
 import '../state/app_state.dart';
 import '../state/sync_state.dart';
 import 'app.dart';
@@ -1064,7 +1066,11 @@ class _AndroidSettingsPageState extends State<AndroidSettingsPage> {
               style: theme.textTheme.bodySmall,
             ),
           ],
-          const SizedBox(height: 8),
+          const Divider(height: 32),
+          ..._realtimeSection(theme, sync),
+          const Divider(height: 32),
+          ..._manualSection(theme, sync),
+          const Divider(height: 32),
           Text('已授权对端', style: theme.textTheme.titleSmall),
           if (sync.peers.isEmpty)
             const Text('尚未授权任何对端：安卓推送历史前需先在此授权。')
@@ -1082,6 +1088,272 @@ class _AndroidSettingsPageState extends State<AndroidSettingsPage> {
         ],
       ),
     );
+  }
+
+  /// 「实时同步」区块（`design/01` §6.1、§7.2）。
+  ///
+  /// 全部默认**关闭**（P3）。每一条披露都对应一个具体、可行动的事实：
+  /// 不说清楚用户只能猜。
+  List<Widget> _realtimeSection(ThemeData theme, SyncState sync) {
+    final realtime = sync.realtime;
+    final snapshot = sync.realtimeSnapshot;
+    final blocking = sync.busy;
+    final subDisabled = blocking || !realtime.enabled;
+    return [
+      Text('实时同步', style: theme.textTheme.titleMedium),
+      const SizedBox(height: 4),
+      Text(
+        '开启后按周期把安卓的观影记录拉到本机，并用心跳判断安卓是否还在线'
+        '（默认关闭：每个方向都需要你显式开启）。',
+        style: theme.textTheme.bodySmall,
+      ),
+      SwitchListTile(
+        key: const ValueKey('realtime-enabled'),
+        title: const Text('开启实时同步'),
+        subtitle: const Text('关闭后定时器与心跳全部停止，子开关的选择会保留'),
+        value: realtime.enabled,
+        onChanged: blocking ? null : sync.setRealtimeEnabled,
+      ),
+      SwitchListTile(
+        key: const ValueKey('realtime-pull'),
+        title: const Text('实时拉取（PC → 安卓）'),
+        subtitle: Text(
+          realtime.pollAllSites
+              ? '每 ${realtime.intervalSeconds}s 轮询全部站点'
+              : '每 ${realtime.intervalSeconds}s 轮询最近活跃的 20 个站点',
+        ),
+        value: realtime.pullEnabled,
+        onChanged: subDisabled ? null : sync.setRealtimePull,
+      ),
+      SwitchListTile(
+        key: const ValueKey('realtime-push'),
+        title: const Text('实时推送（安卓 → PC）'),
+        subtitle: const Text('需本机服务端在听：开启时会自动拉起（否则安卓拉不到）'),
+        value: realtime.pushEnabled,
+        onChanged: subDisabled ? null : sync.setRealtimePush,
+      ),
+      SwitchListTile(
+        key: const ValueKey('realtime-settings'),
+        title: const Text('设置实时同步（含凭据）'),
+        subtitle: const Text(
+          '将以明文 HTTP 在局域网传输 API Key，需先开启下方「同步设置项」',
+        ),
+        value: realtime.settingsEnabled,
+        onChanged: subDisabled ? null : sync.setRealtimeSettings,
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Row(
+          children: [
+            const Text('轮询周期'),
+            const SizedBox(width: 12),
+            DropdownButton<int>(
+              key: const ValueKey('realtime-interval'),
+              value: realtime.intervalSeconds,
+              onChanged: subDisabled
+                  ? null
+                  : (value) {
+                      if (value != null) {
+                        sync.setRealtimeIntervalSeconds(value);
+                      }
+                    },
+              items: [
+                for (final seconds in realtimeIntervalChoices)
+                  DropdownMenuItem(value: seconds, child: Text('$seconds s')),
+              ],
+            ),
+            const SizedBox(width: 12),
+            Text(
+              '心跳 ${realtime.heartbeatSeconds}s',
+              style: theme.textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+      CheckboxListTile(
+        key: const ValueKey('realtime-poll-all-sites'),
+        dense: true,
+        title: const Text('轮询全部站点'),
+        subtitle: const Text('默认只轮询最近活跃的 20 个（更省电，也更准）'),
+        value: realtime.pollAllSites,
+        onChanged: subDisabled
+            ? null
+            : (value) => sync.setRealtimePollAllSites(value ?? false),
+      ),
+      if (snapshot != null) ...[
+        SelectableText(
+          key: const ValueKey('realtime-status'),
+          '状态：${_realtimeStateText(snapshot)}',
+          style: theme.textTheme.bodySmall,
+        ),
+        if (snapshot.lastPoll != null)
+          SelectableText(
+            key: const ValueKey('realtime-last-pull'),
+            '最近一次：${_pullSummary(snapshot.lastPoll!)}',
+            style: theme.textTheme.bodySmall,
+          ),
+        if (snapshot.needsUserAttention)
+          Card(
+            key: const ValueKey('realtime-attention'),
+            color: theme.colorScheme.errorContainer,
+            child: ListTile(
+              leading: const Icon(Icons.warning_amber_outlined),
+              title: const Text('自动同步已停止（重试不会自动恢复）'),
+              subtitle: Text(
+                snapshot.lastError?.userMessage ?? '点「立即重连」重新检测',
+              ),
+              trailing: TextButton(
+                key: const ValueKey('realtime-retry'),
+                onPressed: blocking ? null : sync.retryRealtimeNow,
+                child: const Text('立即重连'),
+              ),
+            ),
+          ),
+      ],
+      // 披露（`design/01` §7.2）：每条都对应一个具体、可行动的事实。
+      //
+      // 降级/不支持这两条读的是**状态层**而不是引擎快照：手动拉取用的是
+      // 临时引擎，快照不会留存，但披露必须照样上屏（P5）。
+      if (sync.realtimeDegradedSites.isNotEmpty)
+        SelectableText(
+          key: const ValueKey('realtime-disclosure-degraded'),
+          '本周期 ${sync.realtimeDegradedSites.length} 个站点只能读到「正在播放」的记录'
+          '（安卓的读取接口不返回整站历史，请升级安卓端）。',
+          style: theme.textTheme.bodySmall,
+        ),
+      if (sync.realtimePullCapability == RealtimePullCapability.unsupported)
+        SelectableText(
+          key: const ValueKey('realtime-disclosure-unsupported'),
+          '安卓端不支持历史读取接口（路径 A 不可用，请升级安卓端）。',
+          style: theme.textTheme.bodySmall,
+        ),
+      if (snapshot?.peerState == RealtimePeerState.serviceStopped)
+        SelectableText(
+          key: const ValueKey('realtime-disclosure-service-stopped'),
+          '安卓的局域网服务未运行：请在安卓打开「管理页」并保持运行。',
+          style: theme.textTheme.bodySmall,
+        ),
+      if (snapshot?.peerState == RealtimePeerState.peerFrozen)
+        SelectableText(
+          key: const ValueKey('realtime-disclosure-peer-frozen'),
+          '安卓进程被系统冻结：请在安卓设置中允许本应用后台运行（电池 → 不受限制）。',
+          style: theme.textTheme.bodySmall,
+        ),
+      if (snapshot?.backgroundGuide != null)
+        SelectableText(
+          key: const ValueKey('realtime-disclosure-background-guide'),
+          '安卓提示：${snapshot!.backgroundGuide}',
+          style: theme.textTheme.bodySmall,
+        ),
+      if (realtime.settingsEnabled)
+        SelectableText(
+          key: const ValueKey('realtime-disclosure-plaintext'),
+          '已开启设置实时同步：API Key 等凭据将以明文 HTTP 在局域网传输。',
+          style: theme.textTheme.bodySmall,
+        ),
+    ];
+  }
+
+  /// 「手动操作」区块（`design/01` §4.4、§4.5、§7.1）。
+  ///
+  /// 四个按钮的语义**必须分开写清**：它们在「服务端没开」「未授权」时的
+  /// 行为完全不同，混成一个按钮只会给用户一个无法解释的失败。
+  List<Widget> _manualSection(ThemeData theme, SyncState sync) {
+    final blocking = sync.busy;
+    return [
+      Text('手动操作', style: theme.textTheme.titleMedium),
+      const SizedBox(height: 4),
+      Text(
+        '「拉取最近记录」不依赖本机服务端，实时同步关着也能用；'
+        '「请求安卓推送全量」需要本机服务端在听且设备已授权。',
+        style: theme.textTheme.bodySmall,
+      ),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          OutlinedButton.icon(
+            key: const ValueKey('realtime-manual-pull'),
+            onPressed: blocking ? null : sync.manualPullRecentRecords,
+            icon: const Icon(Icons.download_outlined),
+            label: const Text('拉取最近记录'),
+          ),
+          OutlinedButton.icon(
+            key: const ValueKey('realtime-manual-request-push'),
+            onPressed: blocking ? null : sync.requestAndroidPushFull,
+            icon: const Icon(Icons.sync_outlined),
+            label: const Text('请求安卓推送全量'),
+          ),
+          OutlinedButton.icon(
+            key: const ValueKey('realtime-manual-push-history'),
+            onPressed: blocking ? null : _pushToActivePeer,
+            icon: const Icon(Icons.upload_outlined),
+            label: const Text('推送历史'),
+          ),
+          OutlinedButton.icon(
+            key: const ValueKey('realtime-manual-push-settings'),
+            onPressed: blocking ? null : _pushSettingsToActivePeer,
+            icon: const Icon(Icons.tune_outlined),
+            label: const Text('推送设置'),
+          ),
+        ],
+      ),
+      if (sync.lastPullResult != null)
+        SelectableText(
+          key: const ValueKey('realtime-manual-result'),
+          '上次手动拉取：${_pullSummary(sync.lastPullResult!)}',
+          style: theme.textTheme.bodySmall,
+        ),
+    ];
+  }
+
+  /// 引擎状态的用户可读描述。
+  String _realtimeStateText(RealtimeEngineSnapshot snapshot) {
+    if (!snapshot.running) return '未启用';
+    final parts = <String>[
+      if (snapshot.pollScheduled)
+        '轮询中'
+      else if (snapshot.pollPaused)
+        '轮询已暂停'
+      else
+        '轮询未启动',
+      if (snapshot.heartbeatScheduled) '心跳中',
+      if (snapshot.pollFailures > 0) '失败 ${snapshot.pollFailures} 次',
+      '游标 ${snapshot.cursor}',
+    ];
+    return parts.join(' · ');
+  }
+
+  /// 一次拉取结果的一行摘要。
+  String _pullSummary(RealtimePollResult result) =>
+      '${result.stats.describe()} '
+      '（${result.siteCount} 个站点${result.cursorAdvanced ? '' : '，游标未推进'}）';
+
+  /// 推送到「当前目标设备」对应的已授权对端。
+  Future<void> _pushToActivePeer() async {
+    final peer = _activePeer();
+    if (peer == null) return;
+    await _push(peer);
+  }
+
+  /// 推送设置到当前目标设备（需已开启含凭据同步）。
+  Future<void> _pushSettingsToActivePeer() async {
+    final peer = _activePeer();
+    if (peer == null) return;
+    await _sync.pushSettingsTo(peer);
+  }
+
+  /// 手动推送的目标：最近接入的设备（未授权时提示授权）。
+  SyncPeer? _activePeer() {
+    final base = _sync.realtimeDeviceBase;
+    if (base != null) {
+      for (final peer in _sync.peers) {
+        if (normalizeBase(peer.address) == normalizeBase(base)) return peer;
+      }
+    }
+    // 没有目标设备 / 目标未授权：给出可行动的原因，而不是静默什么都不做。
+    _sync.clearMessages();
+    return null;
   }
 
   Widget _deviceCard(ThemeData theme, AndroidDevice device) {
