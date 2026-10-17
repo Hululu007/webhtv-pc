@@ -409,10 +409,23 @@ try {
             $bytes = [System.IO.File]::ReadAllBytes($kernel)
             $text = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
             $hasMainEntry = $text.Contains('lib/main.dart') -or $text.Contains('lib\main.dart')
-            $testMarkers = ([regex]::Matches($text, 'integration_test')).Count
-            Write-Fact "debug-artifact-runnable kernel=$kernel main-entry=$hasMainEntry integration-test-markers=$testMarkers"
+            # 污染判据必须用**测试绑定**这个真符号，不能用裸 `integration_test`
+            # 文本或测试文件名。
+            #
+            # 为什么（两次实测误报）：
+            # 1. `lib/ui/library_pages.dart` 的文档注释里引用了
+            #    `integration_test/phase5_sync_flow_test.dart`（说明「片名只渲染
+            #    一次」这条契约由哪个测试锁定）——文档注释会进 kernel_blob；
+            # 2. 连具名的 `phase5_sync_flow_test.dart` 也同样在注释里出现。
+            #
+            # 真正的污染（测试内核被当成应用入口）特征是：应用入口
+            # `lib/main.dart` **缺失**，且测试**绑定**符号存在。
+            # 实测干净产物：`IntegrationTestWidgetsFlutterBinding` count=0、
+            # `lib/main.dart` count=1。
+            $testMarkers = ([regex]::Matches($text, 'IntegrationTestWidgetsFlutterBinding')).Count
+            Write-Fact "debug-artifact-runnable kernel=$kernel main-entry=$hasMainEntry test-binding-markers=$testMarkers"
             if (-not $hasMainEntry -or $testMarkers -gt 0) {
-                throw "Debug 产物入口不是 lib/main.dart（main-entry=$hasMainEntry integration-test-markers=$testMarkers）"
+                throw "Debug 产物入口不是 lib/main.dart（main-entry=$hasMainEntry test-binding-markers=$testMarkers）"
             }
         }
     }
