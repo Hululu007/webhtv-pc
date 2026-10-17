@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import mimetypes
@@ -74,6 +75,11 @@ ANDROID_LAST_HOST: dict[str, str] = {}
 # 安卓故障注入模式（`/android/__mode?config=<mode>`，§2.3 表）。
 #   ok(默认) / 404 / empty / mismatch / loopback / repo / notandroid / slow / 403
 # `403` 专用于 `/action`：模拟安卓"本机 API 修改未开启"。
+# Phase 7 新增（`docs/phase7/design/04` §4）：
+#   no-episode-url / empty-episode  路径 A 的集消歧兜底
+#   stopped       `/manage/session` 返 `running=false`（管理页未运行）
+#   no-manage     `/manage/session` 返 404（旧版安卓 → 降级到 `/device`）
+#   with-deletions `/api/playback/sync` 响应带删除数组
 ANDROID_MODE: dict[str, str] = {}
 ANDROID_MODES = {
     "ok",
@@ -85,7 +91,18 @@ ANDROID_MODES = {
     "notandroid",
     "slow",
     "403",
+    "no-episode-url",
+    "empty-episode",
+    "stopped",
+    "no-manage",
+    "with-deletions",
 }
+# 每条路由**最近一次**收到的请求头（路径 B 的断言点在 `X-WebHTV-*`，
+# `docs/phase7/design/01` §3.2.2；记下来就不用抓包）。
+ANDROID_LAST_HEADERS: dict[str, dict[str, str]] = {}
+# 路径 B 拉取端点的服务端游标（模拟安卓侧保存的 cursor）。
+# 每次 `/android/api/playback/sync` 成功返回后推进，供"第二轮只拿到新增"的断言用。
+ANDROID_SYNC_STATE: dict[str, int] = {"sequence": 0}
 
 REQUIRED_REFERER = "http://127.0.0.1:18080/"
 REQUIRED_USER_AGENT = "WebHTV-PC/0.1 (Windows)"
@@ -343,6 +360,10 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "lastForm": dict(ANDROID_LAST_FORM),
                 "lastQuery": dict(ANDROID_LAST_QUERY),
                 "lastHost": dict(ANDROID_LAST_HOST),
+                "lastHeaders": {
+                    key: dict(value) for key, value in ANDROID_LAST_HEADERS.items()
+                },
+                "syncSequence": ANDROID_SYNC_STATE.get("sequence", 0),
                 "mode": dict(ANDROID_MODE),
             })
             return
@@ -351,6 +372,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             ANDROID_LAST_FORM.clear()
             ANDROID_LAST_QUERY.clear()
             ANDROID_LAST_HOST.clear()
+            ANDROID_LAST_HEADERS.clear()
+            ANDROID_SYNC_STATE["sequence"] = 0
             ANDROID_MODE.clear()
             self._send_json({"counts": {}})
             return
@@ -419,7 +442,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 ANDROID_LAST_FORM.update(self._request_body())
             if mode == "403":
                 self._send_bytes(
-                    "本机 API 修改未开启".encode("utf-8"),
+                    "本机 API 修改未开启".encode(),
                     "text/plain; charset=utf-8",
                     status=403,
                 )
@@ -430,7 +453,202 @@ class FixtureHandler(BaseHTTPRequestHandler):
             )
             return
 
+        # ------------------------------------------------------------
+        # Phase 7 · 路径 A 与保活（`docs/phase7/design/01` §4.1、`02` §3）
+        # ------------------------------------------------------------
+        if route in ("/api/playback/history", "/api/playback/current"):
+            self._send_playback_read(route, params, host, mode)
+            return
+        if route == "/manage/session":
+            self._send_manage_session(host, mode)
+            return
+        if route == "/manage/background/settings":
+            # **不得**真做任何事：真实端会弹安卓系统界面（`design/02` §5.1
+            # 的 L5）。fixture 只记录调用次数，让测试能断言"只在用户点击时调"。
+            ANDROID_STATS["/manage/background/settings"] = (
+                ANDROID_STATS.get("/manage/background/settings", 0) + 1
+            )
+            self._send_json({"status": "ok", "settings": "opened"})
+            return
+        if route == "/api/playback/sync":
+            self._send_playback_pull(params, mode)
+            return
+
         self._send_error_json(404, "android fixture route not found")
+
+    def _record_android_request(self, name: str, host: str, params) -> None:
+        """记一次命中：计数 + Host + 查询参数 + 请求头（含 `X-WebHTV-*`）。"""
+        ANDROID_STATS[name] = ANDROID_STATS.get(name, 0) + 1
+        ANDROID_LAST_HOST[name] = host
+        ANDROID_LAST_QUERY.clear()
+        ANDROID_LAST_QUERY.update(params)
+        ANDROID_LAST_HEADERS[name] = {
+            key.lower(): value
+            for key, value in self.headers.items()
+            if key.lower().startswith(("x-webhtv", "host", "accept", "content-type"))
+        }
+
+    def _send_playback_read(self, route: str, params, host: str, mode: str) -> None:
+        """路径 A 的读取端点（`design/01` §4.1）。
+
+        两条关键契约（都是真机实测出来的，写错会让 PC 静默拿空结果）：
+        1. `/api/playback/history` **对任一 siteKey 都返回 200 + 数组**，
+           从不 404——因此它一旦"不存在"必须是 200+octet-stream 形态；
+        2. `/api/playback/current` 未播放时返回 **404 + JSON**（合法形态，
+           不是失败），PC 不许把它算进退避。
+        """
+        name = route
+        self._record_android_request(name, host, params)
+        site_key = params.get("siteKey", "")
+        if mode == "slow":
+            time.sleep(5)
+
+        if route == "/api/playback/current":
+            if mode == "404":
+                self._send_error_json(404, "no playback record")
+                return
+            payload = json.loads(
+                (ANDROID_FIXTURES / "playback-current.json").read_text(encoding="utf-8")
+            )
+            payload["siteKey"] = site_key or payload["siteKey"]
+            if isinstance(payload.get("historyKey"), str):
+                # 身份键里的 siteKey 段要跟着回显的 siteKey 一致，
+                # 否则 PC 会拿两套 siteKey 去定位同一条记录。
+                parts = payload["historyKey"].split("@@@")
+                if len(parts) == 3:
+                    payload["historyKey"] = "@@@".join(
+                        [payload["siteKey"], parts[1], parts[2]]
+                    )
+            for field in ("vodPic", "episodeUrl"):
+                if isinstance(payload.get(field), str):
+                    payload[field] = payload[field].replace(
+                        "http://__HOST__", f"http://{host}"
+                    )
+            # 故障注入：`apiSafe()` 的 `episodeUrl` 不对外开放（它在 FULL/OPTIONAL 集），
+            # 默认形态本来就没有它——真实对端靠 `episodeId` 消歧。
+            # `no-episode-url` = 连 `episodeId` 也没有（旧版安卓）→ PC 用
+            # `episodeName` 兜底；`empty-episode` = 集名也空 → 必须不合并。
+            if mode == "no-episode-url":
+                payload.pop("episodeUrl", None)
+                payload.pop("episodeId", None)
+            elif mode == "empty-episode":
+                payload.pop("episodeUrl", None)
+                payload.pop("episodeId", None)
+                payload["episodeName"] = ""
+            self._send_json(payload)
+            return
+
+        # `/api/playback/history`
+        if mode == "empty":
+            self._send_json({"siteKey": site_key, "items": [], "total": 0})
+            return
+        if mode == "404":
+            # 真实安卓**不会**这里返 404；保留该模式仅用于测 PC 的错误分支
+            # （403/404 不得折叠成"0 条"，`design/01` §4.1 的 P5）。
+            self._send_error_json(404, "history endpoint missing")
+            return
+        items = json.loads(
+            (ANDROID_FIXTURES / "history-android.json").read_text(encoding="utf-8")
+        )
+        for record in items:
+            for field in ("vodPic", "episodeUrl"):
+                if isinstance(record.get(field), str):
+                    record[field] = record[field].replace(
+                        "http://__HOST__", f"http://{host}"
+                    )
+            record["siteKey"] = site_key or record.get("siteKey", "")
+            if mode == "no-episode-url":
+                record.pop("episodeUrl", None)
+            elif mode == "empty-episode":
+                record.pop("episodeUrl", None)
+                record["vodRemarks"] = ""
+        self._send_json({"siteKey": site_key, "items": items, "total": len(items)})
+
+    def _send_manage_session(self, host: str, mode: str) -> None:
+        """保活会话端点（`design/02` §3.2）。"""
+        self._record_android_request("/manage/session", host, {})
+        if mode == "no-manage":
+            # 旧版安卓没有该端点 → PC 必须降级到 `/device` 心跳。
+            self._send_error_json(404, "manage session not available")
+            return
+        if mode == "slow":
+            time.sleep(5)
+        payload = json.loads(
+            (ANDROID_FIXTURES / "manage-session.json").read_text(encoding="utf-8")
+        )
+        payload["lastAccess"] = int(time.time() * 1000)
+        if mode == "stopped":
+            payload["running"] = False
+        self._send_json(payload)
+
+    def _send_playback_pull(self, params, mode: str) -> None:
+        """路径 B 的拉取端点（`design/01` §3.2.2）。
+
+        按 `X-WebHTV-Since` 返回增量：`nextSince` 是**单调递增的序号**
+        （不是时间戳，`design/00` §3.1 契约 9），空游标 = 0。
+        """
+        host = self.headers.get("Host") or "127.0.0.1:18080"
+        header_since = self.headers.get("X-WebHTV-Since", "")
+        header_limit = self.headers.get("X-WebHTV-Limit", "")
+        merged = {
+            "since": header_since or params.get("since", ""),
+            "limit": header_limit or params.get("limit", ""),
+        }
+        self._record_android_request("/api/playback/sync", host, merged)
+
+        if mode == "403":
+            self._send_error_json(403, "token mismatch")
+            return
+        if mode == "slow":
+            time.sleep(5)
+
+        raw_since = merged["since"].strip()
+        try:
+            since = int(raw_since) if raw_since else 0
+            if since < 0:
+                raise ValueError
+        except ValueError:
+            self._send_error_json(400, "Invalid X-WebHTV-Since cursor")
+            return
+
+        sequence = ANDROID_SYNC_STATE.get("sequence", 0)
+        if mode == "empty":
+            self._send_json({"nextSince": since, "items": [], "hasMore": False})
+            return
+
+        sequence += 1
+        ANDROID_SYNC_STATE["sequence"] = sequence
+        item = {
+            "historyKey": "csp_Media@@@demo-001@@@1",
+            "siteKey": "csp_Media",
+            "vodId": "demo-001",
+            "vodName": "示例剧集",
+            "vodPic": f"http://{host}/media/poster-001.jpg",
+            "flag": "线路一",
+            "episodeName": "第2集",
+            "episodeId": "episode-hash-001",
+            "positionMs": 754000,
+            "durationMs": 2700000,
+            "completed": False,
+            "speed": 1.0,
+            # 关键：`updatedAt` 显式给（安卓 `PlaybackProgressWriter` 用它
+            # 做 `setCreateTime` 与冲突裁决）。
+            "updatedAt": 1791450000000 + sequence,
+        }
+        payload: dict[str, object] = {
+            "nextSince": item["updatedAt"],
+            "items": [] if since >= item["updatedAt"] else [item],
+            "hasMore": False,
+        }
+        if mode == "with-deletions":
+            payload["deleted"] = [
+                {
+                    "historyKey": "csp_Media@@@demo-999@@@1",
+                    "deletedAt": 1791450000999,
+                }
+            ]
+        self._send_json(payload)
+
 
     # ------------------------------------------------------------------ TMDB
 
@@ -1137,8 +1355,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
             content_type = "text/x-ssa; charset=utf-8"
         self._send_bytes(payload, content_type)
 
-    def log_message(self, format_string: str, *args) -> None:
-        print(f"{self.address_string()} - {format_string % args}")
+    def log_message(self, format: str, *args) -> None:  # noqa: A002 (需与基类同名)
+        print(f"{self.address_string()} - {format % args}")
 
 
 class FixtureServer(ThreadingHTTPServer):
@@ -1164,15 +1382,91 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18080)
+    parser.add_argument(
+        "--tcp-mode",
+        default="off",
+        choices=("off", "tcp-accept-silent", "tcp-closed"),
+        help=(
+            "TCP 层故障注入（`docs/phase7/design/04` §4）："
+            "tcp-accept-silent 只 accept 不回响应（模拟 PEER_FROZEN）；"
+            "tcp-closed 不监听该端口（模拟 SERVICE_STOPPED）"
+        ),
+    )
+    parser.add_argument(
+        "--tcp-port",
+        type=int,
+        default=18081,
+        help="--tcp-mode 使用的端口（与 --port 分开，避免干扰正常路由）",
+    )
     args = parser.parse_args()
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         parser.error("fixture 服务只允许监听本机地址")
+
+    tcp_stop = threading.Event()
+    tcp_thread: threading.Thread | None = None
+    if args.tcp_mode == "tcp-accept-silent":
+        tcp_thread = threading.Thread(
+            target=_serve_tcp_accept_silent,
+            args=(args.host, args.tcp_port, tcp_stop),
+            daemon=True,
+        )
+        tcp_thread.start()
+        print(
+            f"WebHTV PC fixture TCP mode: tcp-accept-silent on "
+            f"{args.host}:{args.tcp_port}（accept 后永不响应 → PEER_FROZEN）"
+        )
+    elif args.tcp_mode == "tcp-closed":
+        # 故意**不**监听：PC 那里得到 connection refused（→ SERVICE_STOPPED）。
+        # 打印出来是为了让调用方知道该把 base 指向哪个“肯定没人听”的端口。
+        print(
+            f"WebHTV PC fixture TCP mode: tcp-closed on "
+            f"{args.host}:{args.tcp_port}（端口不监听 → SERVICE_STOPPED）"
+        )
+
     server = FixtureServer((args.host, args.port), FixtureHandler)
     print(f"WebHTV PC fixture server: http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     finally:
+        tcp_stop.set()
+        if tcp_thread is not None:
+            tcp_thread.join(timeout=2)
         server.server_close()
+
+
+def _serve_tcp_accept_silent(host: str, port: int, stop: threading.Event) -> None:
+    """只 `accept()`、永不回任何字节的裸 TCP 服务。
+
+    这是 PC 侧区分「进程被冻结」与「网络不通」的**唯一**手段
+    （`design/02` §4）：冻结时内核仍完成三次握手，但用户态不调度、
+    HTTP 响应出不来；网络不通时握手本身就失败。
+
+    实现约束：每个连接都留在列表里不关，否则对方会看到 FIN（那就变成了
+    “连上又断开”而不是“连上但不应”）。退出时统一关闭。
+    """
+    import socket
+
+    held: list[socket.socket] = []
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((host, port))
+    server_socket.listen(16)
+    server_socket.settimeout(0.2)
+    try:
+        while not stop.is_set():
+            try:
+                connection, _ = server_socket.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            # 收下连接但什么都不发：这正是“被冻结”的观测形态。
+            held.append(connection)
+    finally:
+        for connection in held:
+            with contextlib.suppress(OSError):
+                connection.close()
+        server_socket.close()
 
 
 if __name__ == "__main__":
