@@ -303,17 +303,35 @@ class AndroidReadClient {
   /// 本方法要回答「为什么不能」——这三者（端口无人监听 / 进程被冻结 /
   /// 网络不通）对用户是**三个完全不同的动作**（`design/02` §4）。
   ///
-  /// 探测序列（每步 2 s，总超时 6 s）：
+  /// 探测序列（每步 [stepTimeout]，总超时约 `3×stepTimeout + tcpTimeout`）：
   /// `S1 /manage/session` → `S2 /device` → `S3 TCP connect`。
   /// 判定完全交给 [classifyProbeSteps]（纯逻辑，已由 K 套件锁定）。
   ///
   /// **为何要单独一步 TCP connect**：进程被冻结时内核仍会完成 TCP 握手
   /// （监听队列在内核），只是用户态线程不调度、HTTP 响应出不来；
   /// 网络不通时握手本身就失败。这是 PC 侧唯一能区分二者的手段。
+  ///
+  /// **[tcpTimeout] 为什么要比 [stepTimeout] 宽**（实测结论，不是拍脑袋）：
+  /// 本机（Windows）连一个**未监听的回环端口**时，「连接被拒」要 **~2 s**
+  /// 才上报（实测：`Socket.connect` 2 s 超时 → errno 10060 超时；
+  /// 5 s 超时 → errno 1225 拒绝）。而 [stepTimeout] 默认也是 2 s，
+  /// 两者正好打平 → 拒绝被超时抢走 → 三态误判成 `networkUnreachable`。
+  ///
+  /// 后果很具体：安卓服务明明只是没开，用户却被指去查 WiFi，
+  /// 而不是去打开安卓管理页（`design/02` §4 的 P5 要求）。
+  /// TCP connect 是最廉价且最决定性的一步，值得给它足够预算。
   Future<RealtimeHeartbeatProbe> heartbeat(
     String deviceBase, {
     Duration stepTimeout = const Duration(seconds: 2),
+    Duration? tcpTimeout,
   }) async {
+    // 默认取「2×步超时」与 5 s 的较大者：既覆盖实测的 2 s 拒绝延迟，
+    // 也不会在真不可达时把总预算拉得过长。
+    final effectiveTcpTimeout =
+        tcpTimeout ??
+        (stepTimeout * 2 > const Duration(seconds: 5)
+            ? stepTimeout * 2
+            : const Duration(seconds: 5));
     final base = normalizeBase(deviceBase);
     final steps = <RealtimeProbeStep>[];
     Map<String, Object?> session = const <String, Object?>{};
@@ -350,7 +368,8 @@ class AndroidReadClient {
     }
 
     // S3：TCP connect（区分「冻结」与「完全不通」）。
-    final tcp = await _probeTcp(base, stepTimeout);
+    // 用更宽的 [effectiveTcpTimeout]：拒绝可能比 [stepTimeout] 晚到（见方法注释）。
+    final tcp = await _probeTcp(base, effectiveTcpTimeout);
     steps.add(tcp);
     return RealtimeHeartbeatProbe(
       state: classifyProbeSteps(steps),
@@ -381,6 +400,23 @@ class AndroidReadClient {
         // 端点缺失（含「200 + octet-stream」）→ 继续下一步。
         // 两种缺失（/manage 无、/device 无）在 [classifyProbeSteps] 里
         // 同义都是「继续」，因此复用 `manageMissing`。
+        return (
+          step: RealtimeProbeStep.manageMissing,
+          statusCode: response.statusCode,
+          session: const <String, Object?> {},
+        );
+      }
+      // ⚠️ **404 也算端点缺失**（与 `endpointExists` 的口径不同）。
+      //
+      // 为什么这里必须额外判 404：`endpointExists` 把 `notFound` 归为「存在」
+      // 是为了路径 A 的 `/current`（未播放时 404 是合法形态）。但保活端点
+      // `/manage/session` 的 404 含义完全不同——它是**旧版安卓没有这个端点**，
+      // 必须降级到 `/device`（`design/02` §3.2 的降级链）。
+      //
+      // 若把 404 当 `manageOk`：降级链永远不触发、`session` 为空表，
+      // 表现为 `running=null`（UI 无法提示「管理页未运行」）而状态却是「可达」。
+      // 实测现象（L3）：`heartbeat(state=ok status=404 fallback=false running=null)`。
+      if (response.statusCode == 404) {
         return (
           step: RealtimeProbeStep.manageMissing,
           statusCode: response.statusCode,
@@ -676,19 +712,26 @@ class AndroidReadClient {
 ///
 /// 为何不能把 `SocketException` 一律当成「不通」：拒绝说明**端口无人监听**
 /// （用户该去开安卓管理页），而不可达说明**网络不通**（用户该查 WiFi）。
-/// 两者在 PC 侧只能靠 errno / 文案区分：
+/// 两者在 PC 侧只能靠 errno / 文案区分。
 ///
 /// | 平台 | refused 的 errno |
 /// | --- | --- |
 /// | Windows | 10061（WSAECONNREFUSED） |
+/// | Windows（本机回环实测） | **1225**（WSAECONNREFUSED 的另一种取值） |
 /// | Linux | 111（ECONNREFUSED） |
 /// | macOS/iOS | 61（ECONNREFUSED） |
+///
+/// **1225 是 L3 集成测试抓出来的**：只在 `127.0.0.1` 上连一个不监听的端口时
+/// 出现（`errno = 1225`，文案是「远程计算机拒绝网络连接」）。漏了它会把
+/// 「服务未运行」误归为 `networkUnreachable`，用户被指去查 WiFi。
 bool _isConnectionRefused(SocketException error) {
   final code = error.osError?.errorCode;
-  if (code == 10061 || code == 111 || code == 61) return true;
+  if (code == 10061 || code == 1225 || code == 111 || code == 61) return true;
   final message = '${error.message} ${error.osError?.message ?? ''}'
       .toLowerCase();
-  return message.contains('refused') || message.contains('拒绝');
+  return message.contains('refused') ||
+      message.contains('拒绝') ||
+      message.contains('refused the network connection');
 }
 
 /// 一次 GET 的原始结果。

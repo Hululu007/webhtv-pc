@@ -154,7 +154,7 @@ class RealtimeHeartbeatProbe {
 class RealtimeSiteReadResult {
   const RealtimeSiteReadResult({
     required this.items,
-    this.failures = 0,
+    this.unmergeable = 0,
     this.skippedAsUnchanged = 0,
     this.endpoint = RealtimePullCapability.history,
     this.notFound = false,
@@ -163,8 +163,17 @@ class RealtimeSiteReadResult {
   /// 解析成功的条目。
   final List<SyncHistoryItem> items;
 
-  /// 解析失败条数（计入 `failed`，`design/02` §6）。
-  final int failures;
+  /// **永久性**失败条数：记录本身不可合并（集名与地址双空、身份键不成段）。
+  ///
+  /// **为什么必须与「暂时性失败」分开**（L3 实测出来的真实缺陷）：
+  /// 这类记录下轮、下下轮、永远都是同样的结果——重试无意义。
+  /// 若把它当作「整轮部分失败」，引擎会**每轮**都归为 `partial`，
+  /// 而 `partial` 按 `design/01` §6.3 不推进游标 → **游标永久卡死**，
+  /// 增量语义彻底失效（每轮都在重拉同一批）。
+  ///
+  /// 它仍然要计入 `failed` 明细并披露（P5：不得静默丢弃），
+  /// 只是不阻止游标推进。
+  final int unmergeable;
 
   /// 时间戳不可靠时按「内容等价」跳过的条数。
   final int skippedAsUnchanged;
@@ -234,6 +243,7 @@ class RealtimePollResult {
     required this.cursor,
     required this.cursorAdvanced,
     required this.stopped,
+    this.unmergeable = 0,
     this.error,
     this.degradedSites = const [],
   });
@@ -258,13 +268,20 @@ class RealtimePollResult {
 
   final AppError? error;
 
+  /// 本轮因「记录本身不可合并」被永久跳过的条数（集名与地址双空、身份键不成段）。
+  ///
+  /// 它已计入 [stats] 的 `failed`（P5：不得静默丢弃），但**不**阻止游标推进
+  /// ——这类记录下轮重试也是同样结果，若因此卡住游标，增量语义就失效了。
+  /// UI 应把它作为「N 条记录无法同步」披露，而不是当成需要重试的失败。
+  final int unmergeable;
+
   /// 走了 `/current` 降级端点的站点（UI 必须常驻披露）。
   final List<String> degradedSites;
 
   String describe() =>
       'poll(sites=$siteCount outcome=${outcome.name} ${stats.describe()} '
       'cursor=$cursor advanced=$cursorAdvanced stopped=$stopped '
-      'degraded=${degradedSites.length})';
+      'unmergeable=$unmergeable degraded=${degradedSites.length})';
 }
 
 /// 一次心跳的结论。
@@ -628,6 +645,7 @@ class RealtimeSyncEngine {
     var skipped = 0;
     var failed = 0;
     var total = 0;
+    var unmergeable = 0;
     var maxCursor = _cursor;
     var unauthorized = false;
     var networkFailure = false;
@@ -696,20 +714,28 @@ class RealtimeSyncEngine {
           // 404 = 该站点当前无记录（合法形态，`design/00` §3.1 契约 3）。
           continue;
         }
-        // 口径：`total` = 原始返回条数（解析成功 + 内容等价跳过 + 解析失败），
+        // 口径：`total` = 原始返回条数（解析成功 + 内容等价跳过 + 永久不可合并），
         // 这样 `applied+skipped+failed == total` 恒成立（`isConsistent`）。
-        total += read.items.length + read.skippedAsUnchanged + read.failures;
+        total +=
+            read.items.length + read.skippedAsUnchanged + read.unmergeable;
         skipped += read.skippedAsUnchanged;
-        if (read.failures > 0) {
-          partial = true;
-          failed += read.failures;
+        // **永久性失败**（记录本身不可合并）：计入 `failed` 明细并披露（P5），
+        // 但**不**把整轮归为 `partial`。
+        //
+        // 为什么（L3 实测出来的真实缺陷）：这类记录下轮、下下轮永远同样结果，
+        // 重试无意义；若算 `partial`，而 `partial` 不推进游标
+        // （`design/01` §6.3）→ **游标永久卡死**，增量语义彻底失效。
+        if (read.unmergeable > 0) {
+          failed += read.unmergeable;
+          unmergeable += read.unmergeable;
         }
         if (read.items.isEmpty) continue;
 
         final stats = await host.mergeHistory(read.items);
         applied += stats.applied;
         skipped += stats.skipped;
-        // 合并阶段失败也必须计入（`design/02` §6：明细要闭合）。
+        // 合并阶段的失败是**暂时性**的（写库异常，下轮重试有意义）→
+        // 计入 `failed` 并且算 `partial`（不推进游标，整批下轮重试）。
         failed += stats.failed;
         if (stats.failed > 0) partial = true;
         for (final item in read.items) {
@@ -777,6 +803,7 @@ class RealtimeSyncEngine {
       cursor: _cursor,
       cursorAdvanced: decision.advance,
       stopped: decision.stopDirection,
+      unmergeable: unmergeable,
       error: error,
       degradedSites: _degradedSites,
     );

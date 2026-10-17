@@ -90,6 +90,7 @@ class _FakeReadClient extends AndroidReadClient {
   Future<RealtimeHeartbeatProbe> heartbeat(
     String deviceBase, {
     Duration stepTimeout = const Duration(seconds: 2),
+    Duration? tcpTimeout,
   }) async => heartbeatProbe;
 }
 

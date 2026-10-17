@@ -271,6 +271,42 @@ def _json_file(path: Path, host: str) -> bytes:
     return text.encode("utf-8")
 
 
+def _json_object(path: Path) -> dict:
+    """读取一个 JSON **对象** fixture；缺失/损坏时抛 [FixtureDataError]。
+
+    为什么需要它（而不是裸 `json.loads(read_text())`）：
+    - 裸写在 fixture 文件缺失/写坏时会让**请求线程**抛异常，
+      调用方只看到一个无头无尾的 500，不知道是哪个 fixture 坏了；
+    - 集中一处也能保证编码与错误文案一致（中文路径在 Windows 上易踩坑）。
+    """
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise FixtureDataError(f"fixture 缺失：{path.name}") from error
+    except (OSError, ValueError) as error:
+        raise FixtureDataError(f"fixture 不是合法 JSON：{path.name}（{error}）") from error
+    if not isinstance(value, dict):
+        raise FixtureDataError(f"fixture 不是 JSON 对象：{path.name}")
+    return value
+
+
+def _json_array(path: Path) -> list:
+    """读取一个 JSON **数组** fixture；缺失/损坏时抛 [FixtureDataError]。"""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise FixtureDataError(f"fixture 缺失：{path.name}") from error
+    except (OSError, ValueError) as error:
+        raise FixtureDataError(f"fixture 不是合法 JSON：{path.name}（{error}）") from error
+    if not isinstance(value, list):
+        raise FixtureDataError(f"fixture 不是 JSON 数组：{path.name}")
+    return value
+
+
+class FixtureDataError(RuntimeError):
+    """fixture 数据不可用（缺失/损坏/形态不符）。"""
+
+
 def _json(name: str) -> bytes:
     return (FIXTURES / name).read_bytes()
 
@@ -394,9 +430,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             if mode == "notandroid":
                 self._send_json({"hello": "world"})
                 return
-            payload = json.loads(
-                (ANDROID_FIXTURES / "device.json").read_text(encoding="utf-8")
-            )
+            payload = _json_object(ANDROID_FIXTURES / "device.json")
             # `ip` 按请求的 `Host` 现算：真实网关与 `/device` 都报告"对端可达地址"，
             # 写死会把 PC 引到一个不存在的地址上。
             payload["ip"] = f"http://{host}"
@@ -502,14 +536,18 @@ class FixtureHandler(BaseHTTPRequestHandler):
         site_key = params.get("siteKey", "")
         if mode == "slow":
             time.sleep(5)
+        if mode == "403":
+            # 鉴权失败（`design/01` §6.3：立即停该方向，重试无意义）。
+            # 与 `/action`、路径 B 的 403 同义，让 PC 侧的「403 → 停方向」
+            # 能在**路径 A**上被端到端验证（L3 实测需要）。
+            self._send_error_json(403, "unauthorized")
+            return
 
         if route == "/api/playback/current":
             if mode == "404":
                 self._send_error_json(404, "no playback record")
                 return
-            payload = json.loads(
-                (ANDROID_FIXTURES / "playback-current.json").read_text(encoding="utf-8")
-            )
+            payload = _json_object(ANDROID_FIXTURES / "playback-current.json")
             payload["siteKey"] = site_key or payload["siteKey"]
             if isinstance(payload.get("historyKey"), str):
                 # 身份键里的 siteKey 段要跟着回显的 siteKey 一致，
@@ -547,16 +585,25 @@ class FixtureHandler(BaseHTTPRequestHandler):
             # （403/404 不得折叠成"0 条"，`design/01` §4.1 的 P5）。
             self._send_error_json(404, "history endpoint missing")
             return
-        items = json.loads(
-            (ANDROID_FIXTURES / "history-android.json").read_text(encoding="utf-8")
-        )
+        items = _json_array(ANDROID_FIXTURES / "history-android.json")
+        # 按 `siteKey` **过滤**（真实安卓的 `/history?siteKey=` 就是按站点查的）。
+        #
+        # 不过滤的后果（L3 实测）：引擎一轮会打 20 个站点，每个都拿到全部 3 条
+        # （60 条），而其中 1 条的 `vodRemarks`/`episodeUrl` 双空 → PC 正确地
+        # 「宁可不合」记为 failed → 整轮归为 `partial` → **游标不推进**。
+        # 于是「第二轮只拉增量」永远无法成立，测试看起来像产品缺陷。
+        if site_key:
+            items = [
+                record
+                for record in items
+                if str(record.get("key", "")).split("@@@")[0] == site_key
+            ]
         for record in items:
             for field in ("vodPic", "episodeUrl"):
                 if isinstance(record.get(field), str):
                     record[field] = record[field].replace(
                         "http://__HOST__", f"http://{host}"
                     )
-            record["siteKey"] = site_key or record.get("siteKey", "")
             if mode == "no-episode-url":
                 record.pop("episodeUrl", None)
             elif mode == "empty-episode":
@@ -573,9 +620,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
         if mode == "slow":
             time.sleep(5)
-        payload = json.loads(
-            (ANDROID_FIXTURES / "manage-session.json").read_text(encoding="utf-8")
-        )
+        payload = _json_object(ANDROID_FIXTURES / "manage-session.json")
         payload["lastAccess"] = int(time.time() * 1000)
         if mode == "stopped":
             payload["running"] = False
@@ -946,13 +991,21 @@ class FixtureHandler(BaseHTTPRequestHandler):
         #
         # 两种挂载点都必须有：
         # - `/android/**`：规范命名空间，供预检脚本与契约测试用；
-        # - 根路径别名 `/device`、`/vod/api`、`/action`：**PC 客户端实际请求的路径**。
+        # - 根路径别名：**PC 客户端实际请求的路径**。
         #   PC 的 `normalizeBase` 只保留 scheme+host+port（`design/01` §4.2），
         #   会把 `/android` 前缀丢掉，所以集成测试的 base 只能用根路径形态。
+        #
+        # ⚠️ Phase 7 新增的 5 个路由（`/api/playback/*`、`/manage/*`）**同样**
+        # 必须有根别名：否则 PC 打的是 `/api/playback/history`，fixture 只在
+        # `/android/api/playback/history` 上应答，于是得到 404 → 被 PC 判成
+        # 「端点不存在」→ 心跳降级、拉取报 `realtimePullUnsupported`。
+        # 实测现象：`heartbeat(state=ok status=404 ... running=null)`。
         if path.startswith("/android"):
             self._send_android(path.removeprefix("/android"), parsed, canonical=True)
             return
-        if path in ("/device", "/vod/api", "/action"):
+        if path in ("/device", "/vod/api", "/action") or path.startswith(
+            ("/api/playback/", "/manage/")
+        ):
             self._send_android(path, parsed, canonical=False)
             return
         # TMDB 图片 fixture（`docs/phase4/design/05` §2.2 扩展）。

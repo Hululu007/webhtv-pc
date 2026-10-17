@@ -176,6 +176,8 @@ function Stop-FixtureServer {
 try {
     Start-FixtureServer
     $env:WEBHTV_FIXTURE_BASE = "http://127.0.0.1:$FixturePort"
+    # 保活 L3 需要 TCP 故障注入端口（`--tcp-mode tcp-accept-silent`）。
+    $env:WEBHTV_FIXTURE_TCP_PORT = "$TcpPort"
 
     # G1 安卓 fixture 预检：5 个新路由 + 9 种故障注入 + TCP 模式。
     Invoke-Checked 'android-fixture-preflight' {
@@ -236,7 +238,9 @@ try {
             'test/phase7_realtime_engine_test.dart',
             'test/phase7_realtime_state_test.dart',
             'test/phase7_sync_ui_test.dart',
-            'integration_test/phase7_resume_flow_test.dart'
+            'integration_test/phase7_resume_flow_test.dart',
+            'integration_test/phase7_realtime_flow_test.dart',
+            'integration_test/phase7_keepalive_flow_test.dart'
         )
         $missing = @()
         foreach ($relative in $required) {
@@ -281,7 +285,12 @@ try {
                 $global:LASTEXITCODE = 0
                 $suites = @(
                     # 续播集成（design/03 §5）：提前 EOF 不跳集 + 恢复续播。
-                    'integration_test/phase7_resume_flow_test.dart'
+                    'integration_test/phase7_resume_flow_test.dart',
+                    # 实时同步端到端（design/04 §3.1）：真实 HTTP 增量 + 幂等 + 403。
+                    'integration_test/phase7_realtime_flow_test.dart',
+                    # 保活三态端到端（design/02 §4）：真实 socket 区分
+                    # 「服务未运行」与「进程被冻结」。
+                    'integration_test/phase7_keepalive_flow_test.dart'
                 )
                 foreach ($suite in $suites) {
                     if (-not (Invoke-FlutterIntegrationSuite -Name $suite -File $suite)) {

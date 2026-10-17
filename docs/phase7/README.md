@@ -1,6 +1,6 @@
 # Phase 7 计划（安卓实时同步 + 保活心跳 + 续播修复）
 
-- 状态：**实施中**（T1–T13、T15–T17 已完成；T14 L3 集成待做）
+- 状态：**实施中**（T1–T17 全部完成；下一步为真机验证 V1–V5）
 - 日期：2026-10-17
 - 对应设计文档章节：本目录 `design/00`–`design/04`、`docs/webhtv-pc-design.md` §29（Phase 7）
 - 上游：`docs/phase5/README.md`（Phase 5：T4 站点桥接 + 历史/设置同步，已完成）、
@@ -27,7 +27,7 @@
 | T11 | 反向验证 8 项 | ✅ 完成 | `e62cc3e` |
 | T12 | 发布包符号 + 设计文档一致性门禁 | ✅ 完成 | `c918f15` |
 | T13 | 一键验收脚本（G1–G12 全绿） | ✅ 完成 | `cb7fbde` |
-| T14 | L3 集成（`phase7_realtime_flow_test` / `phase7_keepalive_flow_test`） | ⏳ 待做 | — |
+| T14 | L3 集成（实时同步 / 保活三态，真实 HTTP + 真实 socket） | ✅ 完成 | 本提交 |
 | T19 | 安卓侧契约补齐（A + C） | ✅ 已交付 | 安卓 `e55f19276fb0` |
 
 已绿的套件（`design/04` §3.1 清单，L1/L2 全部就位；L3 目前只有续播一条）：
@@ -47,6 +47,8 @@
 | `test/phase7_sync_ui_test.dart` | L2 | T8：14 项（符号/默认值/联动/六条披露/手动四按钮） |
 | `test/phase7_realtime_state_test.dart` | L2 | T7：15 项（开关矩阵 / 联动 / 持久化 / 引擎装配 / 路径 B 门禁） |
 | `integration_test/phase7_resume_flow_test.dart` | L3 | 真实窗口续播 + 闸门 |
+| `integration_test/phase7_realtime_flow_test.dart` | L3 | 真实 HTTP 增量（第二轮只拉增量 / 幂等 / 403 不推进游标 / 路径 B / 身份解析） |
+| `integration_test/phase7_keepalive_flow_test.dart` | L3 | 真实 socket 四态（可达 / 降级 / 服务未运行 / 进程冻结） |
 
 已实测的反向验证：`design/04` §3.2 的 **8 项全部完成**——
 `#1` `duration<=0`、`#2` `_advanceInFlight` 守卫、`#3` 失败回滚、

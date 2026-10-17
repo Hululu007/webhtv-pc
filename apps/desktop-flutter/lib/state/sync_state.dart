@@ -856,7 +856,10 @@ class SyncState extends ChangeNotifier {
           );
           return RealtimeSiteReadResult(
             items: result.items,
-            failures: result.failures.length,
+            // 解析失败 = 记录本身不可合并（集名与地址双空、身份键不成段）：
+            // **永久性**失败，下轮重试也是同样结果 → 计入 `unmergeable`
+            // （仍披露，但不阻止游标推进）。
+            unmergeable: result.failures.length,
             skippedAsUnchanged: result.skippedAsUnchanged,
             endpoint: result.endpoint,
             // 降级端点返回空 = 「当前没在放」的合法形态（不是失败）。

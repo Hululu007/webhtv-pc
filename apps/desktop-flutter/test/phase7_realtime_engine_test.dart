@@ -636,21 +636,29 @@ void main() {
       );
     });
 
-    test('E25 · 部分条目失败 → 游标不推进，整批下轮重试', () async {
+    test('E25 · 不可合并的记录不阻止游标推进（但仍计入 failed 明细）', () async {
+      // 这是 L3 集成测试抓出来的**真实缺陷**的回归：
+      // 「记录本身不可合并」（集名与地址双空、身份键不成段）是**永久性**失败
+      // ——下轮、下下轮永远同样结果。若把整轮归为 `partial`，而 `partial`
+      // 按 `design/01` §6.3 不推进游标，游标就**永久卡死**，增量语义失效。
+      //
+      // 正确行为：计入 `failed` 明细并披露（P5），但**照常推进游标**。
       host.reads['CupFox'] = RealtimeSiteReadResult(
         items: [item(updatedAt: 4000)],
-        failures: 1,
+        unmergeable: 1,
       );
       engine.start();
       final result = await engine.pollNow();
 
-      expect(result!.outcome, RealtimeBatchOutcome.partial);
-      expect(result.cursorAdvanced, isFalse);
-      expect(engine.cursor, 0);
-      expect(result.stats.failed, 1);
+      expect(result!.outcome, RealtimeBatchOutcome.success);
+      expect(result.cursorAdvanced, isTrue, reason: '永久失败不该卡住游标');
+      expect(engine.cursor, 4000);
+      expect(result.stats.failed, 1, reason: 'P5：不可合并的条数必须披露');
+      expect(result.unmergeable, 1);
+      expect(result.stats.isConsistent, isTrue);
     });
 
-    test('E26 · 合并阶段有 failed 也算 partial（游标不推进）', () async {
+    test('E26 · 合并阶段（写库）失败算 partial → 游标不推进（暂时性失败可重试）', () async {
       host.reads['CupFox'] = RealtimeSiteReadResult(
         items: [item(updatedAt: 4000)],
       );
@@ -710,7 +718,6 @@ void main() {
       host.reads['CupFox'] = RealtimeSiteReadResult(
         items: [item(vodId: '/a'), item(vodId: '/b')],
         skippedAsUnchanged: 1,
-        failures: 0,
       );
       host.mergeStats['CupFox'] = const SyncMergeStats(
         applied: 1,
