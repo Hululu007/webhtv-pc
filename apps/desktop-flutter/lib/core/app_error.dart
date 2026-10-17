@@ -112,6 +112,22 @@ enum AppErrorKind {
   syncLocalWriteRejected,
   syncPartialFailure,
 
+  // 实时同步（`design/01` §8）。
+  // 命名约定：`realtime*` 属同步协议层，`keepAlive*` 属保活/可达性层
+  // （`design/02` §7）。两层必须可区分——前者指向「开关 / 安卓版本 / 游标」，
+  // 后者指向「服务未运行 / 进程被冻结 / 网络不通」。合为一类会让用户
+  // 无法判断该去开开关、还是去改安卓电池设置。
+  realtimeSyncDisabled,
+  realtimePullUnsupported,
+  realtimePullDegraded,
+  realtimeCursorStale,
+  realtimePartialFailure,
+  keepAliveServiceStopped,
+  keepAlivePeerFrozen,
+  keepAliveNetworkUnreachable,
+  keepAliveUnsupported,
+  keepAliveUnauthorized,
+
   // 系统
   storage,
   unknown,
@@ -267,6 +283,32 @@ String describeErrorKind(AppErrorKind kind) {
       return '安卓拒绝写入：需在安卓的「观影记录同步」中开启「本机 API 修改」';
     case AppErrorKind.syncPartialFailure:
       return '同步部分失败（本地数据未被破坏）';
+    case AppErrorKind.realtimeSyncDisabled:
+      return '实时同步未开启，请在「安卓设置 → 实时同步」中打开总开关';
+    case AppErrorKind.realtimePullUnsupported:
+      // 不得说成「同步成功」或「0 条记录」——那会把「安卓端不支持」伪装成
+      // 「安卓端没有数据」，用户会以为自己的历史丢了（Phase 5 P5 延续）。
+      return '安卓端不支持按站点读取历史（/api/playback/history 不存在），'
+          '且当前无正在播放的记录。请升级安卓端';
+    case AppErrorKind.realtimePullDegraded:
+      return '安卓端不支持按站点读取历史，已降级为「仅同步正在播放的记录」——'
+          '息屏或未播放时无法同步';
+    case AppErrorKind.realtimeCursorStale:
+      return '同步游标比安卓端最新记录还新（安卓可能已重装或清数据），已自动重置游标';
+    case AppErrorKind.realtimePartialFailure:
+      return '实时同步部分失败（本地数据未被破坏，游标未推进，下轮重试）';
+    case AppErrorKind.keepAliveServiceStopped:
+      return '安卓的局域网服务未运行。请在安卓打开「管理页」并保持它运行';
+    case AppErrorKind.keepAlivePeerFrozen:
+      return '安卓进程被系统冻结（端口可连但无响应）。'
+          '请在安卓设置中允许本应用后台运行（电池 → 不受限制 / 允许自启动）';
+    case AppErrorKind.keepAliveNetworkUnreachable:
+      return '网络不可达：请确认 PC 与安卓在同一局域网，且安卓未切换 WiFi';
+    case AppErrorKind.keepAliveUnsupported:
+      return '安卓端不支持保活探测（/manage/session 与 /device 都不存在），已停止心跳。'
+          '请升级安卓端';
+    case AppErrorKind.keepAliveUnauthorized:
+      return '拉取端点鉴权失败：请检查 token 与白名单设置';
     case AppErrorKind.storage:
       return '本地存储读写失败';
     case AppErrorKind.unknown:
@@ -344,6 +386,35 @@ const Set<AppErrorKind> tmdbErrorKinds = {
 /// 沿用 Phase 3 字幕/弹幕/EPG 的同一模式：**只认前缀**。
 bool isTmdbError(Object? error) =>
     error is AppError && tmdbErrorKinds.contains(error.kind);
+
+/// 实时同步层错误类别（`design/01` §8）。
+///
+/// 与 [keepAliveErrorKinds] **互斥**：两者指向的用户动作完全不同
+/// （开开关/升级安卓 vs 修安卓后台设置/查网络），合并会丢掉可操作性。
+const Set<AppErrorKind> realtimeErrorKinds = {
+  AppErrorKind.realtimeSyncDisabled,
+  AppErrorKind.realtimePullUnsupported,
+  AppErrorKind.realtimePullDegraded,
+  AppErrorKind.realtimeCursorStale,
+  AppErrorKind.realtimePartialFailure,
+};
+
+/// 保活/可达性层错误类别（`design/02` §7）。
+const Set<AppErrorKind> keepAliveErrorKinds = {
+  AppErrorKind.keepAliveServiceStopped,
+  AppErrorKind.keepAlivePeerFrozen,
+  AppErrorKind.keepAliveNetworkUnreachable,
+  AppErrorKind.keepAliveUnsupported,
+  AppErrorKind.keepAliveUnauthorized,
+};
+
+/// 判断是否为实时同步错误。
+bool isRealtimeError(Object? error) =>
+    error is AppError && realtimeErrorKinds.contains(error.kind);
+
+/// 判断是否为保活错误。
+bool isKeepAliveError(Object? error) =>
+    error is AppError && keepAliveErrorKinds.contains(error.kind);
 
 /// TMDB 失败的用户提示文案（必须说明不影响站源浏览与播放）。
 String describeTmdbFailure(Object? error) {

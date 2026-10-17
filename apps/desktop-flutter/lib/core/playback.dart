@@ -258,3 +258,55 @@ class MediaRequestTarget {
     return MediaRequestTarget(host: uri?.host ?? '', scheme: uri?.scheme ?? '');
   }
 }
+
+// ---------------------------------------------------------------------------
+// 真播完判定（`docs/phase7/design/03` §4.1/§4.2）
+// ---------------------------------------------------------------------------
+
+/// 判定「真播完」的尾部余量（毫秒）。
+///
+/// 与 `SyncHistoryItem.completed`（`lib/core/android_sync.dart`）的 5000 一致：
+/// 同一份语义在三个地方（本地落库、跨端同步、播放器闸门）必须同值，
+/// 否则会出现「同步说播完、播放器说不播完」的错位（`design/03` §4.2）。
+const int genuineEndMarginMs = 5000;
+
+/// 「真播完」判定（`design/03` §4.1 的 `_isGenuineEnd`）。
+///
+/// **为什么不能直接采信播放器的 `completed`**：缓存耗尽时提前 EOF 会被
+/// media_kit 报成 `completed=true`，而那时 `duration` 往往还没取到（为 0）。
+/// 直接连播就会「跳下一集」——这正是用户实测的痛点（D2）。
+///
+/// 判定规则：
+/// - `durationMs <= 0` → **false**（时长未知不等于播完）；
+/// - `positionMs >= durationMs - [genuineEndMarginMs]` → true；
+/// - 其余 → false。
+///
+/// 三个调用点共用本函数：播放器连播闸门、同步合并、安卓 `completed` 重算。
+bool isGenuineEnd({
+  required int durationMs,
+  required int positionMs,
+  int marginMs = genuineEndMarginMs,
+}) {
+  if (durationMs <= 0) return false;
+  return positionMs >= durationMs - marginMs;
+}
+
+/// 跨端 `completed` 重算（`design/03` §4.2）。
+///
+/// **PC 一律不采信同步来的 `completed` 字段**：安卓用
+/// `position >= duration || progress >= 0.95`，对 45 分钟的剧集意味着
+/// 剩 135 s 就算播完，与 PC 的 5 s 余量**不等价**。采信它会让 PC 把
+/// 「其实还剩两分多钟」的记录标记为已看完，进而让续播失效。
+bool recomputeCompleted({required int durationMs, required int positionMs}) =>
+    isGenuineEnd(durationMs: durationMs, positionMs: positionMs);
+
+/// media_kit 的 `Duration` 形态入口（播放器调用点用）。
+bool isGenuineEndDuration({
+  required Duration duration,
+  required Duration position,
+  Duration margin = const Duration(milliseconds: genuineEndMarginMs),
+}) => isGenuineEnd(
+  durationMs: duration.inMilliseconds,
+  positionMs: position.inMilliseconds,
+  marginMs: margin.inMilliseconds,
+);
