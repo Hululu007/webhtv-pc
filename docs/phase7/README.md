@@ -219,9 +219,22 @@ T19 不在本仓库。**2026-10-17 已交付 A + C**（安卓 `dev4` 提交
 
 完整判据见 `design/04` §6。
 
+### 3.1 前置依赖（缺一个是**环境问题**，不是代码缺陷）
+
+一键验收会在缺依赖时失败，且失败形态容易误判（例如 G2/G3 直接退出 2）。
+先把这些装好：
+
+| 依赖 | 用于 | 缺失时的现象 | 安装 |
+| --- | --- | --- | --- |
+| `jsonschema`（Python） | G2 `tests.test_contracts`、G3 `scripts/validate_contracts.py` | `ModuleNotFoundError: No module named 'jsonschema'` / `错误：缺少 jsonschema`，退出码 2 | `py -3 -m pip install jsonschema` |
+| `puro` + `webhtv` 环境 | G4/G5/G6/G7/G8/G12 的 `flutter` / `dart` | `flutter: command not found`（本机不把 flutter 放进 PATH） | 已有；命令统一用 `puro -e webhtv -p .` |
+| 回环端口 18080/18081 空闲 | G1 的 fixture 服务（含 TCP 模式） | fixture 启动超时 | 关闭占用进程，或用 `-FixturePort`/`-TcpPort` 换端口 |
+
+### 3.2 门禁表
+
 | # | 门禁 | 命令 | 通过判据 |
 | --- | --- | --- | --- |
-| G1 | 安卓 fixture 预检 | `py -3 tools/phase7/check_android_fixture.py --base <url>` | 4 路由 + 3 故障注入 + 2 TCP 模式全通过 |
+| G1 | 安卓 fixture 预检 | `py -3 tools/phase7/check_android_fixture.py --base <url> --tcp <host:port>` | 5 路由 + 9 故障注入 + TCP 模式全通过 |
 | G2 | Python 契约 | `py -3 -m unittest tests.test_contracts` | 新增用例通过 |
 | G3 | Schema 校验 | `py -3 scripts/validate_contracts.py` | 无错误 |
 | G4 | 静态检查 | `dart analyze` | 无问题 |

@@ -40,6 +40,7 @@ import '../services/android_read_client.dart';
 import '../services/log_service.dart';
 import '../services/realtime_sync_engine.dart';
 import '../services/storage.dart';
+import '../services/settings_file.dart';
 import '../services/sync_client.dart';
 import '../services/sync_server.dart';
 
@@ -1597,48 +1598,45 @@ class SyncState extends ChangeNotifier {
   }
 
   Future<void> _writeSettings() async {
-    final file = File(settingsPath);
-    await file.parent.create(recursive: true);
-    final root = <String, Object?>{};
-    if (await file.exists()) {
-      try {
-        final decoded = jsonDecode(await file.readAsString());
-        if (decoded is Map) {
-          root.addAll(decoded.map((key, value) => MapEntry('$key', value)));
-        }
-      } catch (_) {
-        // 旧文件损坏 → 直接覆盖，不把损坏内容带进新文件。
-      }
-    }
-    root['sync'] = {
-      'version': 1,
-      'deviceUuid': _deviceUuid,
-      'deviceName': _deviceName,
-      'serverEnabled': _serverEnabled,
-      'pushEnabled': _pushEnabled,
-      'settingsSyncEnabled': _settingsSyncEnabled,
-      'peers': _peers.map((peer) => peer.toJson()).toList(),
-      'devices': _deviceHistory.map((item) => item.toJson()).toList(),
-        'lastBridge': _lastBridgeAddress,
-        // 身份注册表（`design/01` §3.2.1）：`adopt` 的结论必须跨重启可用。
-        'identity': _playbackIdentity.toJson(),
-        // 实时同步开关与游标（`design/01` §9.1）。
-        'realtime': {
-          ..._realtime.toJson(),
-          'pullCursorMs': _realtimePullCursorMs,
-          'pullToken': _realtimePullToken,
-          'lastPullAt': _realtimeEngine?.snapshot().lastPollAtMs ?? 0,
-          'lastHeartbeatAt':
-              _realtimeEngine?.snapshot().lastHeartbeatAtMs ?? 0,
-        },
-      };
-    final temporary = File('$settingsPath.tmp');
-    await temporary.writeAsString(
-      const JsonEncoder.withIndent('  ').convert(root),
-      flush: true,
+    // 写盘经共享工具（`settings_file.dart`）：
+    // - **同步临界区**：`UiPreferencesStore` 同时也在写同一个 `settings.json`。
+    //   Dart 单线程，所以「读→改→写 tmp→rename」之间只要没有 `await`
+    //   就不可能交错——同时堵住「文件丢失」与更隐蔽的「丢更新」
+    //   （对方刚写的段被自己的陈旧读覆盖回去）。
+    // - **独占临时名**：两者原先共用 `$settingsPath.tmp`，会互相覆盖。
+    // - **只改 `sync` 段**：读回时保留 `ui` 段。
+    final result = writeSettingsSectionSync(
+      path: settingsPath,
+      writer: SettingsWriter.sync,
+      mutate: (root) {
+        root['sync'] = {
+          'version': 1,
+          'deviceUuid': _deviceUuid,
+          'deviceName': _deviceName,
+          'serverEnabled': _serverEnabled,
+          'pushEnabled': _pushEnabled,
+          'settingsSyncEnabled': _settingsSyncEnabled,
+          'peers': _peers.map((peer) => peer.toJson()).toList(),
+          'devices': _deviceHistory.map((item) => item.toJson()).toList(),
+          'lastBridge': _lastBridgeAddress,
+          // 身份注册表（`design/01` §3.2.1）：`adopt` 的结论必须跨重启可用。
+          'identity': _playbackIdentity.toJson(),
+          // 实时同步开关与游标（`design/01` §9.1）。
+          'realtime': {
+            ..._realtime.toJson(),
+            'pullCursorMs': _realtimePullCursorMs,
+            'pullToken': _realtimePullToken,
+            'lastPullAt': _realtimeEngine?.snapshot().lastPollAtMs ?? 0,
+            'lastHeartbeatAt':
+                _realtimeEngine?.snapshot().lastHeartbeatAtMs ?? 0,
+          },
+        };
+        return true;
+      },
     );
-    if (await file.exists()) await file.delete();
-    await temporary.rename(settingsPath);
+    if (!result.ok) {
+      log.warning('保存同步设置失败：${result.error}', scope: 'sync');
+    }
   }
 
   /// 稳定 uuid：16 字节十六进制（重启后不变，`design/02` §8 Q5）。

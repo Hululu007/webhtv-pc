@@ -225,19 +225,35 @@ pwsh -File tools/phase7/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 
 实时同步与心跳引入**两个常驻 `Timer`**。Dart 的 `Timer` 若未取消，
 `flutter test` 会在用例结束后报 "A Timer is still pending"，但**只在
-`testWidgets` 里**报；纯 `test()` 不会。因此必须**显式**断言：
+`testWidgets` 里**报；纯 `test()` 不会。而引擎套件（`phase7_realtime_engine_test.dart`）
+是纯 `test()`，所以那条内置告警**永远不会**触发，必须显式断言。
+
+**实际落地的做法**（比 `FakeClock` 更彻底）：引擎不自己创建 `Timer`，
+而是接受一个可注入的 `RealtimeScheduler`（一次性定时器工厂）。
+测试注入 `ManualScheduler`，它**一个真实 `Timer` 都不创建**，
+只把回调排进列表；这样「活动定时器数」是一个可以直接数的整数：
 
 ```dart
-test('引擎停止后不残留定时器', () async {
-  final engine = RealtimeSyncEngine(clock: fakeClock, ...);
-  engine.start();
-  fakeClock.advance(const Duration(minutes: 5));
-  await engine.stop();
-  expect(fakeClock.pendingTimerCount, 0);
+setUp(() {
+  engine = RealtimeSyncEngine(scheduler: scheduler.call, ...);
+});
+
+tearDown(() {
+  engine.stop();
+  scheduler.clear();
+  expect(engine.activeTimerCount, 0, reason: 'G12：引擎停止后不得残留定时器');
 });
 ```
 
-`FakeClock` 必须实现 `pendingTimerCount`（包装 `fake_async` 的 `FakeAsync.pendingTimers`）。
+为什么不用 `fake_async` 的 `FakeClock.pendingTimerCount`：它是**全局**计数，
+会被同进程里其它组件的定时器（如状态层的写入节流）污染，
+而 `engine.activeTimerCount` 只回答「**这个引擎**有没有泄漏」。
+另外 `ManualScheduler.fireByDelay(60)` 能按**周期**触发（60 s = 轮询、
+30 s = 心跳），比“推进时钟”更能锁定“谁被重新排程了”。
+
+G12 在 `run_windows_acceptance.ps1` 里还额外断言套件真的带这条断言
+（搜 `activeTimerCount, 0`），因为“套件通过”本身不能区分
+“断言在”与“断言被删”。
 
 ---
 

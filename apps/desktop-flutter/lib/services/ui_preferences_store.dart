@@ -25,6 +25,7 @@ import 'dart:io';
 
 import '../core/history_view.dart';
 import 'log_service.dart';
+import 'settings_file.dart';
 
 /// 主题模式取值。
 ///
@@ -353,48 +354,40 @@ class UiPreferencesStore {
   }
 
   Future<bool> _doPersist() async {
-    try {
-      final file = File(path);
-      await file.parent.create(recursive: true);
-      final existing = <String, Object?>{};
-      if (await file.exists()) {
-        try {
-          final decoded = jsonDecode(await file.readAsString());
-          if (decoded is Map) {
-            existing.addAll(decoded.cast<String, Object?>());
-          }
-        } catch (_) {
-          // 旧文件损坏 → 直接覆盖，不把损坏内容带进新文件。
-        }
-      }
-      final ui = <String, Object?>{'lastSiteKey': _lastSiteKey};
-      if (_videoFitModes.isNotEmpty) ui['videoFitModes'] = _videoFitModes;
-      // 只有用户显式选过才写：缺席 = 默认，避免把默认值固化进文件。
-      final mode = _themeMode;
-      if (mode != null) ui['themeMode'] = mode;
-      if (_searchKeywords.isNotEmpty) ui['searchKeywords'] = _searchKeywords;
-      // 相似度同上：只有显式设置过才写，缺席 = 默认 30。
-      final similarity = _searchSimilarity;
-      if (similarity != null) ui['searchSimilarity'] = similarity;
-      // 并发线程数：同样缺席 = 默认 20。
-      final thread = _searchThread;
-      if (thread != null) ui['searchThread'] = thread;
-      // 点击行为同上：只有显式设置过才写，缺席 = 默认 detail。
-      final clickAction = _historyClickAction;
-      if (clickAction != null) ui['historyClickAction'] = clickAction;
-      existing['ui'] = ui;
-
-      final temporary = File('$path.tmp');
-      await temporary.writeAsString(
-        const JsonEncoder.withIndent('  ').convert(existing),
-        flush: true,
-      );
-      if (await file.exists()) await file.delete();
-      await temporary.rename(path);
-      return true;
-    } catch (error) {
-      _log?.error('保存 UI 偏好失败：$error', scope: 'ui');
+    // 写盘经共享工具（`settings_file.dart`）：
+    // - **同步临界区**：`SyncState` 同时也在写同一个 `settings.json`。
+    //   Dart 单线程，所以「读→改→写 tmp→rename」之间只要没有 `await`
+    //   就不可能交错——这同时堵住了「文件丢失」与更隐蔽的「丢更新」
+    //   （对方刚写的段被自己的陈旧读覆盖回去）。
+    // - **独占临时名**：两者原先共用 `$path.tmp`，会互相覆盖。
+    // - **只改 `ui` 段**：读回时保留 `sync` 段。
+    final result = writeSettingsSectionSync(
+      path: path,
+      writer: SettingsWriter.uiPreferences,
+      mutate: (root) {
+        final ui = <String, Object?>{'lastSiteKey': _lastSiteKey};
+        if (_videoFitModes.isNotEmpty) ui['videoFitModes'] = _videoFitModes;
+        // 只有用户显式选过才写：缺席 = 默认，避免把默认值固化进文件。
+        final mode = _themeMode;
+        if (mode != null) ui['themeMode'] = mode;
+        if (_searchKeywords.isNotEmpty) ui['searchKeywords'] = _searchKeywords;
+        // 相似度同上：只有显式设置过才写，缺席 = 默认 30。
+        final similarity = _searchSimilarity;
+        if (similarity != null) ui['searchSimilarity'] = similarity;
+        // 并发线程数：同样缺席 = 默认 20。
+        final thread = _searchThread;
+        if (thread != null) ui['searchThread'] = thread;
+        // 点击行为同上：只有显式设置过才写，缺席 = 默认 detail。
+        final clickAction = _historyClickAction;
+        if (clickAction != null) ui['historyClickAction'] = clickAction;
+        root['ui'] = ui;
+        return true;
+      },
+    );
+    if (!result.ok) {
+      _log?.error('保存 UI 偏好失败：${result.error}', scope: 'ui');
       return false;
     }
+    return true;
   }
 }

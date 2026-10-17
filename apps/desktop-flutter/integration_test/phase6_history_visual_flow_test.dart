@@ -356,7 +356,7 @@ void main() {
     });
 
     // 单季场景：按钮仍常驻（这是改绑的唯一入口）。
-    final tmdb = state.tmdb;
+    //
     // 直接驱动 TmdbState 到「已匹配单季」需要真实 TMDB 服务；本 harness
     // 不发外网，因此用 `SeasonChipStrip` 直接渲染同一行形态并截图。
     // **诚实标注**：这张图证明的是**组件形态**（按钮 + chip 条），
