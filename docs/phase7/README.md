@@ -1,11 +1,38 @@
 # Phase 7 计划（安卓实时同步 + 保活心跳 + 续播修复）
 
-- 状态：**设计完成，待评审 → 实施**
+- 状态：**实施中**（T1–T3、T15–T17 已完成；T4–T14 待做）
 - 日期：2026-10-17
 - 对应设计文档章节：本目录 `design/00`–`design/04`、`docs/webhtv-pc-design.md` §29（Phase 7）
 - 上游：`docs/phase5/README.md`（Phase 5：T4 站点桥接 + 历史/设置同步，已完成）、
   `docs/phase6/README.md`（Phase 6：历史页 / 详情页续播 / 季度选集 / AI 集季识别，已完成）
 - 上游参考工程：`webhtv/默影视`（Android，`F:\Workspace\webtv3\webhtv`）
+
+## 0.1 实施进度
+
+| 任务 | 产出 | 状态 | 提交 |
+| --- | --- | --- | --- |
+| T1 | `lib/core/realtime_sync.dart`（游标/增量/方向/周期/退避） | ✅ 完成 | `dd0a45e` |
+| T2 | 同上（三态判定 + 唤醒阶梯） | ✅ 完成 | `dd0a45e` |
+| T3 | `lib/core/playback.dart`（`isGenuineEnd` + `completed` 跨端语义） | ✅ 完成 | `dd0a45e` |
+| T15 | 连播改事件驱动 + `_advanceInFlight` 守卫 | ✅ 完成 | `1175ba0` |
+| T16 | `_isGenuineEnd` 接入连播闸门 | ✅ 完成 | `1175ba0` |
+| T17 | 失败回滚 `_request` + `clearCompleted()` + 三出口 | ✅ 完成 | `1175ba0` |
+| T4–T14 | 读取客户端 / 拉取端点 / 实时引擎 / 状态层 / UI / fixture / 反向验证 / 验收 | ⏳ 待做 | — |
+| T19 | 安卓侧契约补齐（A + C） | ✅ 已交付 | 安卓 `e55f19276fb0` |
+
+已绿的套件（`design/04` §3.1 清单中的 4 个）：
+
+| 套件 | 层 | 用例 |
+| --- | --- | --- |
+| `test/phase7_realtime_core_test.dart` | L1 | S1–S33 |
+| `test/phase7_keepalive_test.dart` | L1 | K1–K11 |
+| `test/phase7_resume_gate_test.dart` | L1 | R1–R6 |
+| `test/phase7_player_advance_test.dart` | L2 | R7–R15 |
+| `integration_test/phase7_resume_flow_test.dart` | L3 | 真实窗口续播 + 闸门 |
+
+已实测的反向验证（`design/04` §3.2 的 8 项中已完成 5 项）：
+#1 `duration<=0`、#2 `_advanceInFlight` 守卫、#3 失败回滚、
+#4 三态误归类、#5 退避恒定、#6 游标过早推进、#8 凭据项默认参与。
 
 ---
 
