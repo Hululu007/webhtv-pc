@@ -30,3 +30,7 @@ sidecars/spider-host-jvm/.build/
 
 # Locally provisioned Phase 0 toolchains
 .local/
+
+# Phase 7 验收脚本的临时输出（不应入库）
+tools/phase7/_run.out
+tools/phase7/_run.err
