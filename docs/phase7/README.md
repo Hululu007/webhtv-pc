@@ -17,10 +17,12 @@
 | T15 | 连播改事件驱动 + `_advanceInFlight` 守卫 | ✅ 完成 | `1175ba0` |
 | T16 | `_isGenuineEnd` 接入连播闸门 | ✅ 完成 | `1175ba0` |
 | T17 | 失败回滚 `_request` + `clearCompleted()` + 三出口 | ✅ 完成 | `1175ba0` |
-| T4–T14 | 读取客户端 / 拉取端点 / 实时引擎 / 状态层 / UI / fixture / 反向验证 / 验收 | ⏳ 待做 | — |
+| T9 | 设置白名单扩展到 AI 段 + `unsupportedKeys` + `raw` 保真 | ✅ 完成 | `68e1c79` |
+| T4–T8 | 读取客户端 / 拉取端点 / 实时引擎 / 状态层 / UI | ⏳ 待做 | — |
+| T10–T14 | fixture / 反向验证脚本 / 符号门禁 / 一键验收 / L3 集成 | ⏳ 待做 | — |
 | T19 | 安卓侧契约补齐（A + C） | ✅ 已交付 | 安卓 `e55f19276fb0` |
 
-已绿的套件（`design/04` §3.1 清单中的 4 个）：
+已绿的套件（`design/04` §3.1 清单中的 6 个）：
 
 | 套件 | 层 | 用例 |
 | --- | --- | --- |
@@ -28,11 +30,14 @@
 | `test/phase7_keepalive_test.dart` | L1 | K1–K11 |
 | `test/phase7_resume_gate_test.dart` | L1 | R1–R6 |
 | `test/phase7_player_advance_test.dart` | L2 | R7–R15 |
+| `test/phase7_settings_mapping_test.dart` | L2 | S23–S29 |
 | `integration_test/phase7_resume_flow_test.dart` | L3 | 真实窗口续播 + 闸门 |
 
-已实测的反向验证（`design/04` §3.2 的 8 项中已完成 5 项）：
+已实测的反向验证：`design/04` §3.2 的 **8 项全部完成**——
 #1 `duration<=0`、#2 `_advanceInFlight` 守卫、#3 失败回滚、
-#4 三态误归类、#5 退避恒定、#6 游标过早推进、#8 凭据项默认参与。
+#4 三态误归类、#5 退避恒定、#6 游标过早推进、
+#7 `ai_config` 当对象读、#8 凭据项默认参与。
+（#1–#6、#8 见 `dd0a45e`/`1175ba0`，#7 见 `68e1c79`。）
 
 ---
 
