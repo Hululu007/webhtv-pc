@@ -143,7 +143,7 @@ Map<String, Object?> androidRecord({
   'flag': flag,
   'sourceBindingKey': '线路1#0',
   'episodeName': episodeName,
-  if (episodeId != null) 'episodeId': episodeId,
+  'episodeId': ?episodeId,
   'positionMs': positionMs,
   'durationMs': durationMs,
   'progress': durationMs == 0 ? 0.0 : positionMs / durationMs,
@@ -151,9 +151,9 @@ Map<String, Object?> androidRecord({
   'speedOverride': false,
   'completed': false,
   'state': 'idle',
-  if (timestamp != null) 'timestamp': timestamp,
-  if (createTime != null) 'createTime': createTime,
-  if (updatedAt != null) 'updatedAt': updatedAt,
+  'timestamp': ?timestamp,
+  'createTime': ?createTime,
+  'updatedAt': ?updatedAt,
 };
 
 void main() {

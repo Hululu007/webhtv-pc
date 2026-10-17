@@ -11,6 +11,7 @@
 /// `tools/phase7/verify_reverse_checks.py` 的 8 项反向破坏能在秒级验证。
 library;
 
+import 'android_sync.dart';
 import 'app_error.dart';
 
 // ---------------------------------------------------------------------------
@@ -1346,3 +1347,220 @@ class RealtimePullDegradation {
       'records=$recordCount skippedUnchanged=$skippedAsUnchanged '
       'disclosure=$needsDisclosure)';
 }
+
+// ---------------------------------------------------------------------------
+// 路径 B：PC 拉取端点（`design/01` §3.2.2）
+// ---------------------------------------------------------------------------
+
+/// 路径 B 的游标上限（`design/01` §3.2.2：`limit` 默认 100、上限 500）。
+const int realtimeSyncDefaultLimit = 100;
+const int realtimeSyncMaxLimit = 500;
+
+/// 解析 `X-WebHTV-Since` / `?since=` 游标（`design/01` §3.2.2）。
+///
+/// 游标是**单调递增的 sequence 整数**（`design/00` §3.1 契约 9），不是时间戳。
+/// 空/缺省 = `0`；非法（非数字或负数）→ `null`，调用方必须回 **400**
+/// （对齐 Go 参考实现：`Invalid X-WebHTV-Since cursor`）。
+///
+/// **为什么非法游标必须报错而不是回落 0**：回落到 0 会让安卓把全部历史
+/// 再拉一遍。数据不会错（幂等合并），但用户会看到一次莫名的全量传输；
+/// 而 400 能让它立刻发现自己的游标坏了。
+int? parseSyncCursor(String? raw) {
+  if (raw == null) return 0;
+  final text = raw.trim();
+  if (text.isEmpty) return 0;
+  final parsed = int.tryParse(text);
+  if (parsed == null || parsed < 0) return null;
+  return parsed;
+}
+
+/// 解析 `limit`（`design/01` §3.2.2：默认 100、上限 500）。
+///
+/// 非法值回落默认而不是报 400——与游标不同：limit 只是「一次要多少」，
+/// 给个坏值不该让整次拉取失败（对齐安卓 `PlaybackRemoteSyncPayload` 的宽容）。
+int parseSyncLimit(String? raw) {
+  if (raw == null) return realtimeSyncDefaultLimit;
+  final parsed = int.tryParse(raw.trim());
+  if (parsed == null || parsed <= 0) return realtimeSyncDefaultLimit;
+  return parsed > realtimeSyncMaxLimit ? realtimeSyncMaxLimit : parsed;
+}
+
+/// 路径 B 的鉴权结论（`design/01` §3.2.2）。
+class SyncPullAuthCheck {
+  const SyncPullAuthCheck({required this.allowed, this.status = 403, this.message});
+
+  const SyncPullAuthCheck.ok() : allowed = true, status = 200, message = null;
+
+  final bool allowed;
+  final int status;
+  final String? message;
+}
+
+/// 校验路径 B 的鉴权（`design/01` §3.2.2）。
+///
+/// 规则（按顺序）：
+/// 1. 「实时推送」未开启 → `403`（P1：端点只在显式开启后返回数据）；
+/// 2. 配置了 token 时：请求头 token 必须匹配，否则 `403`；
+/// 3. 未配置 token 时：只允许 `uuid` 白名单内的对端（复用 Phase 5
+///    `isPeerAuthorized`）。
+///
+/// **为什么 token 与白名单是「或」而不是「与」**：token 是给
+/// 「PC 与安卓不在同一网段 / 用户想显式带凭据」的场景；白名单是局域网
+/// 默认形态。两者都要求会让默认配置无法工作。
+SyncPullAuthCheck validateSyncPullAuth({
+  required bool pushEnabled,
+  required String? configuredToken,
+  required String? providedToken,
+  required bool peerAuthorized,
+}) {
+  if (!pushEnabled) {
+    return const SyncPullAuthCheck(
+      allowed: false,
+      message: '实时推送未开启（请在 WebHTV PC 的「实时同步」中开启）',
+    );
+  }
+  final expected = (configuredToken ?? '').trim();
+  if (expected.isNotEmpty) {
+    if ((providedToken ?? '').trim() != expected) {
+      return const SyncPullAuthCheck(allowed: false, message: 'token 不匹配');
+    }
+    return const SyncPullAuthCheck.ok();
+  }
+  if (!peerAuthorized) {
+    return const SyncPullAuthCheck(
+      allowed: false,
+      message: '对端未授权（未配置 token 时只允许已授权设备）',
+    );
+  }
+  return const SyncPullAuthCheck.ok();
+}
+
+/// 一批待推给安卓的变更（`design/01` §3.2.2 的响应素材）。
+class SyncPullBatch {
+  const SyncPullBatch({
+    required this.items,
+    required this.deletions,
+    required this.nextSince,
+    required this.hasMore,
+  });
+
+  /// upsert 条目（`PlaybackProgressInput` 兼容 JSON）。
+  final List<Map<String, Object?>> items;
+
+  /// 删除条目（`{historyKey, deletedAt}`）。
+  final List<Map<String, Object?>> deletions;
+
+  /// 本批最大游标。
+  final int nextSince;
+
+  /// 是否还有未返回的变更。
+  final bool hasMore;
+
+  int get total => items.length + deletions.length;
+
+  /// 转成安卓解析器接受的响应体（`design/01` §3.2.2 的兼容点）。
+  ///
+  /// 用**主名**（`nextSince`/`items`/`deleted`）而不是别名：别名是给
+  /// 「服务端可能用别的名字」的容错，PC 自己实现时用主名最清晰。
+  Map<String, Object?> toJson() => {
+    'nextSince': nextSince,
+    'items': items,
+    if (deletions.isNotEmpty) 'deleted': deletions,
+    'hasMore': hasMore,
+  };
+
+  String describe() =>
+      'pull(items=${items.length} deleted=${deletions.length} '
+      'nextSince=$nextSince hasMore=$hasMore)';
+}
+
+/// 按游标切出一批变更（`design/01` §3.2.2 的游标语义）。
+///
+/// - [since] 为 `0`（空游标）→ 返回**最近 N 条**（不做全量，见 P2）；
+/// - [since] 有值 → 只返回 `updatedAt > since` 的记录；
+/// - `nextSince` = 本批最大 `updatedAt`（空批时保持 `since`，**不回退**）；
+/// - 删除从 [deletions] 里取 `deletedAt > since` 的。
+///
+/// **不推进任何本地游标**——游标由安卓侧保存（`RemoteSyncConfig.cursors`）。
+SyncPullBatch buildSyncPullBatch({
+  required List<SyncHistoryItem> history,
+  required List<({String historyKey, int deletedAt})> deletions,
+  required int since,
+  required int limit,
+}) {
+  final effectiveLimit = limit <= 0 ? realtimeSyncDefaultLimit : limit;
+
+  final upserts = history.where((item) => item.updatedAt > since).toList()
+    ..sort((a, b) => a.updatedAt.compareTo(b.updatedAt));
+  final tombstones = deletions.where((d) => d.deletedAt > since).toList()
+    ..sort((a, b) => a.deletedAt.compareTo(b.deletedAt));
+
+  // 空游标（首次同步）时只给最近 N 条：P2「增量优先，全量必须显式」。
+  final isFirstSync = since <= 0;
+
+  final selectedItems = <SyncHistoryItem>[];
+  final selectedDeletions = <({String historyKey, int deletedAt})>[];
+  var remaining = effectiveLimit;
+
+  for (final item in upserts) {
+    if (remaining <= 0) break;
+    selectedItems.add(item);
+    remaining--;
+  }
+  for (final tombstone in tombstones) {
+    if (remaining <= 0) break;
+    selectedDeletions.add(tombstone);
+    remaining--;
+  }
+
+  // nextSince 取本批最大游标；空批时**保持 since**（回退会让安卓重复拉取）。
+  var nextSince = since;
+  for (final item in selectedItems) {
+    if (item.updatedAt > nextSince) nextSince = item.updatedAt;
+  }
+  for (final tombstone in selectedDeletions) {
+    if (tombstone.deletedAt > nextSince) nextSince = tombstone.deletedAt;
+  }
+
+  final hasMore =
+      upserts.length > selectedItems.length ||
+      tombstones.length > selectedDeletions.length;
+
+  return SyncPullBatch(
+    items: selectedItems.map(_historyToProgressInput).toList(growable: false),
+    deletions: selectedDeletions
+        .map((d) => <String, Object?>{
+              'historyKey': d.historyKey,
+              'deletedAt': d.deletedAt,
+            })
+        .toList(growable: false),
+    nextSince: nextSince,
+    hasMore: hasMore || (isFirstSync && hasMore),
+  );
+}
+
+/// 把一条本地历史映射成安卓 `PlaybackProgressInput` 兼容 JSON
+/// （`design/01` §3.2.2 的字段别名表）。
+///
+/// 与 `SyncHistoryItem.toAndroidJson()` 的区别：后者是
+/// **`History` 形态**（给 `/action?do=sync` 用，`key` 带 `@@@` 分隔），
+/// 这里是 **`PlaybackProgressInput` 形态**（给 `/api/playback/sync` 用，
+/// 用 `historyKey` + `updatedAt`）。
+Map<String, Object?> _historyToProgressInput(SyncHistoryItem item) => {
+  'historyKey': item.historyKey,
+  'siteKey': item.siteKey,
+  'vodId': item.vodId,
+  'vodName': item.vodName,
+  if (item.vodPic != null) 'vodPic': item.vodPic,
+  'flag': item.flag,
+  'episodeName': item.episodeName,
+  'episodeId': item.episodeId,
+  'positionMs': item.positionMs,
+  'durationMs': item.durationMs,
+  // PC 侧一律按自己的公式重算（`design/03` §4.2），不采信同步来的值。
+  'completed': item.completed,
+  'speed': 1.0,
+  // 关键：`updatedAt` 必须显式给。安卓的 `PlaybackProgressWriter`
+  // 用它做 `setCreateTime` 与冲突裁决（`PlaybackProgressWriter.java:200,227`）。
+  'updatedAt': item.updatedAt,
+};

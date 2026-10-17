@@ -33,6 +33,7 @@ import '../core/android_bridge.dart';
 import '../core/android_sync.dart';
 import '../core/app_error.dart';
 import '../core/protocol.dart';
+import '../core/realtime_sync.dart';
 import '../services/android_bridge_service.dart';
 import '../services/log_service.dart';
 import '../services/storage.dart';
@@ -218,6 +219,15 @@ class SyncState extends ChangeNotifier {
   bool _loaded = false;
   bool _serverEnabled = false;
   bool _pushEnabled = false;
+
+  /// 路径 B 的可选 token（`design/01` §3.2.2）。
+  ///
+  /// 为空时只允许 uuid 白名单内的对端（局域网默认形态）。
+  /// 持久化键为 `sync.realtime.pullToken`（T7 接入 UI）。
+  ///
+  /// T7 会接入设置页写入，因此保留可变。
+  // ignore: prefer_final_fields
+  String _realtimePullToken = '';
   bool _settingsSyncEnabled = false;
   String _deviceUuid = '';
   String _deviceName = '';
@@ -960,7 +970,46 @@ class SyncState extends ChangeNotifier {
         ),
       );
     },
+    // 路径 B（`design/01` §3.2.2）：安卓的「远端同步源」来拉增量。
+    //
+    // 游标由安卓侧保存，PC **不推进任何本地游标**。
+    //
+    // 门禁：复用 Phase 5 的 `pushEnabled`（语义同为「允许数据离开 PC 去安卓」）。
+    // `design/01` §6.2 的 `realtime.pushEnabled` 子开关属 T7，
+    // 待 T7 落地后改为「`pushEnabled` 且 `realtime.pushEnabled`」。
+    realtimePull: _pushEnabled
+        ? ({required int since, required int limit}) => buildSyncPullBatch(
+            history: host.syncHistoryItems(),
+            deletions: _realtimeDeletions(),
+            since: since,
+            limit: limit,
+          )
+        : null,
+    pullToken: _realtimePullToken,
   );
+
+  /// 删除墓碑 → 安卓形态的 `historyKey`（`design/01` §3.2.2）。
+  ///
+  /// 墓碑表存的是 `matchKey`（`\x00` 分隔：siteKey/vodId/flag/episodeId），
+  /// 而路径 B 要的是安卓形态的 `historyKey`（`@@@` 分隔：siteKey/vodId/cid）。
+  /// 两者只有前两段共享，因此必须**重建**而不是直接透传——
+  /// 直接透传会让安卓认不出这条删除属于哪条记录。
+  List<({String historyKey, int deletedAt})> _realtimeDeletions() {
+    final database = host.syncDatabase;
+    if (database == null) return const [];
+    final result = <({String historyKey, int deletedAt})>[];
+    for (final entry in database.historyDeletionIndex().entries) {
+      final parts = entry.key.split('\x00');
+      if (parts.length < 2) continue;
+      result.add((
+        historyKey:
+            '${parts[0]}$androidHistoryKeySeparator${parts[1]}'
+            '${androidHistoryKeySeparator}0',
+        deletedAt: entry.value,
+      ));
+    }
+    return result;
+  }
 
   SyncMergeStats _mergeHistory(SyncHistoryParseResult parsed) {
     final database = host.syncDatabase;

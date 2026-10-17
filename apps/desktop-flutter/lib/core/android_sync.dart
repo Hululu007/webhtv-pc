@@ -214,6 +214,15 @@ class SyncHistoryItem {
   /// （`Backup.restoreConfig()`），把它当身份会让同一集在两端对不上。
   String get matchKey => '$siteKey\x00$vodId\x00$flag\x00$episodeId';
 
+  /// 安卓 `History` 主键形态：`siteKey@@@vodId@@@cid`（`design/02` §3.4）。
+  ///
+  /// 与 [matchKey] 的区别：这是**安卓侧的身份**（带 `cid`），用于路径 B 的
+  /// `PlaybackProgressInput.historyKey` 字段。反向推送时 `cid` 写 **0**
+  /// （与 [toAndroidJson] 同因：安卓会按 `source → 实际 cid` 重映射）。
+  String get historyKey =>
+      '$siteKey$androidHistoryKeySeparator$vodId'
+      '${androidHistoryKeySeparator}0';
+
   /// 是否已播完：`position >= duration - 5000`（`design/02` §8 Q7）。
   ///
   /// `duration <= 0` 时**不算**播完 —— 这是"尚未取到时长"的形态，
@@ -287,8 +296,7 @@ class SyncHistoryItem {
   /// - `opening` / `ending` **省略**：让安卓用自身默认哨兵值，
   ///   写 `null` 或 `-9223372036854775808` 都会让它的开跳片头逻辑出错。
   Map<String, Object?> toAndroidJson() => {
-    'key': '$siteKey$androidHistoryKeySeparator$vodId'
-        '${androidHistoryKeySeparator}0',
+    'key': historyKey,
     'vodName': vodName,
     'vodPic': vodPic ?? '',
     'vodFlag': flag,

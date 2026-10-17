@@ -26,6 +26,7 @@ import '../core/android_bridge.dart';
 import '../core/android_sync.dart';
 import '../core/app_error.dart';
 import '../core/protocol.dart';
+import '../core/realtime_sync.dart';
 import 'log_service.dart';
 
 /// 服务端能对外提供的信息与能力（由状态层注入，服务端不直接碰 `AppState`）。
@@ -39,6 +40,8 @@ class SyncServerHost {
     required this.onKeep,
     required this.onBackup,
     this.onPullRequest,
+    this.realtimePull,
+    this.pullToken,
   });
 
   /// PC 的稳定 uuid（首次启动生成并持久化，`design/02` §8 Q5）。
@@ -67,16 +70,40 @@ class SyncServerHost {
 
   /// 对端要求 PC 主动推给它（`mode=2` + `device`）时调用。
   final Future<void> Function(String deviceJson)? onPullRequest;
+
+  /// 路径 B：按游标取一批变更（`design/01` §3.2.2）。
+  ///
+  /// 返回 `null` 表示「实时推送」未开启 → 端点回 403（P1）。
+  /// 由状态层实现（它才能读本地历史与删除墓碑）。
+  final SyncPullProvider? realtimePull;
+
+  /// 路径 B 的可选 token（`design/01` §3.2.2）。
+  ///
+  /// 为空时只允许 `uuid` 白名单内的对端（局域网默认形态）。
+  final String? pullToken;
 }
+
+/// 路径 B 的取数回调签名。
+///
+/// [since] 是安卓给的游标（`0` = 空游标 / 首次同步）；
+/// [limit] 已由服务端夹到合法区间。
+typedef SyncPullProvider =
+    SyncPullBatch Function({required int since, required int limit});
 
 /// 一次请求的处理结果（供测试直接断言状态码与 message）。
 class SyncResponse {
-  const SyncResponse(this.statusCode, this.body);
+  const SyncResponse(this.statusCode, this.body, {this.isJson = false});
 
-  const SyncResponse.ok(String detail) : statusCode = 200, body = 'OK $detail';
+  const SyncResponse.ok(String detail)
+    : statusCode = 200,
+      body = 'OK $detail',
+      isJson = false;
 
   final int statusCode;
   final String body;
+
+  /// 是否以 `application/json` 返回（路径 B 的响应体是 JSON）。
+  final bool isJson;
 
   bool get isOk => statusCode == 200;
 
@@ -195,7 +222,13 @@ class SyncServer {
       final response = switch (path) {
         '/device' => _handleDevice(request),
         '/action' => await _handleAction(request),
-        _ => const SyncResponse(404, '未知路径（仅支持 /device 与 /action）'),
+        // 路径 B（`design/01` §3.2.2）：安卓的「远端同步源」就是客户端定时拉
+        // HTTP 端点，PC 暴露这个端点即可获得「安卓侧实时」。
+        '/api/playback/sync' || '/playback/sync' => _handleRealtimePull(request),
+        _ => const SyncResponse(
+          404,
+          '未知路径（仅支持 /device、/action 与 /api/playback/sync）',
+        ),
       };
       await _write(request, response);
     } catch (error) {
@@ -348,6 +381,64 @@ class SyncServer {
     await callback(deviceJson);
   }
 
+  /// `GET /api/playback/sync?since=&limit=`（`design/01` §3.2.2）。
+  ///
+  /// 安卓的「远端同步源」会带这些头：
+  /// `X-WebHTV-Config-Key` / `X-WebHTV-Config-Aliases` / `X-WebHTV-Since` /
+  /// `X-WebHTV-Limit` / `X-WebHTV-Token`。
+  /// 同时接受 query 参数（`since`/`limit`）——安卓两种都可能用。
+  ///
+  /// **不推进任何本地游标**：游标由安卓侧保存（`RemoteSyncConfig.cursors`）。
+  SyncResponse _handleRealtimePull(HttpRequest request) {
+    if (request.method != 'GET') {
+      return const SyncResponse(405, '仅支持 GET');
+    }
+    final provider = host.realtimePull;
+    final query = request.uri.queryParameters;
+    final headerSince = request.headers.value('x-webhtv-since');
+    final headerLimit = request.headers.value('x-webhtv-limit');
+    final headerToken = request.headers.value('x-webhtv-token');
+
+    // 游标：非法值必须 400（对齐 Go 参考实现），不得回落 0——
+    // 回落会让安卓把全部历史再拉一遍（数据不错但用户看到一次莫名全量）。
+    //
+    // **header 优先于 query**：安卓 `PlaybackRemoteSyncer` 发的是 header，
+    // query 只是给手动调试/第三方服务端的便利形式；
+    // 两者都给时以客户端真实协议为准。
+    final rawSince = headerSince ?? query['since'];
+    final since = parseSyncCursor(rawSince);
+    if (since == null) {
+      return SyncResponse(
+        400,
+        'Invalid X-WebHTV-Since cursor（收到 ${rawSince ?? '(空)'}）',
+      );
+    }
+    final limit = parseSyncLimit(headerLimit ?? query['limit']);
+
+    final peerAddress = request.connectionInfo?.remoteAddress.address ?? '';
+    final auth = validateSyncPullAuth(
+      pushEnabled: host.isEnabled() && provider != null,
+      configuredToken: host.pullToken,
+      providedToken: headerToken,
+      peerAuthorized: host.isPeerAuthorized(peerAddress),
+    );
+    if (!auth.allowed) {
+      log.warning(
+        '实时拉取被拒绝 status=${auth.status} since=$since '
+        'peer=${_maskAddress(peerAddress)} reason=${auth.message}',
+        scope: 'realtime',
+      );
+      return SyncResponse(auth.status, auth.message ?? '请求被拒绝');
+    }
+
+    final batch = provider!(since: since, limit: limit);
+    log.info(
+      '实时拉取响应 ${batch.describe()} peer=${_maskAddress(peerAddress)}',
+      scope: 'realtime',
+    );
+    return SyncResponse(200, jsonEncode(batch.toJson()), isJson: true);
+  }
+
   /// 从表单里取对端自报的 uuid（`device` JSON 优先，其次平铺字段）。
   String _peerUuid(Map<String, String> fields, Map<String, String> params) {
     for (final candidate in [fields['device'], fields['deviceUuid']]) {
@@ -465,16 +556,22 @@ class SyncServer {
     try {
       request.response
         ..statusCode = response.statusCode
-        ..headers.contentType = ContentType(
-          'text',
-          'plain',
-          charset: 'utf-8',
-        )
+        ..headers.contentType = response.isJson
+            ? ContentType('application', 'json', charset: 'utf-8')
+            : ContentType('text', 'plain', charset: 'utf-8')
         ..write(response.body);
       await request.response.close();
     } on Object {
       // 对端可能已断开；同步失败由状态层呈现，这里不额外抛。
     }
+  }
+
+  /// 地址脱敏：只留前两段（`design/02` §7 的同一口径）。
+  String _maskAddress(String address) {
+    if (address.isEmpty) return '****';
+    final parts = address.split('.');
+    if (parts.length == 4) return '${parts[0]}.${parts[1]}.*.*';
+    return '****';
   }
 
   /// uuid 只留前 4 位（`design/02` §7）。
