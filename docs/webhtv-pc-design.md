@@ -2222,6 +2222,43 @@ fixture 只能证明解析逻辑正确，不能证明现实站点可用。必须
 - 同步失败不破坏本地数据。
 - 所有同步默认关闭并需要用户明确开启。
 
+### Phase 6：历史/详情页/季度控件/AI 集季识别
+
+目标：把历史记录页、详情页续播、季度与选集控件对齐上游安卓交互，
+并补上 AI 集季结构识别。
+
+> 完整设计指导见 `docs/phase6/design/00`–`design/05`，阶段计划见 `docs/phase6/README.md`。
+
+状态：**已完成**（2026-10-16）。
+
+### Phase 7：安卓实时同步与长连接保活
+
+目标：把 Phase 5 的「手动、一次性、快照式」同步升级为「可选的实时、增量、双向」，
+并修复两个用户实测痛点（息屏后失联、缓存耗尽后跳下一集）。
+
+> 完整设计指导见 `docs/phase7/design/00`–`design/04`，阶段计划见 `docs/phase7/README.md`，
+> 主设计文档摘要见 §29。
+
+功能：
+
+1. **实时同步**：历史 / TMDB / AI 设置按周期增量互通（默认 60 s，可关，开关粒度到方向）。
+2. **双向路径**：PC 轮询（路径 A）+ PC 暴露增量端点供安卓远端同步源消费（路径 B）。
+3. **保活与唤醒**：心跳（保活 + 可达性 + 状态采集）、三态判定、唤醒阶梯 L0–L5。
+4. **手动拉取/推送**：两种拉取语义分开 + 三种推送 + 编排。
+5. **续播修复**：提前 EOF 不再触发连播；失败保留续播上下文；恢复路径不连播。
+
+不在本阶段范围：WebSocket/SSE（安卓无端点）、收藏（`keep`）实时同步、
+配置/爬虫/WebHome 实时同步（会触发安卓换源）、多设备同时实时同步、
+在 PC 侧为安卓的提前 EOF 打补丁。
+
+验收：
+
+- 实时同步默认关闭，关闭后定时器与心跳全部停止。
+- 增量同步幂等：重复同步不产生重复记录，旧不覆盖新。
+- 失败不破坏本地，且错误可分类（`realtime*` / `keepAlive*`）。
+- 息屏后能区分「服务未开 / 进程冻结 / 网络不通」并给出可操作指引。
+- 播放失败后恢复播放**续播到原进度**，不跳下一集。
+
 ## 22. 总验收清单
 
 ### 22.1 功能验收
@@ -2369,6 +2406,16 @@ fixture 只能证明解析逻辑正确，不能证明现实站点可用。必须
 | 设置同步范围 | `SyncOptions` 白名单子集，含凭据项**默认不同步** | §28.4 |
 | 设备发现 | 降级采用：本网段 + 9978–9998，并发 16，仅用户显式触发 | §28.2 |
 | 删除墓碑传播 | 本阶段不实现（上游仍「待实现」） | §28.3 |
+| 实时同步默认状态 | **默认关闭**，开关粒度到「方向」（拉取/推送/设置） | §29.2 |
+| 实时同步实现方式 | **轮询 + 反向拉取端点**（安卓无推送端点，不做 WebSocket） | §29.1、§29.4 |
+| 实时同步周期 | 轮询默认 **60 s**（15/30/60/300 四选一）；心跳默认 **30 s**（10–300） | §29.5 |
+| 设置同步范围（Phase 7） | 白名单**追加** `tmdb_model`/`ai_config`/`ai_title_extraction`/`ai_ad_detection`；`ai_config` 与 `tmdb_config` **同列为含凭据项** | §29.2、§29.7 |
+| 含凭据项实时同步 | **默认不参与**；用户显式开启后 UI 必须警告「明文 HTTP 传输」 | §29.7 |
+| 删除墓碑传播（Phase 7） | **改为传播**：逐条写墓碑、只读 `history_deletions`、不新增写入路径 | §29.2；`docs/phase6/README.md` §4 |
+| 手动拉取语义 | **两种分开**：「拉取最近记录」（逐站点，不依赖服务端）与「请求安卓推送全量」（需服务端+授权） | §29.4 |
+| 息屏失联 | **PC 不修**：只做三态判定 / 唤醒 / 引导；不静默改安卓系统设置 | §29.2、§29.5 |
+| 「跳下一集」修复重心 | **先修 PC 侧**（`_isGenuineEnd` + 单次守卫 + 失败回滚）；安卓侧只做证据与指引 | §29.6 |
+| `completed` 跨端语义 | PC **不采信**同步来的 `completed`，一律按 `duration>0 && position>=duration-5s` 重算 | §29.6 |
 
 ---
 
@@ -2908,3 +2955,167 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -SkipIntegrationTests
 
 **不采用**：`Backup.restore()` 的全量 `clearAllTables()`、`force=true` 清表作为默认行为、
 复制 Android 爬虫实现、`prefers` 全量同步、删除墓碑传播（上游仍「待实现」）。
+
+---
+
+## 29. 安卓实时同步与长连接保活
+
+- 定位：把 Phase 5 的「手动、一次性、快照式」同步升级为「**可选的实时、增量、双向**」，
+  并解决两个用户实测痛点（息屏后失联、缓存耗尽后跳下一集）。
+- 状态：设计指导已补齐（`docs/phase7/design/00`–`design/04`），**待评审 → 实施**。
+  外部前置：安卓侧改动 A + C **已于 2026-10-17 交付**（见 §29.10）。
+- 完整设计指导：`docs/phase7/design/00-android-live-sync-design-index.md`（索引）、
+  `01`（实时同步协议）、`02`（保活与唤醒）、`03`（续播 vs 跳下一集）、`04`（测试与验收）。
+- 阶段计划：`docs/phase7/README.md`。
+- 上游依据：`PlaybackRemoteSyncer`、`PlaybackRemoteSyncPayload`、`RemoteSyncConfig`、
+  `PlaybackRecordApi`、`ManageService`、`Manage.session`、`PlaybackFieldPolicy`、
+  `Setting.getTmdbConfig/getAiConfig`。
+
+### 29.1 实测契约要点
+
+| 事实 | 含义 |
+| --- | --- |
+| 安卓**没有**推送端点（无 WebSocket / SSE / long-poll） | PC 不能等推；只能轮询或让安卓来拉 |
+| 安卓有「远端同步源」：**它自己**按 5 min 周期拉 HTTP 端点 | PC 暴露增量端点即可获得「安卓侧实时」 |
+| 拉取请求头 `X-WebHTV-Config-Key` / `X-WebHTV-Since` / `X-WebHTV-Limit` / `X-WebHTV-Token` | PC 端点必须兼容 |
+| 响应接受 `nextSince`/`next_since`/`nextCursor`/`cursor` 与 `items`/`records`/`list`/`upserts`/`changes`/`operations`/`data` | 别名兼容可降低耦合 |
+| `/api/playback/current?siteKey=` **无鉴权**，但 `apiSafe()` **不含** `episodeUrl` | PC 必须用 `episodeName` 兜底做集消歧 |
+| 安卓**没有**「列出全部历史」的读取端点 | 「手动拉取」只能是逐站点最近一条，或请求安卓推全量 |
+| `tmdb_config` / `ai_config` 的值是 **JSON 字符串** | 必须解字符串再映射，不能当对象读 |
+| `ManageService` 空闲 **600 s** 自动 `stopSelf()` | 心跳周期必须 < 600 s 才能保活 |
+| `ManageService` 只在用户打开「管理页」时启动；`touch()` 在服务未运行时直接返回 | 息屏失联**不能**由 PC 单方面修复 |
+| `/manage/session` 返回 `wakeLock`/`wifiLock`/`batteryOptimized`/`backgroundGuide` | 诊断与引导的数据来源 |
+| 安卓 `onError` 路径是「重置 + 换线路/换源」，**不**切下一集；`STATE_ENDED` 才切 | 「跳下一集」的嫌疑在 PC 侧 |
+| 安卓 `PlaybackRecord.completed` 用 `progress >= 0.95`，与 PC 的 5 s 余量**不等价** | PC 不采信同步来的 `completed` |
+
+### 29.2 五条不可退让的原则
+
+1. **实时同步默认关闭**，开关粒度到「方向」（拉取 / 推送 / 设置）；
+2. **增量优先**，全量必须显式，禁止 `force` 清表；
+3. **失败不破坏本地**，游标只在整批成功后推进；
+4. **保活不得越界**：不静默改安卓系统设置，只探测 / 唤醒 / 引导；
+5. **续播判定基于「未完成」**，且与「播完」可区分（两端 `END_MARGIN` 语义对齐）。
+
+### 29.3 分层与模块边界
+
+| 层 | 文件 | 职责 |
+| --- | --- | --- |
+| 纯逻辑 | `lib/core/realtime_sync.dart` | 游标、增量判定、方向归一化、周期校验、退避序列、三态判定、唤醒阶梯 |
+| 服务 | `lib/services/android_read_client.dart` | 安卓读取端点（`/api/playback/current`、`/manage/session`）+ 降级链 |
+| 服务 | `lib/services/realtime_sync_engine.dart` | 定时器 + 心跳编排 + 失败退避 + 游标推进 |
+| 服务 | `lib/services/sync_server.dart` | **扩展**：增量拉取端点 `/api/playback/sync` |
+| 服务 | `lib/services/sync_client.dart` | **扩展**：手动推送（含删除、AI 设置） |
+| 纯逻辑 | `lib/core/android_sync.dart` | **扩展**：设置白名单到 AI 段、`unsupportedKeys`、`raw` 保真 |
+| 状态 | `lib/state/sync_state.dart` | 开关矩阵、周期、联动规则、结果快照 |
+| UI | `lib/ui/config_pages.dart` | 实时同步区块、手动四按钮、披露文案 |
+| UI | `lib/ui/player_page.dart` | **修复**：连播事件驱动 + 单次守卫 + 失败回滚 + 恢复路径 |
+
+### 29.4 两条实时路径
+
+| 路径 | 谁发起 | 周期 | 谁存游标 | 适用 |
+| --- | --- | --- | --- | --- |
+| A（PC 轮询） | PC | 默认 60 s（可配 15/30/60/300） | PC（`settings.json` 的 `sync.realtime` 段） | PC 常开时 |
+| B（安卓拉取） | 安卓 | 安卓侧配置（默认 5 min） | 安卓（`RemoteSyncConfig.cursors`） | PC 不常开 |
+
+两条可同时开启：都是幂等合并（`updatedAt` 相等即 skip），重复不造成数据错乱。
+
+### 29.5 心跳与三态可达性
+
+心跳（默认 30 s，范围 10–300 s，必须 ≤ 轮询周期）三个作用：
+
+1. **保活**：刷新 `ManageService.lastAccess`，避免 600 s 空闲自杀；
+2. **可达性判定**：给实时同步提供「现在能不能发请求」的前置结论；
+3. **状态采集**：拿 `batteryOptimized` / `wakeLock` / `wifiLock` / `backgroundGuide`。
+
+三态判定（`/manage/session` → `/device` → TCP connect）：
+
+| 状态 | 判据 | 用户文案要点 |
+| --- | --- | --- |
+| `OK` | 任一 HTTP 端点 200 | — |
+| `SERVICE_STOPPED` | 连接被拒 | 「请在安卓打开管理页」 |
+| `PEER_FROZEN` | TCP 通但 HTTP 无响应 | 「允许本应用后台运行」+ 原样显示 `backgroundGuide` |
+| `NETWORK_UNREACHABLE` | TCP 超时 | 「确认同一局域网」 |
+
+唤醒阶梯 L0–L5：等 → `/manage/session` → `/device` → 提示打开管理页 → 提示点亮屏幕
+→ 用户点击「打开安卓后台设置」（唯一会改变安卓侧状态的动作，**必须用户点击**）。
+
+### 29.6 续播修复（PC 侧三个缺陷）
+
+| # | 缺陷 | 现状 | 修复 |
+| --- | --- | --- | --- |
+| D1 | 连播触发在 `build()` 里，是**重建驱动** | 每次重建都可能重排 `_onCompleted` | 改事件驱动 + `_advanceInFlight` 单次守卫 |
+| D2 | 直接采信 media_kit 的 `completed` | 提前 EOF 被当成播完 | 新增 `_isGenuineEnd`（`duration>0 && position>=duration-5s`） |
+| D3 | 失败路径不回滚 `_request`、不复位 `_completed` | 续播上下文丢失 + 继续触发连播 | 回滚 `_request` + `clearCompleted()` + 三个明确出口 |
+
+**安卓侧边界**：提前 EOF 是否报 `STATE_ENDED`、`completed` 的 0.95 阈值、
+缓存容量与重连上限，均属安卓工程；PC 只做证据采集与指引，**不打补丁掩盖**。
+
+### 29.7 安全与隐私
+
+- 实时同步默认**关闭**；含凭据项（`tmdb_config` / `ai_config`）默认**不参与实时**，
+  用户显式开启后 UI 必须警告「将以明文 HTTP 在局域网传输 API Key」；
+- 拉取端点必须校验 token；未配置 token 时只允许 `uuid` 白名单内的对端 IP；
+- 日志不含 API Key / token / 设备指纹 / 历史片名；
+- 心跳与轮询**不**携带任何凭据（只有拉取端点的 `X-WebHTV-Token` 由用户配置）。
+
+### 29.8 验收
+
+门禁共 12 项（`docs/phase7/design/04` §6），一键验收：
+
+```powershell
+pwsh -File tools/phase7/run_windows_acceptance.ps1
+pwsh -File tools/phase7/run_windows_acceptance.ps1 -SkipIntegrationTests
+```
+
+结果写入 `docs/phase7/evidence/windows-acceptance.txt`。
+
+八项机器校验的反向验证（`tools/phase7/verify_reverse_checks.py`）必须存在并通过，
+其中两项是本阶段最容易悄悄写错的地方：
+
+- **`_isGenuineEnd` 的 `duration <= 0` 检查**：去掉后「时长未知不连播」用例必须失败；
+- **`_advanceInFlight` 单次守卫**：改为恒 `false` 后「防重入」用例必须失败。
+
+### 29.9 与上游 `webhtv/默影视` 的取舍
+
+**采用**：`/api/playback/current` 读取端点、`/manage/session` 唤醒端点、
+`PlaybackRemoteSyncPayload` 的响应形态（含别名）、`RemoteSyncConfig` 的游标语义、
+`Backup.prefers` 的逐键形态。
+
+**降级**：安卓的 5 min 拉取周期 → PC 侧默认 60 s 轮询（可配）；
+安卓的全网段扫描 → 沿用 Phase 5 的降级策略。
+
+**不采用**：WebSocket / SSE（安卓无端点）、安卓 `PlaybackRecord.completed` 的 0.95 阈值
+（PC 用更严格的 5 s 余量）、`force=true` 清表、静默改安卓系统设置、
+在 PC 侧为安卓的提前 EOF 打补丁。
+
+### 29.10 外部前置的交付状态（2026-10-17）
+
+Phase 7 依赖的**安卓侧契约补齐**（任务 `PC-REALTIME-SYNC-01`，仓库
+`F:/Workspace/webtv4/webhtv`）已完成其中两项：
+
+| 改动 | 内容 | 状态 | PC 侧影响 |
+| --- | --- | --- | --- |
+| A | 新增 `GET /api/playback/history?siteKey=&limit=`（从数据库读） | ✅ **已交付** | 路径 A 可用；**降级分支仍必须保留** |
+| B | `identity/resolve` + `sync/status` | **勘误为 PC 侧职责** | 不是安卓改动，PC 必须自己实现（§29.4） |
+| C | `apiSafe()` 追加 `episodeId`（= `episodeUrl` 的 SHA-256） | ✅ **已交付** | 集消歧可用；`episodeName` 兜底仍必须保留 |
+| D | 统一 `completed` 阈值 | ⏸️ 暂缓 | PC 一律按自己公式重算（§29.6） |
+| E | `STATE_ENDED` 加「真播完」闸门 | 🔬 待实验 | PC 侧 `_isGenuineEnd` 仍必做（§29.6） |
+
+**交付证据**：安卓 `dev4` 提交 `e55f19276fb0a73bce3a47f9bda2c16923d318b3`，
+tag `recovery/PC-REALTIME-SYNC-01/20261017042235-e55f19276fb0`。
+合规证据：双 flavor 编译通过、`playback.*` + `server.*` 定向单测全绿、
+3 组变异探针如期转红、`192.168.50.3:5561` 覆盖安装后真机实测
+（缺 `siteKey`→400；无记录→`200 {"items":[],"total":0}`；有记录→200 且含
+`episodeId`、不含 `episodeUrl`）。详细记录见安卓侧文档
+`PC-REALTIME-SYNC-01-android-contract-gap.md` §10。
+
+**交付不解除的硬约束**（三条，必须在 PC 实现中体现）：
+
+1. **能力探测仍是运行时的**：`RemoteSyncConfig.url` 可指向任意第三方服务端，
+   也可能是未升级的安卓端。A/C 的可用性必须探测 + 缓存（60 s），
+   不得编译期假设「一定存在」。
+2. **`episodeId` 缺失时的 `episodeName` 兜底不得删除**；字段存在时
+   **不得**被兜底逻辑覆盖（`raw['_episodeIdSource']` 区分 `field` / `episodeName`）。
+3. **`/api/playback/history` 的空数组 ≠ 「该站点在安卓端从未播放」**。
+   该端点只查**当前 `VodConfig.getCid()`**（当前订阅配置），实测设备上历史
+   分散在多个 `cid`（`1`/`3`/`18`/`33`…）。PC 的状态机与文案不得做该推论。
