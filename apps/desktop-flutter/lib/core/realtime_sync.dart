@@ -877,21 +877,97 @@ enum RealtimePullCapability {
   unsupported,
 }
 
-/// 由探测结果推导能力（`design/01` §4.1 的表）。
+/// 单个端点的探测结果（`design/01` §4.1，含 2026-10-17 的第二个阻塞性发现）。
+///
+/// **为什么不能只看状态码**：真机实测（`192.168.50.3:5561`）发现
+/// 安卓 `Nano.serve()` 对**未匹配任何 `Process` 的路径**会落到
+/// `getAssets()`，而 NanoHTTPD 对缺失资产返回
+/// **`200 OK` + `application/octet-stream` + 空体**——**不是 404**。
+///
+/// 后果：只看状态码会把「端点不存在」当成「端点存在且无数据」，
+/// 于是旧版安卓上路径 A 会“探测成功”但每次读取都静默拿到空结果。
+/// 必须结合 **Content-Type 与响应体形态**判定。
+enum EndpointProbeResult {
+  /// 200 + JSON 体 → 端点存在且有数据。
+  ok,
+
+  /// 400 + JSON 体 → 端点存在，只是参数不对。
+  badRequest,
+
+  /// 404 + JSON 体 → 端点存在，但当前无该数据（合法形态）。
+  notFound,
+
+  /// 200 + 非 JSON（`octet-stream` / 空体）→ **端点不存在**（资产回退）。
+  missing,
+
+  /// 405 / 501 → 端点存在但不支持该方法。
+  methodNotAllowed,
+
+  /// 连不上 / 超时 / 非 HTTP 错误。
+  unreachable,
+}
+
+/// 该探测结果是否说明端点**存在**。
+bool endpointExists(EndpointProbeResult result) => switch (result) {
+  EndpointProbeResult.ok ||
+  EndpointProbeResult.badRequest ||
+  EndpointProbeResult.notFound ||
+  EndpointProbeResult.methodNotAllowed => true,
+  EndpointProbeResult.missing || EndpointProbeResult.unreachable => false,
+};
+
+/// 由两个端点的探测结果推导能力（`design/01` §4.1）。
 ///
 /// **注意**：`/api/playback/history` 返回 **200 + 空数组**同样是「可用」——
 /// 「没有历史」与「端点不存在」必须可区分（`design/00` §3.1 契约 4）。
 /// 把空数组当「端点缺失」会让所有站点都没看过的用户被永久降级。
 RealtimePullCapability classifyPullCapability({
-  required int? historyStatusCode,
-  required int? currentStatusCode,
+  required EndpointProbeResult history,
+  required EndpointProbeResult current,
 }) {
-  if (historyStatusCode == 200) return RealtimePullCapability.history;
-  if (currentStatusCode == 200 || currentStatusCode == 404) {
-    // 404 说明**端点存在**（只是当前没在播）；这正是 `current` 的正常形态。
-    return RealtimePullCapability.currentOnly;
-  }
+  if (endpointExists(history)) return RealtimePullCapability.history;
+  if (endpointExists(current)) return RealtimePullCapability.currentOnly;
   return RealtimePullCapability.unsupported;
+}
+
+/// 由**状态码 + 响应体形态**归类单个端点（`design/01` §4.1）。
+///
+/// [statusCode] 为 `null` 表示连不上/超时。
+/// [contentType] 是响应的 `Content-Type`（可能含 `; charset=utf-8`）。
+/// [bodyLength] 是响应体字节数。
+///
+/// 判据（真机实测校正，见 [EndpointProbeResult] 的注释）：
+/// - `200` + JSON → [EndpointProbeResult.ok]；
+/// - `200` + 非 JSON（`octet-stream` 或空体）→ [EndpointProbeResult.missing]；
+/// - `400` + JSON → [EndpointProbeResult.badRequest]；
+/// - `404` + JSON → [EndpointProbeResult.notFound]；
+/// - `405`/`501` → [EndpointProbeResult.methodNotAllowed]；
+/// - 其他 → [EndpointProbeResult.missing]（保守：宁可降级也不假装可用）。
+EndpointProbeResult classifyEndpointProbe({
+  required int? statusCode,
+  String? contentType,
+  int bodyLength = 0,
+}) {
+  if (statusCode == null) return EndpointProbeResult.unreachable;
+  final isJson = (contentType ?? '').toLowerCase().contains('json');
+  switch (statusCode) {
+    case 200:
+      // 关键分支：安卓的资产回退就是 200 + octet-stream + 空体。
+      return isJson ? EndpointProbeResult.ok : EndpointProbeResult.missing;
+    case 400:
+      return EndpointProbeResult.badRequest;
+    case 404:
+      // 404 是「端点存在但无数据」的合法形态（`/current` 未播放时）。
+      // 但若 Content-Type 不是 JSON，说明是别的 404（如代理/网关），保守归 missing。
+      return isJson ? EndpointProbeResult.notFound : EndpointProbeResult.missing;
+    case 405:
+    case 501:
+      return EndpointProbeResult.methodNotAllowed;
+    default:
+      // 5xx 等：端点可能存在但服务异常。归 missing 而不是 exists——
+      // 假装可用会让下一轮读取失败，而降级至少能给出明确提示。
+      return EndpointProbeResult.missing;
+  }
 }
 
 /// 能力探测缓存（`design/01` §4.1：探测结果**必须缓存 60 s**）。
@@ -1108,4 +1184,165 @@ List<String> prioritizePollSites({
     if (result.length >= limit) break;
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// 路径 A 的记录映射（`design/01` §4.1，含 2026-10-17 的阻塞性发现）
+// ---------------------------------------------------------------------------
+
+/// `updatedAt` 的取值来源（`design/01` §4.1「阻塞性发现」）。
+///
+/// 实测（设备 `192.168.50.3:5561`）：`/api/playback/history` 的响应里
+/// **没有** `createTime` / `updatedAt`，只有 `timestamp`——而 `timestamp`
+/// 是「这份 JSON 何时生成」（`PlaybackRecord` 构造器里
+/// `System.currentTimeMillis()`），**不是**「这条记录何时更新」。
+///
+/// 按优先级探测，并留痕来源，让降级可见（P5）。
+enum UpdatedAtSource {
+  /// 响应直接给了 `updatedAt`（安卓侧修复后的形态，或第三方服务端）。
+  updatedAt,
+
+  /// 响应给了 `createTime`（安卓 `History` 的落库时间）。
+  createTime,
+
+  /// 只有 `timestamp`（响应生成时刻）——**不可靠**，必须披露。
+  timestamp,
+
+  /// 三个都没有 → 无法判定新旧。
+  none,
+}
+
+/// `updatedAt` 的裁决结果。
+class UpdatedAtResolution {
+  const UpdatedAtResolution({required this.value, required this.source});
+
+  /// 解析出的毫秒时间戳（[UpdatedAtSource.none] 时为 0）。
+  final int value;
+  final UpdatedAtSource source;
+
+  /// 是否可用于「旧不覆盖新」的比较。
+  ///
+  /// **只有 [UpdatedAtSource.timestamp] 与 [UpdatedAtSource.none] 不可靠**：
+  /// 前者是响应生成时刻（每轮都变，恒「更新」），后者干脆没有。
+  bool get isReliable =>
+      source == UpdatedAtSource.updatedAt || source == UpdatedAtSource.createTime;
+
+  /// 是否应披露降级。
+  bool get isDegraded => !isReliable;
+}
+
+/// 解析一条记录的时间戳（`design/01` §4.1「阻塞性发现」的处置第 1 条）。
+///
+/// 优先级：`updatedAt` → `createTime` → `timestamp`。
+///
+/// **为什么不能只用 `timestamp`**：实测同一次响应里 4 条记录的 `timestamp`
+/// 全部落在 30 ms 内，而它们库里真实的 `createTime` 跨度 16 小时；间隔 6 s
+/// 再请求，每条 `timestamp` 都前进了 ≈ 6 s。用它当 `updatedAt` 会让
+/// `incoming.updatedAt > local.updatedAt` **恒成立** → 每轮全量 upsert，
+/// 永不幂等，且游标每次跳到「现在」。
+UpdatedAtResolution resolveUpdatedAt(Map<String, Object?> record) {
+  int? pick(String key) {
+    final value = record[key];
+    if (value is int) return value > 0 ? value : null;
+    if (value is String) {
+      final parsed = int.tryParse(value.trim());
+      return parsed != null && parsed > 0 ? parsed : null;
+    }
+    return null;
+  }
+
+  final updatedAt = pick('updatedAt');
+  if (updatedAt != null) {
+    return UpdatedAtResolution(value: updatedAt, source: UpdatedAtSource.updatedAt);
+  }
+  final createTime = pick('createTime');
+  if (createTime != null) {
+    return UpdatedAtResolution(value: createTime, source: UpdatedAtSource.createTime);
+  }
+  final timestamp = pick('timestamp');
+  if (timestamp != null) {
+    return UpdatedAtResolution(value: timestamp, source: UpdatedAtSource.timestamp);
+  }
+  return const UpdatedAtResolution(value: 0, source: UpdatedAtSource.none);
+}
+
+/// 内容是否等价（`design/01` §4.1「阻塞性发现」的处置第 2 条）。
+///
+/// **为什么必须有它**：时间戳不可靠时，幂等不能只靠 `updatedAt` 判等。
+/// 只要「进度/时长/完播」三项全等，就认为这条记录没有实质变化 → skip。
+///
+/// 这三项是**用户可见的进度语义**：位置、总时长、是否看完。
+/// 不含 `vodName`/`vodPic` 等展示字段——它们变化不构成「新进度」。
+bool isSameProgress({
+  required int positionMsA,
+  required int durationMsA,
+  required bool completedA,
+  required int positionMsB,
+  required int durationMsB,
+  required bool completedB,
+}) =>
+    positionMsA == positionMsB &&
+    durationMsA == durationMsB &&
+    completedA == completedB;
+
+/// 时间戳不可靠时，是否应跳过这条记录（保住幂等）。
+///
+/// 仅当**本地已存在**且**进度内容等价**时跳过。
+/// 本地不存在时仍要 insert（否则首次同步会丢记录）。
+bool shouldSkipAsUnchanged({
+  required bool localExists,
+  required bool sameProgress,
+}) => localExists && sameProgress;
+
+/// 路径 A 一轮拉取的降级状态汇总（供 UI 常驻披露）。
+class RealtimePullDegradation {
+  const RealtimePullDegradation({
+    required this.capability,
+    required this.updatedAtSource,
+    required this.recordCount,
+    required this.skippedAsUnchanged,
+  });
+
+  const RealtimePullDegradation.none()
+    : capability = RealtimePullCapability.history,
+      updatedAtSource = UpdatedAtSource.updatedAt,
+      recordCount = 0,
+      skippedAsUnchanged = 0;
+
+  /// 端点能力（`history` / `currentOnly` / `unsupported`）。
+  final RealtimePullCapability capability;
+
+  /// 本轮记录的 `updatedAt` 来源（取最差的那个）。
+  final UpdatedAtSource updatedAtSource;
+
+  final int recordCount;
+
+  /// 因「内容等价」被跳过的条数（时间戳不可靠时的幂等兜底）。
+  final int skippedAsUnchanged;
+
+  /// 是否需要常驻披露（`design/01` §4.1 的 P5 要求）。
+  bool get needsDisclosure =>
+      capability != RealtimePullCapability.history ||
+      updatedAtSource != UpdatedAtSource.updatedAt;
+
+  /// 需要披露的错误分类（无需披露时为 `null`）。
+  ///
+  /// 优先级：端点能力问题 > 时间戳问题——前者更严重（会丢记录），
+  /// 后者只是「判定不准」。
+  AppError? get disclosureError {
+    final capabilityError = pullCapabilityError(capability);
+    if (capabilityError != null) return capabilityError;
+    if (updatedAtSource == UpdatedAtSource.timestamp) {
+      return AppError(
+        AppErrorKind.realtimePullTimestampUnreliable,
+        describeErrorKind(AppErrorKind.realtimePullTimestampUnreliable),
+      );
+    }
+    return null;
+  }
+
+  String describe() =>
+      'pull(capability=${capability.name} updatedAt=${updatedAtSource.name} '
+      'records=$recordCount skippedUnchanged=$skippedAsUnchanged '
+      'disclosure=$needsDisclosure)';
 }

@@ -122,6 +122,10 @@ enum AppErrorKind {
   realtimePullDegraded,
   realtimeCursorStale,
   realtimePartialFailure,
+  // 安卓 `/api/playback/history` 不返回记录更新时间（`design/01` §4.1
+  // 「阻塞性发现」）。只有 `timestamp`（= 响应生成时刻）可用时置此状态：
+  // 「旧不覆盖新」不可用，必须常驻披露。
+  realtimePullTimestampUnreliable,
   keepAliveServiceStopped,
   keepAlivePeerFrozen,
   keepAliveNetworkUnreachable,
@@ -297,6 +301,10 @@ String describeErrorKind(AppErrorKind kind) {
       return '同步游标比安卓端最新记录还新（安卓可能已重装或清数据），已自动重置游标';
     case AppErrorKind.realtimePartialFailure:
       return '实时同步部分失败（本地数据未被破坏，游标未推进，下轮重试）';
+    case AppErrorKind.realtimePullTimestampUnreliable:
+      return '安卓端未提供记录更新时间（只给了响应生成时刻），'
+          '「旧不覆盖新」不可用——已改用内容比对保证不重复，'
+          '但两端进度不一致时可能无法判定谁更新';
     case AppErrorKind.keepAliveServiceStopped:
       return '安卓的局域网服务未运行。请在安卓打开「管理页」并保持它运行';
     case AppErrorKind.keepAlivePeerFrozen:
@@ -397,6 +405,7 @@ const Set<AppErrorKind> realtimeErrorKinds = {
   AppErrorKind.realtimePullDegraded,
   AppErrorKind.realtimeCursorStale,
   AppErrorKind.realtimePartialFailure,
+  AppErrorKind.realtimePullTimestampUnreliable,
 };
 
 /// 保活/可达性层错误类别（`design/02` §7）。

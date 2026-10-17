@@ -1,0 +1,529 @@
+/// 安卓读取客户端（`docs/phase7/design/01` §4.1）——路径 A 的 PC 侧调用方。
+///
+/// 方向与 `sync_client.dart` 不同：后者是**推送**（`POST /action?do=sync`），
+/// 这里只做**只读 GET**，不改动安卓任何状态。
+///
+/// ## 三个端点
+///
+/// | 方法 | 路径 | 用途 |
+/// | --- | --- | --- |
+/// | `GET` | `/api/playback/history?siteKey=&limit=` | 该站点最近 N 条历史（**推荐**） |
+/// | `GET` | `/api/playback/current?siteKey=` | 仅「正在播放的那一条」（降级用） |
+/// | `GET` | `/manage/session` | 唤醒 + 读服务状态（保活用，T6 消费） |
+///
+/// ## 必须处理的四件事
+///
+/// 1. **能力探测 + 降级**（`design/01` §4.1）：`/api/playback/history` 不存在时
+///    降级为 `/current`，并在 UI 常驻披露「仅能同步正在播放的记录」。
+///    **空数组（200）算可用**——「没有历史」与「端点不存在」必须可区分，
+///    否则没看过任何剧的用户会被永久降级。
+/// 2. **`updatedAt` 不可靠**（`design/01` §4.1「阻塞性发现」）：安卓的
+///    `/history` **不返回**记录更新时间，只有响应生成时刻 `timestamp`。
+///    必须按优先级探测并留痕来源，见 `resolveUpdatedAt`。
+/// 3. **`episodeId` 两层兜底**（`design/01` §4.1 警告）：安卓已交付
+///    `episodeId` 字段（= `episodeUrl` 的 SHA-256），但旧版本/第三方服务端
+///    可能没有，需用 `episodeName` 兜底；两者都空则**不合并**。
+/// 4. **`Host` 头**：与 T4 桥接同一约定——模拟器 NAT 场景下必须显式设置，
+///    否则安卓的 `Server` 认不出请求（`design/01` §4）。
+library;
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:http/http.dart' as http;
+
+import '../core/android_bridge.dart';
+import '../core/android_sync.dart';
+import '../core/app_error.dart';
+import '../core/protocol.dart';
+import '../core/realtime_sync.dart';
+import 'log_service.dart';
+
+/// 一次「按站点读历史」的结果。
+class AndroidHistoryReadResult {
+  const AndroidHistoryReadResult({
+    required this.siteKey,
+    required this.items,
+    required this.failures,
+    required this.updatedAtSource,
+    required this.skippedAsUnchanged,
+    required this.endpoint,
+  });
+
+  final String siteKey;
+
+  /// 解析成功的条目（已按 `updatedAt` 优先级与 `episodeId` 兜底处理）。
+  final List<SyncHistoryItem> items;
+
+  /// 解析失败的明细（P5：不得静默丢弃）。
+  final List<SyncFailure> failures;
+
+  /// 本批的 `updatedAt` 来源（取最差的那个，供披露）。
+  final UpdatedAtSource updatedAtSource;
+
+  /// 因「内容等价」被跳过的条数（时间戳不可靠时的幂等兜底）。
+  final int skippedAsUnchanged;
+
+  /// 实际使用的端点（`history` 或 `current`），供证据与 UI 披露。
+  final RealtimePullCapability endpoint;
+
+  bool get isEmpty => items.isEmpty && failures.isEmpty;
+
+  String describe() =>
+      'read(site=$siteKey endpoint=${endpoint.name} '
+      'items=${items.length} failed=${failures.length} '
+      'updatedAt=${updatedAtSource.name} skippedUnchanged=$skippedAsUnchanged)';
+}
+
+/// 端点能力探测结果（含耗时与状态码，供证据落盘）。
+class AndroidPullProbe {
+  const AndroidPullProbe({
+    required this.capability,
+    required this.historyStatusCode,
+    required this.currentStatusCode,
+    this.historyResult = EndpointProbeResult.missing,
+    this.currentResult = EndpointProbeResult.missing,
+  });
+
+  final RealtimePullCapability capability;
+  final int? historyStatusCode;
+  final int? currentStatusCode;
+
+  /// 形态级探测结果（`design/01` §4.1 的第二个阻塞性发现：不能只看状态码）。
+  final EndpointProbeResult historyResult;
+  final EndpointProbeResult currentResult;
+
+  String describe() =>
+      'probe(capability=${capability.name} '
+      'history=${historyStatusCode ?? '-'}/${historyResult.name} '
+      'current=${currentStatusCode ?? '-'}/${currentResult.name})';
+}
+
+/// 安卓只读端点客户端。
+class AndroidReadClient {
+  AndroidReadClient({
+    required this.log,
+    http.Client? client,
+    this.timeout = const Duration(seconds: 8),
+  }) : _client = client ?? http.Client();
+
+  final http.Client _client;
+  final LogService log;
+
+  /// 单次读取超时。
+  ///
+  /// 比推送的 30 s 短得多：读取是**周期**动作（默认 60 s 一轮），
+  /// 单站点慢请求不能拖垮整轮。8 s 与 T4 桥接的常规请求一致。
+  final Duration timeout;
+
+  void close() => _client.close();
+
+  /// 探测路径 A 的读取能力（`design/01` §4.1 的探测矩阵）。
+  ///
+  /// 用 `limit=1` 打一个**几乎不可能存在**的 siteKey：只要能拿到
+  /// 200+JSON / 400+JSON 就说明端点存在。
+  ///
+  /// **两个必须避开的陷阱**（均来自真机实测）：
+  /// 1. **200 + 空数组算可用**——「没有历史」与「端点不存在」必须可区分，
+  ///    否则没看过任何剧的用户会被永久降级；
+  /// 2. **端点不存在时安卓返回 200 + `application/octet-stream` + 空体**
+  ///    （`Nano.serve()` 落到 `getAssets()`，NanoHTTPD 对缺失资产回 200），
+  ///    **不是 404**。只看状态码会把「不存在」当成「存在且无数据」。
+  ///    必须看 `Content-Type` 与响应体形态，见 [classifyEndpointProbe]。
+  Future<AndroidPullProbe> probePullCapability(String deviceBase) async {
+    final history = await _probeEndpoint(
+      deviceBase,
+      '/api/playback/history',
+      query: {'siteKey': '__webhtv_probe__', 'limit': '1'},
+    );
+    if (endpointExists(history.result)) {
+      return AndroidPullProbe(
+        capability: RealtimePullCapability.history,
+        historyStatusCode: history.statusCode,
+        currentStatusCode: null,
+        historyResult: history.result,
+      );
+    }
+    // 端点不存在 → 看降级端点是否可用。
+    final current = await _probeEndpoint(
+      deviceBase,
+      '/api/playback/current',
+      query: {'siteKey': '__webhtv_probe__'},
+    );
+    return AndroidPullProbe(
+      capability: classifyPullCapability(
+        history: history.result,
+        current: current.result,
+      ),
+      historyStatusCode: history.statusCode,
+      currentStatusCode: current.statusCode,
+      historyResult: history.result,
+      currentResult: current.result,
+    );
+  }
+
+  /// 读某站点的历史（`design/01` §4.1）。
+  ///
+  /// [capability] 为 `null` 时先探测。传入已知能力可省一次探测
+  /// （调用方通常已缓存 60 s，见 `RealtimeCapabilityCache`）。
+  ///
+  /// [localByMatchKey] 用于时间戳不可靠时的幂等兜底：本地已存在且进度
+  /// 内容等价的记录会被跳过（`shouldSkipAsUnchanged`）。
+  Future<AndroidHistoryReadResult> readHistory({
+    required String deviceBase,
+    required String siteKey,
+    required RealtimePullCapability capability,
+    int limit = realtimeDefaultSiteLimit,
+    Map<String, SyncHistoryItem> localByMatchKey = const {},
+  }) async {
+    if (capability == RealtimePullCapability.unsupported) {
+      throw AppError(
+        AppErrorKind.realtimePullUnsupported,
+        describeErrorKind(AppErrorKind.realtimePullUnsupported),
+        detail: hostPortOf(normalizeBase(deviceBase)),
+      );
+    }
+
+    final isDegraded = capability == RealtimePullCapability.currentOnly;
+    final path = isDegraded ? '/api/playback/current' : '/api/playback/history';
+    final query = isDegraded
+        ? {'siteKey': siteKey}
+        : {'siteKey': siteKey, 'limit': '$limit'};
+
+    final response = await _get(
+      deviceBase,
+      path,
+      query: query,
+      // **只有降级端点**的 404 是合法形态（`/current` 未播放时）。
+      //
+      // `/api/playback/history` 对任一 siteKey 都返回 200+空数组，
+      // 从不返回 404；因此它一旦“端点不存在”（真机形态是
+      // 200+octet-stream），必须报错而不是静默变成空结果——
+      // 否则用户会看到「同步成功但 0 条」，而实际是端点没了。
+      allowNotFound: isDegraded,
+    );
+    if (response == null) {
+      // 404：该站点当前无记录（降级端点未播放时的正常形态）。
+      return AndroidHistoryReadResult(
+        siteKey: siteKey,
+        items: const [],
+        failures: const [],
+        updatedAtSource: UpdatedAtSource.none,
+        skippedAsUnchanged: 0,
+        endpoint: capability,
+      );
+    }
+
+    final decoded = _decodeJson(response.body, deviceBase);
+    // `/history` 返回 `{siteKey, items, total}`；`/current` 返回**单条记录**。
+    final rawItems = isDegraded
+        ? (decoded is Map ? [decoded] : const <Object?>[])
+        : asList(asMap(decoded)['items']);
+
+    final items = <SyncHistoryItem>[];
+    final failures = <SyncFailure>[];
+    var worstSource = UpdatedAtSource.updatedAt;
+    var skippedUnchanged = 0;
+
+    for (var index = 0; index < rawItems.length; index++) {
+      final raw = asMap(rawItems[index]);
+      if (raw.isEmpty) {
+        failures.add(SyncFailure(index: index, reason: '记录不是 JSON 对象'));
+        continue;
+      }
+      final resolved = resolveUpdatedAt(raw);
+      // 取「最差」的来源：只要有一条不可靠，整批就要披露。
+      if (_sourceRank(resolved.source) > _sourceRank(worstSource)) {
+        worstSource = resolved.source;
+      }
+
+      final item = _mapRecord(raw, resolved, index, failures);
+      if (item == null) continue;
+
+      // 时间戳不可靠时的幂等兜底（`design/01` §4.1 处置第 2 条）。
+      final local = localByMatchKey[item.matchKey];
+      if (!resolved.isReliable &&
+          shouldSkipAsUnchanged(
+            localExists: local != null,
+            sameProgress:
+                local != null &&
+                isSameProgress(
+                  positionMsA: local.positionMs,
+                  durationMsA: local.durationMs,
+                  completedA: local.completed,
+                  positionMsB: item.positionMs,
+                  durationMsB: item.durationMs,
+                  completedB: item.completed,
+                ),
+          )) {
+        skippedUnchanged++;
+        continue;
+      }
+      items.add(item);
+    }
+
+    final result = AndroidHistoryReadResult(
+      siteKey: siteKey,
+      items: items,
+      failures: failures,
+      updatedAtSource: worstSource,
+      skippedAsUnchanged: skippedUnchanged,
+      endpoint: capability,
+    );
+    log.info('读取安卓历史 ${result.describe()}', scope: 'realtime');
+    return result;
+  }
+
+  /// 读安卓的服务状态（保活用，`design/02` §3.2）。
+  ///
+  /// 返回原始 JSON（字段由 T6 的保活引擎消费）；端点不存在时返回 `null`
+  /// （老版本安卓无 `/manage` → 调用方降级到 `/device`）。
+  ///
+  /// **端点存在性同样不能只看状态码**：真机实测确认 `/manage/session`
+  /// 返回 200 + JSON；但缺失路径会得到 200 + `octet-stream`，
+  /// 因此这里用 [classifyEndpointProbe] 判形态。
+  Future<Map<String, Object?>?> readManageSession(String deviceBase) async {
+    final response = await _get(deviceBase, '/manage/session', allowNotFound: true);
+    if (response == null) return null;
+    final result = classifyEndpointProbe(
+      statusCode: response.statusCode,
+      contentType: response.contentType,
+      bodyLength: response.body.length,
+    );
+    if (!endpointExists(result)) return null;
+    final decoded = _decodeJson(response.body, deviceBase);
+    return decoded is Map ? decoded.map((k, v) => MapEntry('$k', v)) : null;
+  }
+
+  // ------------------------------------------------------------------ 内部
+
+  /// 来源可靠度排序（数值越大越差）。
+  int _sourceRank(UpdatedAtSource source) => switch (source) {
+    UpdatedAtSource.updatedAt => 0,
+    UpdatedAtSource.createTime => 1,
+    UpdatedAtSource.timestamp => 2,
+    UpdatedAtSource.none => 3,
+  };
+
+  /// 把一条安卓记录映射成 [SyncHistoryItem]（`design/01` §4.1）。
+  ///
+  /// 失败时把原因写进 [failures] 并返回 `null`——**不得**用空串猜造记录（P5）。
+  SyncHistoryItem? _mapRecord(
+    Map<String, Object?> raw,
+    UpdatedAtResolution resolved,
+    int index,
+    List<SyncFailure> failures,
+  ) {
+    final key = AndroidHistoryKey.tryParse(raw['historyKey'] ?? raw['key']);
+    if (key == null) {
+      failures.add(
+        SyncFailure(index: index, reason: '缺少 historyKey 或不成段（无法定位记录）'),
+      );
+      return null;
+    }
+    final vodName = asString(raw['vodName']);
+    if (vodName == null || vodName.isEmpty) {
+      failures.add(SyncFailure(index: index, reason: '缺少 vodName'));
+      return null;
+    }
+
+    // 集消歧两层兜底（`design/01` §4.1 警告）：
+    // 首选安卓的 `episodeId` 字段，缺失时用 `episodeName`，双空则不合并。
+    final episode = resolveEpisodeId(
+      episodeIdField: asString(raw['episodeId']),
+      episodeName: asString(raw['episodeName']) ?? asString(raw['vodRemarks']),
+    );
+    if (!episode.mergeable) {
+      failures.add(
+        SyncFailure(
+          index: index,
+          reason: 'episodeId 与 episodeName 都为空（宁可不合，不可错合）',
+        ),
+      );
+      return null;
+    }
+
+    final positionMs = asInt(raw['positionMs']) ?? asInt(raw['position']) ?? 0;
+    final durationMs = asInt(raw['durationMs']) ?? asInt(raw['duration']) ?? 0;
+
+    return SyncHistoryItem(
+      siteKey: key.siteKey,
+      vodId: key.vodId,
+      vodName: vodName,
+      flag: asString(raw['flag']) ?? asString(raw['vodFlag']) ?? '',
+      episodeName:
+          asString(raw['episodeName']) ?? asString(raw['vodRemarks']) ?? '',
+      episodeId: episode.episodeId,
+      positionMs: positionMs,
+      durationMs: durationMs,
+      updatedAt: resolved.value,
+      cid: key.cid,
+      vodPic: (asString(raw['vodPic']) ?? '').trim().isEmpty
+          ? null
+          : asString(raw['vodPic']),
+      raw: {
+        ...raw,
+        // 留痕：让诊断能看出这条的集身份与时间戳是怎么来的（P5）。
+        '_episodeIdSource': episode.source.name,
+        '_updatedAtSource': resolved.source.name,
+      },
+    );
+  }
+
+  /// 一次 GET 的原始结果（带 `Content-Type`，供形态判定）。
+  Future<_RawResponse?> _get(
+    String deviceBase,
+    String path, {
+    Map<String, String> query = const {},
+    bool allowNotFound = false,
+  }) async {
+    final base = normalizeBase(deviceBase);
+    final hostPort = hostPortOf(base);
+    final uri = Uri.parse('$base$path').replace(queryParameters: query);
+
+    final http.Response response;
+    try {
+      response = await _client
+          .get(uri, headers: {'Host': hostPort, 'Accept': 'application/json'})
+          .timeout(timeout);
+    } on TimeoutException catch (error) {
+      throw AppError(
+        AppErrorKind.realtimePartialFailure,
+        '读取安卓数据超时（${timeout.inSeconds}s）',
+        detail: hostPort,
+        retryable: true,
+        cause: error,
+      );
+    } on SocketException catch (error) {
+      throw AppError(
+        AppErrorKind.realtimePartialFailure,
+        '无法连接安卓设备：${error.osError?.message ?? '连接失败'}',
+        detail: hostPort,
+        retryable: true,
+        cause: error,
+      );
+    } catch (error) {
+      throw AppError(
+        AppErrorKind.realtimePartialFailure,
+        '读取安卓数据失败：${error.runtimeType}',
+        detail: hostPort,
+        retryable: true,
+        cause: error,
+      );
+    }
+
+    final contentType = response.headers['content-type'];
+    if (response.statusCode == 404) {
+      if (allowNotFound) return null;
+      // 不 allowNotFound 时 404 意味着端点缺失——那是能力探测的结论，
+      // 不是「这个站点没有记录」（`design/01` §4.1 的 P5 要求）。
+      throw AppError(
+        AppErrorKind.realtimePullUnsupported,
+        describeErrorKind(AppErrorKind.realtimePullUnsupported),
+        detail: '$hostPort$path',
+        statusCode: 404,
+      );
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw AppError(
+        AppErrorKind.realtimePartialFailure,
+        '安卓返回 HTTP ${response.statusCode}',
+        detail: '$hostPort$path',
+        statusCode: response.statusCode,
+        retryable: response.statusCode >= 500,
+      );
+    }
+    // 第二种阻塞性发现：安卓对**未匹配的路径**落到 `getAssets()`，
+    // NanoHTTPD 对缺失资产返回 `200 + application/octet-stream + 空体`。
+    // 因此 2xx 也必须做形态判定，否则「端点不存在」会被当成
+    // 「端点存在且无数据」，调用方静默拿到空结果。
+    final probe = classifyEndpointProbe(
+      statusCode: response.statusCode,
+      contentType: contentType,
+      bodyLength: response.bodyBytes.length,
+    );
+    if (probe == EndpointProbeResult.missing) {
+      if (allowNotFound) return null;
+      throw AppError(
+        AppErrorKind.realtimePullUnsupported,
+        describeErrorKind(AppErrorKind.realtimePullUnsupported),
+        detail: '$hostPort$path',
+        statusCode: response.statusCode,
+      );
+    }
+    final String body;
+    try {
+      body = utf8.decode(response.bodyBytes);
+    } on FormatException {
+      throw AppError(
+        AppErrorKind.realtimePartialFailure,
+        '安卓响应不是 UTF-8 文本',
+        detail: '$hostPort$path',
+      );
+    }
+    return _RawResponse(
+      statusCode: response.statusCode,
+      contentType: contentType,
+      body: body,
+    );
+  }
+
+  /// 探测单个端点的形态（`design/01` §4.1）。
+  ///
+  /// 不抛错：连不上/超时归 [EndpointProbeResult.unreachable]。
+  Future<({int? statusCode, EndpointProbeResult result})> _probeEndpoint(
+    String deviceBase,
+    String path, {
+    Map<String, String> query = const {},
+  }) async {
+    final base = normalizeBase(deviceBase);
+    final uri = Uri.parse('$base$path').replace(queryParameters: query);
+    try {
+      final response = await _client
+          .get(
+            uri,
+            headers: {'Host': hostPortOf(base), 'Accept': 'application/json'},
+          )
+          .timeout(timeout);
+      final result = classifyEndpointProbe(
+        statusCode: response.statusCode,
+        contentType: response.headers['content-type'],
+        bodyLength: response.bodyBytes.length,
+      );
+      return (statusCode: response.statusCode, result: result);
+    } on TimeoutException {
+      return (statusCode: null, result: EndpointProbeResult.unreachable);
+    } on SocketException {
+      return (statusCode: null, result: EndpointProbeResult.unreachable);
+    } catch (_) {
+      return (statusCode: null, result: EndpointProbeResult.unreachable);
+    }
+  }
+
+  Object? _decodeJson(String body, String deviceBase) {
+    if (body.trim().isEmpty) return null;
+    try {
+      return jsonDecode(body);
+    } on FormatException {
+      throw AppError(
+        AppErrorKind.realtimePartialFailure,
+        '安卓响应不是合法 JSON',
+        detail: hostPortOf(normalizeBase(deviceBase)),
+      );
+    }
+  }
+}
+
+/// 一次 GET 的原始结果。
+class _RawResponse {
+  const _RawResponse({
+    required this.statusCode,
+    required this.contentType,
+    required this.body,
+  });
+
+  final int statusCode;
+  final String? contentType;
+  final String body;
+}

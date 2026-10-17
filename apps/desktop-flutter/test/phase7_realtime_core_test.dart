@@ -453,32 +453,131 @@ void main() {
   });
 
   group('S17 · 能力探测与降级（design/01 §4.1）', () {
-    test('history 返回 200 → 完整能力（含空数组）', () {
+    test('history 返回 200+JSON → 完整能力（含空数组）', () {
       expect(
-        classifyPullCapability(historyStatusCode: 200, currentStatusCode: null),
+        classifyPullCapability(
+          history: EndpointProbeResult.ok,
+          current: EndpointProbeResult.missing,
+        ),
         RealtimePullCapability.history,
       );
     });
 
-    test('history 404 而 current 存在 → 降级为 currentOnly', () {
+    test('history 不存在而 current 存在 → 降级为 currentOnly', () {
       expect(
-        classifyPullCapability(historyStatusCode: 404, currentStatusCode: 404),
+        classifyPullCapability(
+          history: EndpointProbeResult.missing,
+          current: EndpointProbeResult.notFound,
+        ),
         RealtimePullCapability.currentOnly,
       );
       expect(
-        classifyPullCapability(historyStatusCode: 405, currentStatusCode: 200),
+        classifyPullCapability(
+          history: EndpointProbeResult.missing,
+          current: EndpointProbeResult.ok,
+        ),
         RealtimePullCapability.currentOnly,
       );
     });
 
     test('两者都不可用 → unsupported', () {
       expect(
-        classifyPullCapability(historyStatusCode: 404, currentStatusCode: 500),
+        classifyPullCapability(
+          history: EndpointProbeResult.missing,
+          current: EndpointProbeResult.missing,
+        ),
         RealtimePullCapability.unsupported,
       );
       expect(
-        classifyPullCapability(historyStatusCode: null, currentStatusCode: null),
+        classifyPullCapability(
+          history: EndpointProbeResult.unreachable,
+          current: EndpointProbeResult.unreachable,
+        ),
         RealtimePullCapability.unsupported,
+      );
+    });
+
+    test('第二种阻塞性发现 · 200+octet-stream 必须归为「端点不存在」', () {
+      // 真机实测：安卓 Nano.serve() 对未匹配路径落到 getAssets()，
+      // NanoHTTPD 对缺失资产返回 200 + application/octet-stream + 空体。
+      // 只看状态码会把「不存在」当成「存在且无数据」。
+      expect(
+        classifyEndpointProbe(
+          statusCode: 200,
+          contentType: 'application/octet-stream',
+          bodyLength: 0,
+        ),
+        EndpointProbeResult.missing,
+      );
+      // 对照：200 + JSON 才算存在。
+      expect(
+        classifyEndpointProbe(
+          statusCode: 200,
+          contentType: 'application/json; charset=utf-8',
+          bodyLength: 41,
+        ),
+        EndpointProbeResult.ok,
+      );
+    });
+
+    test('400+JSON 算端点存在（参数不对而非端点缺失）', () {
+      expect(
+        classifyEndpointProbe(
+          statusCode: 400,
+          contentType: 'application/json; charset=utf-8',
+          bodyLength: 40,
+        ),
+        EndpointProbeResult.badRequest,
+      );
+      expect(endpointExists(EndpointProbeResult.badRequest), isTrue);
+    });
+
+    test('404+JSON 算端点存在（未播放是合法形态）', () {
+      expect(
+        classifyEndpointProbe(
+          statusCode: 404,
+          contentType: 'application/json; charset=utf-8',
+          bodyLength: 39,
+        ),
+        EndpointProbeResult.notFound,
+      );
+      expect(endpointExists(EndpointProbeResult.notFound), isTrue);
+    });
+
+    test('404 但非 JSON → 保守归 missing（网关/代理的 404 不算端点存在）', () {
+      expect(
+        classifyEndpointProbe(statusCode: 404, contentType: 'text/html'),
+        EndpointProbeResult.missing,
+      );
+    });
+
+    test('405/501 算端点存在（方法不对但端点在那里）', () {
+      expect(
+        classifyEndpointProbe(statusCode: 405),
+        EndpointProbeResult.methodNotAllowed,
+      );
+      expect(
+        classifyEndpointProbe(statusCode: 501),
+        EndpointProbeResult.methodNotAllowed,
+      );
+      expect(endpointExists(EndpointProbeResult.methodNotAllowed), isTrue);
+    });
+
+    test('连不上/超时 → unreachable 且不算端点存在', () {
+      expect(
+        classifyEndpointProbe(statusCode: null),
+        EndpointProbeResult.unreachable,
+      );
+      expect(endpointExists(EndpointProbeResult.unreachable), isFalse);
+    });
+
+    test('5xx 保守归 missing（假装可用会让下轮读取失败）', () {
+      expect(
+        classifyEndpointProbe(
+          statusCode: 500,
+          contentType: 'application/json',
+        ),
+        EndpointProbeResult.missing,
       );
     });
 
@@ -509,8 +608,8 @@ void main() {
       // 这是回归靶子：把 200 空数组当 404 会让"所有站点都没看过"的用户
       // 被永久降级到 currentOnly。
       final capability = classifyPullCapability(
-        historyStatusCode: 200,
-        currentStatusCode: 404,
+        history: EndpointProbeResult.ok,
+        current: EndpointProbeResult.notFound,
       );
       expect(capability, RealtimePullCapability.history);
       expect(pullCapabilityError(capability), isNull);
