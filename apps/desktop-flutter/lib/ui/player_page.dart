@@ -14,6 +14,7 @@ import 'package:window_manager/window_manager.dart';
 import '../core/app_error.dart';
 import '../core/danmaku.dart';
 import '../core/protocol.dart';
+import '../core/playback.dart';
 import '../core/playback_diagnostics.dart';
 import '../core/subtitle.dart';
 import '../core/tmdb_playback.dart';
@@ -269,6 +270,11 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   Timer? _controlHideTimer;
   String? _loadError;
 
+  /// 连播单次守卫（`design/03` §4.1 D1）。
+  ///
+  /// 一次连播未完成时忽略后续所有控制器通知，避免「一次播完连跳多集」。
+  bool _advanceInFlight = false;
+
   /// 最近一次字幕错误提示是否已展示，避免每次 setState 重复弹提示。
   String? _lastShownSubtitleError;
 
@@ -340,10 +346,63 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   }
 
   void _onControllerChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    // 连播改为**事件驱动**（`design/03` §4.1 D1）：
+    // 旧实现在 `build()` 里排 postFrameCallback，任何一次通知（position/
+    // duration/buffer/volume/… 每秒多次）只要 `isCompleted` 仍为 true 就会
+    // 再排一个 `_onCompleted()`。于是「唤醒后点继续播放」这种纯重建动作
+    // 也会立即跳下一集。
+    _maybeAdvanceOnGenuineEnd();
   }
 
+  /// 连播闸门：单次守卫 + 真播完判定（`design/03` §4.1）。
+  ///
+  /// 三道闸门缺一不可：
+  /// 1. [_advanceInFlight] 防重入（D1）：一次连播未完成时忽略后续通知；
+  /// 2. [PlayerController.isCompleted] 是 media_kit 的「到达流末尾」；
+  /// 3. [isGenuineEnd] 排除提前 EOF（D2）——缓存耗尽时 `duration` 往往还没取到，
+  ///    此时 `completed=true` 一定是误报。
+  void _maybeAdvanceOnGenuineEnd() {
+    if (_advanceInFlight) return;
+    if (!_controller.isCompleted) return;
+    if (!_isGenuineEnd()) return;
+    _advanceInFlight = true;
+    unawaited(
+      _playNext().whenComplete(() {
+        _advanceInFlight = false;
+        // 无论连播成功还是失败，都必须复位 `completed`（`design/03` §4.1 D1）。
+        //
+        // 两个典型残留场景：
+        // - **末集**：`_playNext()` 因 `next < 0` 直接返回，`_completed` 仍为 true，
+        //   下一次重建会再跑一遍闸门（虽然结果一样，但会刷日志、且若用户此时
+        //   手动切回中间某集就会误跳）；
+        // - **下一集加载失败**：失败路径已自己清过（`_load()` 的失败分支），
+        //   这里是幂等兼底。
+        if (mounted) _controller.clearCompleted();
+      }),
+    );
+  }
+
+  /// 「真播完」判定（`design/03` §4.1 D2、P5）。
+  ///
+  /// 不信任 media_kit 的 `completed` 单独结论：它表示「到达流末尾」，
+  /// **不区分**「正常播到片尾」与「提前 EOF」。判定公式与
+  /// `SyncHistoryItem.completed` / 安卓 `PlaybackRecord.completed` 的 PC 侧重算
+  /// 同源（`lib/core/playback.dart` 的 [isGenuineEnd]），因此三处口径不会漂移。
+  bool _isGenuineEnd() => isGenuineEndDuration(
+    duration: _controller.duration,
+    position: _controller.position,
+  );
+
   Future<void> _load() async {
+    // 记录本次加载的「意图」，失败时用它回滚 `_request`（`design/03` §4.3 D3）。
+    //
+    // 为什么必须回滚：`_openTarget` 在调 `_load()` **之前**就已经把 `_request`
+    // 改成了下一集（`episodeIndex` 已 +1、`clearStartPosition: true`）。
+    // 若加载失败而不回滚，续播上下文（原集 + 原进度）就已丢失，
+    // 用户看到的是「上一集失败 → 已经切到下一集」。
+    final intent = _request;
     setState(() => _loadError = null);
     final outcome = await _controller.openWithRetry(
       _request.url,
@@ -366,11 +425,18 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     if (!outcome.succeeded) {
       // 直播：当前线路失败时按顺序自动切到下一个线路（§13.3 播放失败可切线路）。
       if (_request.directUrl && await _fallbackLiveLine()) return;
+      // 失败路径的收尾（`design/03` §4.3）：
+      // 1. 回滚 `_request` 到本次加载前的意图（保住续播上下文）；
+      // 2. 清除残留的 `completed`，否则重建会再次触发连播（D1）；
+      // 3. 记一条含 nearEnd 判定的诊断，让「缓存耗尽」在 PC 侧可见（§4.6）。
+      _logFailureDiagnostics(outcome);
       setState(() {
+        _request = intent;
         _loadError = outcome.failureKind == null
             ? '播放失败'
             : describePlayerFailure(outcome.failureKind!);
       });
+      _controller.clearCompleted();
       return;
     }
     // 字幕（§10.3）：装配外挂字幕候选并自动启用默认/强制字幕。
@@ -1032,6 +1098,34 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
 
   List<VodEpisode> _episodesCache = const [];
 
+  /// 失败时的可观测性（`design/03` §4.6）。
+  ///
+  /// 缓存耗尽（提前 EOF）当前在 PC 侧**不可见**：media_kit 很可能无法区分
+  /// 「正常播到片尾」与「源站断流」，因此退化为记录失败瞬间的
+  /// `position`/`duration`/`buffered` 与 `nearEnd` 结论。
+  ///
+  /// 关键作用：`nearEnd=false` 的失败**永远**不触发连播（已由
+  /// [_maybeAdvanceOnGenuineEnd] 的真播完闸门保证），这条日志是事后
+  /// 排查「到底是不是提前 EOF」的唯一线索。
+  void _logFailureDiagnostics(PlayerLoadOutcome outcome) {
+    final duration = _controller.duration;
+    final position = _controller.position;
+    final nearEnd = isGenuineEndDuration(
+      duration: duration,
+      position: position,
+    );
+    widget.state.log.warning(
+      '播放失败定位 kind=${outcome.failureKind?.name ?? "unknown"} '
+      'position=${position.inMilliseconds}ms '
+      'duration=${duration.inMilliseconds}ms '
+      'buffered=${_controller.buffered.inMilliseconds}ms '
+      'nearEnd=$nearEnd '
+      'episode=${_request.episodeName} '
+      'episodeIndex=${_request.episodeIndex}',
+      scope: 'player',
+    );
+  }
+
   Future<void> _openTarget(
     VodEpisode episode, {
     required String flag,
@@ -1099,6 +1193,45 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     }
   }
 
+  /// 从**最新进度**续播（失败态三出口之二，`design/03` §4.4/§4.5）。
+  ///
+  /// **为什么必须重新查库**：失败期间进度仍在周期写入（[_persistProgress]），
+  /// 最新值可能比 `_request.startPosition` 更靠后。用旧值续播会让用户
+  /// 回到比失败点更早的位置。
+  ///
+  /// 恢复路径**不得**触发连播（`design/03` §4.5 步骤 5、P5）：
+  /// 这里只重建 `_request` 并重新 `_load()`；`_load()` 成功路径不调
+  /// `_playNext()`，且 `open()` 会先把 `_completed` 复位。
+  Future<void> _resumeFromLatestProgress() async {
+    final state = widget.state;
+    final latest = state.resumePositionFor(
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+      flag: _request.flag,
+      episodeId: _request.episodeTarget,
+    );
+    // 查不到（已看完 / 无记录 / 低于续播下限）时退回「重试本集」语义，
+    // 而不是静默无动作——用户点了按钮就必须有反馈。
+    if (latest == null) {
+      widget.state.log.info(
+        '失败态续播：库内无可续播进度，退化为重试本集 '
+        'episode=${_request.episodeName}',
+        scope: 'player',
+      );
+      await _load();
+      return;
+    }
+    widget.state.log.info(
+      '失败态续播：position=${latest.inMilliseconds}ms '
+      'episode=${_request.episodeName}',
+      scope: 'player',
+    );
+    setState(() {
+      _request = _request.copyWith(startPosition: latest);
+    });
+    await _load();
+  }
+
   Future<void> _playNext() async {
     final episodes = _episodesCache.isNotEmpty ? _episodesCache : _episodes;
     if (episodes.isEmpty) return;
@@ -1130,11 +1263,6 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     );
   }
 
-  /// 自动连播（§10.3 MVP-B 能力，产品基础已就绪）。
-  void _onCompleted() {
-    _playNext();
-  }
-
   @override
   Widget build(BuildContext context) {
     final shortcuts = buildPlayerShortcuts(
@@ -1151,8 +1279,16 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     );
 
     if (_controller.isCompleted) {
+      // 连播**不**在这里触发（`design/03` §4.1 D1）：
+      // `build()` 会被任何一次 `setState` 走到，在这里排 postFrameCallback
+      // 等于把「重建」当成「播完」的信号。真正的触发点是
+      // `_onControllerChanged()` 里的 `_maybeAdvanceOnGenuineEnd()`。
+      //
+      // 这里只保留一个**兜底**：若因异常路径漏掉了事件（例如控制器在
+      // `initState` 订阅生效前就已 completed），下一次重建时补一次判定。
+      // 判定本身带单次守卫与真播完闸门，因此重复调用是安全的。
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _onCompleted();
+        if (mounted) _maybeAdvanceOnGenuineEnd();
       });
     }
 
@@ -1302,6 +1438,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                               message: _loadError!,
                               url: _request.url,
                               onRetry: _load,
+                              onResume: _resumeFromLatestProgress,
                               onNext: _playNext,
                               canGoNext:
                                   (_episodesCache.isNotEmpty
@@ -1774,13 +1911,21 @@ class _PlayerErrorOverlay extends StatelessWidget {
     required this.message,
     required this.url,
     required this.onRetry,
+    required this.onResume,
     required this.onNext,
     required this.canGoNext,
   });
 
   final String message;
   final String url;
+
+  /// 出口一：用**原** `_request`（原集、原 `startPosition`）重新加载。
   final VoidCallback onRetry;
+
+  /// 出口二：重新查库拿最新进度后续播（`design/03` §4.4）。
+  final VoidCallback onResume;
+
+  /// 出口三：显式用户动作地切下一集（**不是**自动连播）。
   final VoidCallback onNext;
   final bool canGoNext;
 
@@ -1836,19 +1981,31 @@ class _PlayerErrorOverlay extends StatelessWidget {
             ),
           ),
           const SizedBox(height: AppSpace.lg),
-          Row(
+          // 失败态必须提供三个明确出口（`design/03` §4.4）：
+          // 只给一行错误会让用户只能反复点「重试」，而真正的诉求往往是
+          // 「从刚才的位置接着看」。
+          Wrap(
+            spacing: AppSpace.sm,
+            runSpacing: AppSpace.xs,
             children: [
               OutlinedButton.icon(
+                key: const ValueKey('player-error-retry'),
                 onPressed: onRetry,
                 icon: const Icon(Icons.refresh, size: 18),
-                label: const Text('重试一次'),
+                label: const Text('重试本集'),
               ),
-              const SizedBox(width: AppSpace.sm),
+              OutlinedButton.icon(
+                key: const ValueKey('player-error-resume'),
+                onPressed: onResume,
+                icon: const Icon(Icons.play_arrow, size: 18),
+                label: const Text('从最近进度续播'),
+              ),
               if (canGoNext)
                 OutlinedButton.icon(
+                  key: const ValueKey('player-error-next'),
                   onPressed: onNext,
                   icon: const Icon(Icons.skip_next, size: 18),
-                  label: const Text('换下一集'),
+                  label: const Text('播放下一集'),
                 ),
             ],
           ),

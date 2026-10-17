@@ -166,6 +166,21 @@ class PlayerController extends ChangeNotifier {
   bool get isPlaying => _playing;
   bool get isLoading => _loading;
   bool get isCompleted => _completed;
+
+  /// 显式清除 `completed`（失败/回滚路径用，`design/03` §4.3）。
+  ///
+  /// **为什么必须显式**：media_kit 的 `completed` 只在下次 `open()` 时复位，
+  /// 而失败路径不会再 `open()`（否则就是死循环重试）。若不清除，那个残留的
+  /// `completed=true` 会在下一次 `setState`/重建时再次触发连播——
+  /// 正是用户实测的「缓存耗尽后跳下一集」（D1 + D2 的叠加形态）。
+  ///
+  /// 返回是否真的发生了变化，便于调用点与测试断言「失败路径确实清了」。
+  bool clearCompleted() {
+    if (!_completed) return false;
+    _completed = false;
+    notifyListeners();
+    return true;
+  }
   double get volume => _volume;
   bool get muted => _muted;
   double get rate => _rate;
