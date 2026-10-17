@@ -1,6 +1,6 @@
 # Phase 7 计划（安卓实时同步 + 保活心跳 + 续播修复）
 
-- 状态：**实施中**（T1–T5、T9、T15–T17 已完成；T6–T8、T10–T14 待做）
+- 状态：**实施中**（T1–T6、T9、T15–T17 已完成；T7–T8、T10–T14 待做）
 - 日期：2026-10-17
 - 对应设计文档章节：本目录 `design/00`–`design/04`、`docs/webhtv-pc-design.md` §29（Phase 7）
 - 上游：`docs/phase5/README.md`（Phase 5：T4 站点桥接 + 历史/设置同步，已完成）、
@@ -19,8 +19,9 @@
 | T17 | 失败回滚 `_request` + `clearCompleted()` + 三出口 | ✅ 完成 | `1175ba0` |
 | T9 | 设置白名单扩展到 AI 段 + `unsupportedKeys` + `raw` 保真 | ✅ 完成 | `68e1c79` |
 | T4 | 安卓读取客户端 + 降级链（`/history` → `/current`） | ✅ 完成 | `70e2cb4` |
-| T5 | PC 拉取端点 + 身份解析 + 能力声明 | ✅ 完成 | `1063697` + 本提交 |
-| T6–T8 | 实时引擎 / 状态层开关矩阵 / UI | ⏳ 待做 | — |
+| T5 | PC 拉取端点 + 身份解析 + 能力声明 | ✅ 完成 | `1063697` + `d85836f` |
+| T6 | 实时引擎（定时器 / 心跳编排 / 退避 / 游标推进） | ✅ 完成 | 本提交 |
+| T7–T8 | 状态层开关矩阵 / UI | ⏳ 待做 | — |
 | T10–T14 | fixture / 反向验证脚本 / 符号门禁 / 一键验收 / L3 集成 | ⏳ 待做 | — |
 | T19 | 安卓侧契约补齐（A + C） | ✅ 已交付 | 安卓 `e55f19276fb0` |
 
@@ -37,6 +38,7 @@
 | `test/phase7_pull_endpoint_test.dart` | L2 | T5：S17–S20 + 6（游标/limit/hasMore） |
 | `test/phase7_identity_resolve_test.dart` | L2 | T5：6b/6c（四态 + 幂等 + 能力声明） |
 | `test/phase7_identity_persistence_test.dart` | L2 | T5：注册表跨重启存活 |
+| `test/phase7_realtime_engine_test.dart` | L2 | T6：E1–E36（假时钟编排 / 联动 / 退避 / 游标 / G12） |
 | `integration_test/phase7_resume_flow_test.dart` | L3 | 真实窗口续播 + 闸门 |
 
 已实测的反向验证：`design/04` §3.2 的 **8 项全部完成**——
@@ -50,6 +52,10 @@ T5 另做两项现场反向验证（本次提交前实测，均「破坏即转�
 - **注册表不登记键别名** → 「同一把键从不同层提交也能命中」用例落到 `create`（红）；
 - **`resolve` 成功变更后不落盘**（去掉 `onChanged`）→ 「`adopt` 结论跨重启存活」
   用例等不到 `settings.json` 的 `sync.identity`（红）。
+
+T6 把 `design/04` §5 的**反向验证 #6**（游标在部分失败时也推进）真正跑了：
+把引擎里 `decideCursor(outcome: outcome)` 改成恒传 `success` →
+E25（部分条目失败）/ E26（合并阶段 failed）**立即转红**；还原即转绿。
 
 ---
 
