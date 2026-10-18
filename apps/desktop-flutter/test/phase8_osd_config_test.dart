@@ -50,6 +50,27 @@ void main() {
       expect(flags[OsdFlag.time], isTrue);
     });
 
+    // 关键用例：非 bool 值必须回落到**各自**的默认值，而不是一律 true。
+    //
+    // 为什么必须有这一条：上面那个测试把非 bool 值全放在默认 true 的项上，
+    // 于是「回落默认」与「非 bool 就当 true」两种实现**都能通过**。
+    // 一个写成 `raw[id] is bool ? raw[id] as bool : true` 的错误实现
+    // 会通过全部用例，却在 traffic/mini/diagnostics 上违反
+    // `docs/phase8/design/02` §5.2「只接受合法布尔值，非法值回落默认」。
+    // 默认 false 的项是唯一能区分这两种实现的地方。
+    test('非法类型回落到各自默认值（默认 false 的项不得变成 true）', () {
+      final flags = normalizeOsdFlags({
+        'traffic': 'yes',
+        'mini': 1,
+        'diagnostics': null,
+      });
+      expect(flags[OsdFlag.traffic], isFalse);
+      expect(flags[OsdFlag.mini], isFalse);
+      expect(flags[OsdFlag.diagnostics], isFalse);
+      // 同时确认默认 true 的项没有被这次归一化牵连。
+      expect(flags[OsdFlag.title], isTrue);
+    });
+
     test('非 Map 输入整体回落默认', () {
       expect(normalizeOsdFlags('garbage'), defaultOsdFlags());
       expect(normalizeOsdFlags(null), defaultOsdFlags());
