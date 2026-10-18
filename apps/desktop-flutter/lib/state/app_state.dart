@@ -2395,11 +2395,16 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   }
 
   /// 查询某剧集的历史记录（用于进入播放器时自动续播，§15.2）。
+  ///
+  /// [episodeName] 可选：同步来的记录 `episode_id` 存的是安卓哈希
+  /// （`episodeUrl` 的 SHA-256），用站点入口 URL 查不到，需要集名兜底。
+  /// 详见 `AppDatabase.findHistory` 的三级匹配说明。
   PlaybackHistory? findHistory({
     required String siteKey,
     required String vodId,
     String? flag,
     String? episodeId,
+    String? episodeName,
   }) {
     final database = _database;
     if (database == null) return null;
@@ -2409,6 +2414,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         vodId: vodId,
         flag: flag,
         episodeId: episodeId,
+        episodeName: episodeName,
       );
     } catch (error) {
       log.warning('读取播放进度失败:$error', scope: 'history');
@@ -2419,17 +2425,21 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// 「继续播放」位置（§15.2）。
   ///
   /// 已播完或位置过短时返回 null：从零开始比从尾部几秒开始体验更好。
+  ///
+  /// [episodeName] 参与集消歧（见 [findHistory]）：同步来的记录靠它才能对到集。
   Duration? resumePositionFor({
     required String siteKey,
     required String vodId,
     String? flag,
     String? episodeId,
+    String? episodeName,
   }) {
     final record = findHistory(
       siteKey: siteKey,
       vodId: vodId,
       flag: flag,
       episodeId: episodeId,
+      episodeName: episodeName,
     );
     if (record == null || record.completed) return null;
     if (record.positionMs < resumeThreshold.inMilliseconds) return null;

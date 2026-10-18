@@ -748,19 +748,65 @@ class AppDatabase {
         .toList();
   }
 
+  /// 查询某条历史（续播用）。
+  ///
+  /// ## 为什么要集名兜底
+  ///
+  /// `history.episode_id` 有**两种互不兼容的语义**（同一列，看写入方）：
+  ///
+  /// | 写入方 | `episode_id` 存的值 |
+  /// | --- | --- |
+  /// | 本地播放（`player_page.dart`） | **站点入口 URL**（`episodeTarget`） |
+  /// | 同步落库（`_writeSyncHistory`） | 安卓 `episodeId` = **episodeUrl 的 SHA-256** |
+  ///
+  /// 而续播查询传的是站点入口 URL，于是同步来的记录 `WHERE episode_id = ?`
+  /// **永远命不中** → 用户实报「手动拉取的历史点开从头开始播」。
+  ///
+  /// ## 匹配顺序（只有两级，且都要求“对得上”而不是“猜”）
+  ///
+  /// 1. **`episode_id` 精确命中**：语义与旧实现完全一致；
+  /// 2. **`episode_name` 精确命中**（仅当给了 [episodeName] 且第 1 步落空）。
+  ///
+  /// ## 为什么**没有**「唯一记录」兜底
+  ///
+  /// 曾实现过“同剧同线路只剩一条记录就用它”。但那是**错续播**：
+  /// 用户点开第 5 集（而库内只有第 3 集的记录）时，会把他送到第 3 集的
+  /// 进度上。既有用例 `phase2_resume_test` 的
+  /// 「按 flag 与 episodeId 精确匹配，不同剧集互不串扰」明确锁住了这条：
+  /// 查不存在的集必须回 `null`。
+  ///
+  /// 取舍依据：`design/01` §4.1——**宁可不续播，不可错续播**。
+  /// 集名对不上时，从 0 开始是安全失败；续到别的集是数据损坏级体验。
   PlaybackHistory? findHistory({
     required String siteKey,
     required String vodId,
     String? flag,
     String? episodeId,
+    String? episodeName,
   }) {
-    final rows = _db.select(
+    // ── 第 1 步：精确（旧行为，语义不变） ──
+    final exact = _db.select(
       'SELECT * FROM history WHERE site_key=? AND vod_id=? '
       'AND (? IS NULL OR flag = ?) AND (? IS NULL OR episode_id = ?) '
       'ORDER BY updated_at DESC LIMIT 1;',
       [siteKey, vodId, flag, flag, episodeId, episodeId],
     );
-    return rows.isEmpty ? null : PlaybackHistory.fromRow(rows.first);
+    if (exact.isNotEmpty) return PlaybackHistory.fromRow(exact.first);
+
+    // 第 2 步只在「给了 episodeId 但没命中 + 有集名可依据」时起作用。
+    // 未给 episodeId 时保持旧行为（上面第 1 步已按 flag 取最新一条）。
+    if (episodeId == null) return null;
+    final name = (episodeName ?? '').trim();
+    if (name.isEmpty) return null;
+
+    // ── 第 2 步：按集名兜底（同步记录的 episode_id 是哈希，只能靠集名对上） ──
+    final byName = _db.select(
+      'SELECT * FROM history WHERE site_key=? AND vod_id=? '
+      'AND (? IS NULL OR flag = ?) AND episode_name = ? '
+      'ORDER BY updated_at DESC LIMIT 1;',
+      [siteKey, vodId, flag, flag, name],
+    );
+    return byName.isEmpty ? null : PlaybackHistory.fromRow(byName.first);
   }
 
   void deleteHistory(int id) {

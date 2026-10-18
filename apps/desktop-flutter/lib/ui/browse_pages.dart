@@ -1511,11 +1511,16 @@ class _DetailPageState extends State<DetailPage> {
       }
       if (!mounted) return;
       // §15.2「继续播放」：进入播放器时从历史位置续播（无有效历史则为 null）。
+      //
+      // 必须同时给 `episodeName`：同步来的历史 `episode_id` 存的是安卓哈希
+      // （`episodeUrl` 的 SHA-256），与这里的 `episode.url`（站点入口）不同源，
+      // 只靠 `episodeId` 永远命不中 → 手动拉取的历史点开就从头开始。
       final resume = state.resumePositionFor(
         siteKey: state.selectedSite?.key ?? '',
         vodId: vod.vodId,
         flag: line.playbackFlag,
         episodeId: episode.url,
+        episodeName: episode.name,
       );
       // TMDB 季度身份（`04` §8.1）：已确证季度时透传；未确证时只传 URL/集名。
       final tmdb = state.tmdb;

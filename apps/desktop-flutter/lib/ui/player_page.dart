@@ -1209,6 +1209,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       vodId: _request.vodId,
       flag: _request.flag,
       episodeId: _request.episodeTarget,
+      // 同步来的历史 `episode_id` 是安卓哈希，与 `episodeTarget` 不同源，
+      // 需要集名兜底（详见 `AppDatabase.findHistory` 的三级匹配）。
+      episodeName: _request.episodeName,
     );
     // 查不到（已看完 / 无记录 / 低于续播下限）时退回「重试本集」语义，
     // 而不是静默无动作——用户点了按钮就必须有反馈。
