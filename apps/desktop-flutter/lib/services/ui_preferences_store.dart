@@ -508,7 +508,9 @@ class UiPreferencesStore {
         final hidden = _buttonHidden;
         if (order != null || hidden != null) {
           ui['playerButtons'] = <String, Object?>{
-            if (order != null) 'order': order,
+            // 用 null-aware 值 `?order` 而不是 `if (order != null) 'order': order,`：
+            // 后者在本仓库工具链下触发 `use_null_aware_elements`（实测确认）。
+            'order': ?order,
             if (hidden != null) 'hidden': hidden.toList()..sort(),
           };
         }
