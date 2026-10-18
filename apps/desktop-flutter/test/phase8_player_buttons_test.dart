@@ -68,12 +68,22 @@ void main() {
     // 磁盘上的 `settings.json` 完全可能是手改的、带空格的，
     // 而 trim 正是为它存在的。
     test('带空白的输入被 trim（手改设置文件的真实形态）', () {
+      // 断言 1、2 守 String 分支的 trim（`_splitIds` 的 `part.trim()`）。
       final fromSpaced = normalizeButtonOrder(' play , prev , next ');
       final fromClean = normalizeButtonOrder(['play', 'prev', 'next']);
       expect(fromSpaced, fromClean);
 
       final hiddenSpaced = normalizeButtonHidden(' speed , line ');
       expect(hiddenSpaced, {'speed', 'line'});
+
+      // 断言 3 守 **List 分支**的 trim（`_splitIds` 的 `item.trim()`）。
+      // 为什么必须单独有这一条：上面两条只喂 String 输入，
+      // 去掉 List 分支的 trim 它们仍然通过——变异测试实测确认了这个半缺口。
+      expect(
+        normalizeButtonOrder([' play ', 'prev']),
+        normalizeButtonOrder(['play', 'prev']),
+      );
+      expect(normalizeButtonHidden([' speed ', 'line']), {'speed', 'line'});
 
       // 只有空白的项必须被丢弃，而不是变成一个空 id。
       final withBlank = normalizeButtonOrder('play,  ,prev');

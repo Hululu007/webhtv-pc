@@ -3,7 +3,8 @@
 /// 纯数据 + 纯函数：不依赖 Flutter，不碰磁盘。
 ///
 /// 上游依据：`PlayerButtonSetting.java`。**PC 端只取可用子集**——
-/// 上游 32 个按钮里有 18 个在 PC 端没有真实实现，不得为了对齐而伪造入口
+/// 上游 32 个按钮里，PC 端只沿用 5 个（`speed`/`prev`/`next`/`episodes`/
+/// `fullscreen`），其余 27 个全部排除——它们没有真实实现，不得为了对齐而伪造入口
 /// （`PRODUCT.md` §Product Principles 第 5 条「不承诺能力范围」）。
 library;
 
@@ -172,6 +173,12 @@ List<String> _splitIds(Object? raw) {
 
 /// 归一化按钮顺序。
 ///
+/// **返回的是新列表，每次调用都是新实例**——`List` 的 `==` 是身份比较，
+/// 所以 `normalizeButtonOrder(x) != normalizeButtonOrder(x)`。
+/// 调用方做变更检测时**必须按值比较**（`listEquals` / 逐项比较），
+/// 否则 `if (normalized != _order) save()` 会在每次加载时都写盘
+/// （本仓库的写盘走 `writeSettingsSectionSync` + 串行队列，代价不低）。
+///
 /// 规则（对齐上游 `PlayerButtonSetting.getOrder()`，
 /// `PlayerButtonSetting.java:210-215`）：
 /// 1. 取已存顺序里**合法**的 id，去重，保持原顺序；
@@ -195,6 +202,10 @@ List<String> normalizeButtonOrder(Object? raw) {
 }
 
 /// 归一化隐藏集：过滤非法 id、去重。
+///
+/// **只接受 `List` 与逗号分隔 `String`**，不认 `Set`——传 `Set` 会静默返回空集
+/// （`_splitIds` 对非 List/String 返回 `const []`）。调用方持 `Set` 时必须先
+/// `.toList()`。实测确认：`normalizeButtonHidden({'speed','line'})` → `{}`。
 Set<String> normalizeButtonHidden(Object? raw) => {
   for (final id in _splitIds(raw))
     if (_isKnownId(id)) id,
