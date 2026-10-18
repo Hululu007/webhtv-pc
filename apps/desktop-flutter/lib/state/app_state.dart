@@ -25,8 +25,10 @@ import '../core/config_loader.dart';
 import '../core/config_parser.dart';
 import '../core/history_view.dart';
 import '../core/http_api.dart';
+import '../core/osd_config.dart';
 import '../core/playback.dart';
 import '../core/playback_diagnostics.dart';
+import '../core/player_buttons.dart';
 import '../core/protocol.dart';
 import '../core/proxy_policy.dart';
 import '../core/realtime_sync.dart';
@@ -560,6 +562,60 @@ class AppState extends ChangeNotifier implements SyncStateHost {
           ) ??
           Future<void>.value(),
     );
+  }
+
+  /// 生效的屏显开关。
+  ///
+  /// `_uiPreferences` 为 null（未 bootstrap）时返回默认表，不让屏显失败——
+  /// 与 [themeMode] 同一口径。
+  Map<String, bool> get osdFlags =>
+      _uiPreferences?.osdFlags ?? defaultOsdFlags();
+
+  /// 持久化单项屏显开关。
+  ///
+  /// 写盘失败不影响当前会话（内存里已生效），但无论如何都通知 UI 重建——
+  /// 用户刚点了开关，界面必须立刻反映选择（与 [setThemeMode] 同语义）。
+  Future<bool> setOsdFlag(String id, bool enabled) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberOsdFlag(id, enabled);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 生效的播放器按钮顺序。
+  List<String> get playerButtonOrder =>
+      _uiPreferences?.buttonOrder ?? defaultButtonOrder();
+
+  /// 生效的播放器按钮隐藏集。
+  Set<String> get playerButtonHidden =>
+      _uiPreferences?.buttonHidden ?? const <String>{};
+
+  /// 持久化播放器按钮顺序。
+  Future<bool> setPlayerButtonOrder(List<String> order) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberButtonOrder(order);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 持久化播放器按钮隐藏集。
+  Future<bool> setPlayerButtonHidden(Set<String> hidden) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberButtonHidden(hidden);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 恢复播放器按钮排版默认。
+  Future<bool> resetPlayerButtons() async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.resetPlayerButtons();
+    notifyListeners();
+    return ok;
   }
 
   /// 主题模式（`dark` / `light` / `system`）。
