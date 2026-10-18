@@ -92,7 +92,7 @@ class PlayerOverlayDivider extends StatelessWidget {
   Widget build(BuildContext context) {
     // 颜色取 `colorScheme.outline` 而**不是** `Theme.of(context).dividerColor`。
     //
-    // 两者在本仓里是不同角色：`dividerColor` 被成 `outlineVariant.withValues(alpha: 0.72)`
+    // 两者在本仓里是不同角色：`dividerColor` 被设成 `outlineVariant.withValues(alpha: 0.72)`
     // = `#232C46 @ 0.72`，那是「深色表面上再压一层更深的线」——在应用卡片里没问题，
     // 但这根线画在**视频**上：底栏纱到分隔线所在高度（约 y=552，纱从 440 开始渐变）
     // 只剩约 0.2 的不透明度，画面透出 80%。影片常见的黑边/暗场在这条位置接近纯黑，

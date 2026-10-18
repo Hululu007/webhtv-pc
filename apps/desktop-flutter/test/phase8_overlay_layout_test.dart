@@ -58,15 +58,22 @@ void main() {
         ),
       );
       final video = tester.getRect(find.byKey(const ValueKey('video')));
-      expect(video, const Rect.fromLTWH(0, 0, 800, 600), reason: '视频区必须占满整个 body');
+      expect(video, Rect.fromLTWH(0, 0, viewport.width, viewport.height), reason: '视频区必须占满整个 body');
 
       // 正向断言：浮层不是"按内容高度自适应"的盒子，它就是 body 那么大。
       final overlay = tester.getRect(find.byType(PlayerControlOverlay));
-      expect(overlay, const Rect.fromLTWH(0, 0, 800, 600), reason: '浮层应吃掉 body 的全部约束');
+      expect(overlay, Rect.fromLTWH(0, 0, viewport.width, viewport.height), reason: '浮层应吃掉 body 的全部约束');
     });
 
     testWidgets('内容再高也不改变视频区：视频矩形与浮层内容无关', (tester) async {
-      // 顶栏 400 + 动作行 400 远超 body 高度；若浮层参与布局，画面必被挤走。
+      // 顶栏 400 + 动作行 400 远超 body 高度。
+      //
+      // 注意本用例的**真实检出力**：视频是 `Positioned.fill`，
+      // 所以**任何**浮层实现下它都是 800×600——单看视频矩形这条断言没有区分力。
+      // 真正有区分力的是下面两条：
+      // (1) `takeException()` 为 null：浮层若被塞进 `Column`/`Row`，
+      //     400+400 的贴边子项会在 800×600 里触发 `RenderFlex` 溢出；
+      // (2) **浮层自身**矩形仍是 800×600：内容自适应实现在这里会缩成内容高度。
       await tester.pumpWidget(
         wrap(
           Stack(
@@ -89,8 +96,14 @@ void main() {
       expect(tester.takeException(), isNull, reason: '贴边子项重叠不得溢出报错');
       expect(
         tester.getRect(find.byKey(const ValueKey('video'))),
-        const Rect.fromLTWH(0, 0, 800, 600),
+        Rect.fromLTWH(0, 0, viewport.width, viewport.height),
         reason: '浮层内容高度不得影响视频区',
+      );
+      // (2) 浮层自身也必须撑满——这一条才真正区分「撑满」与「按内容自适应」。
+      expect(
+        tester.getRect(find.byType(PlayerControlOverlay)),
+        Rect.fromLTWH(0, 0, viewport.width, viewport.height),
+        reason: '浮层自身必须撑满 body，不得按内容自适应',
       );
     });
 
@@ -103,7 +116,7 @@ void main() {
 
       expect(
         tester.getRect(find.byType(PlayerControlOverlay)),
-        const Rect.fromLTWH(0, 0, 800, 600),
+        Rect.fromLTWH(0, 0, viewport.width, viewport.height),
         reason: '浮层必须撑满可用空间，而不是围着自己的内容',
       );
       expect(tester.getRect(find.byKey(const ValueKey('top'))).top, 0);
