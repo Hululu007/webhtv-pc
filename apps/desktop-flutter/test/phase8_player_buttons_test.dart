@@ -60,6 +60,27 @@ void main() {
       expect(fromString, fromList);
     });
 
+    // 关键用例：带空白的输入必须被 trim。
+    //
+    // 为什么必须有这一条：`_splitIds` 对每个 id 做 `trim()`
+    // （`player_buttons.dart:161,167`），但若所有测试输入都不含空白，
+    // 「不 trim」的实现能通过全部用例——变异测试实测确认了这个缺口。
+    // 磁盘上的 `settings.json` 完全可能是手改的、带空格的，
+    // 而 trim 正是为它存在的。
+    test('带空白的输入被 trim（手改设置文件的真实形态）', () {
+      final fromSpaced = normalizeButtonOrder(' play , prev , next ');
+      final fromClean = normalizeButtonOrder(['play', 'prev', 'next']);
+      expect(fromSpaced, fromClean);
+
+      final hiddenSpaced = normalizeButtonHidden(' speed , line ');
+      expect(hiddenSpaced, {'speed', 'line'});
+
+      // 只有空白的项必须被丢弃，而不是变成一个空 id。
+      final withBlank = normalizeButtonOrder('play,  ,prev');
+      expect(withBlank.contains(''), isFalse);
+      expect(withBlank.take(2).toList(), ['play', 'prev']);
+    });
+
     test('空/非法输入回落默认顺序', () {
       expect(normalizeButtonOrder(null), defaultButtonOrder());
       expect(normalizeButtonOrder(''), defaultButtonOrder());
