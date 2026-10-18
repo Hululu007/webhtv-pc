@@ -39,8 +39,12 @@ void main() {
   // 为什么必须有这一条：上面那个用例的 setUp 总是 `await state.bootstrap()`，
   // 所以 `?? default*` 三条回落分支是**死代码**——变异测试实测确认：
   // 把回落改成 `_uiPreferences!.osdFlags`（会抛）或改成 `const {}`（值错）
-  // 都能通过全部 5 个用例。而 `PRODUCT.md` 的失败必须如实原则要求
-  // 「取个颜色/取个默认值」这类操作不能把页面打崩。
+  // 都能通过全部 5 个用例。而 `_uiPreferences` 字段自己的注释
+  // （`app_state.dart:410-415`）就说明了为什么必须回落：单元测试/工具可能
+  // **不调 bootstrap** 就直接用 AppState，此时取默认值应「安静降级，
+  // 而不是把页面弄崩」。
+  // （注意不要引 `PRODUCT.md` 的「失败必须如实」——那条讲的是**不要静默
+  // 把错误当成功**，方向与「取默认值要安全」相反，引它反而自相矛盾。）
   test('未 bootstrap 时 getter 回落默认值而不抛异常', () {
     final bare = AppState(paths: state.paths, log: LogService());
     addTearDown(bare.dispose);
@@ -96,5 +100,45 @@ void main() {
     await state.resetPlayerButtons();
     expect(state.playerButtonOrder, defaultButtonOrder());
     expect(state.playerButtonHidden, isEmpty);
+  });
+
+  // 关键用例：**从未设置过**时调 reset 必须走 store 的提前返回分支
+  // （`ui_preferences_store.dart:398-400`），且仍要通知监听者。
+  //
+  // 为什么必须有这一条：上面那个用例先设了 order 与 hidden，
+  // 所以 `_buttonOrder == null && _buttonHidden == null` 这个分支**从未被走到**——
+  // 变异测试实测确认：把提前返回改成 `return false;` 或删掉它，用例仍绿。
+  test('从未设置过时 reset 走提前返回分支且仍通知', () async {
+    var notifications = 0;
+    void listener() => notifications++;
+    state.addListener(listener);
+    addTearDown(() => state.removeListener(listener));
+
+    final ok = await state.resetPlayerButtons();
+    expect(ok, isTrue, reason: '提前返回分支必须返回 true（幂等成功）');
+    expect(notifications, 1, reason: '即使无事可做，也要通知一次');
+    expect(state.playerButtonOrder, defaultButtonOrder());
+    expect(state.playerButtonHidden, isEmpty);
+  });
+
+  // 关键用例：setter 的返回值必须透传 store 的结果，不能被吞成常量 true。
+  //
+  // 为什么必须有这一条：7 个用例里没有任何一个断言过返回值，
+  // 所以把 `return ok;` 改成 `return true;` 能全绿——而调用方
+  // （Task 9/10 的界面）要靠这个 bool 决定是否提示「保存失败」。
+  test('setter 透传 store 的返回值', () async {
+    // 正常路径：store 可用 → true。
+    expect(await state.setOsdFlag(OsdFlag.mini, true), isTrue);
+    expect(await state.setPlayerButtonOrder(['next', 'play']), isTrue);
+    expect(await state.setPlayerButtonHidden({'speed'}), isTrue);
+    expect(await state.resetPlayerButtons(), isTrue);
+
+    // 未 bootstrap 路径：store 为 null → false（不得谎报成功）。
+    final bare = AppState(paths: state.paths, log: LogService());
+    addTearDown(bare.dispose);
+    expect(bare.setOsdFlag(OsdFlag.mini, true), completion(isFalse));
+    expect(bare.setPlayerButtonOrder(['next']), completion(isFalse));
+    expect(bare.setPlayerButtonHidden({'speed'}), completion(isFalse));
+    expect(bare.resetPlayerButtons(), completion(isFalse));
   });
 }
