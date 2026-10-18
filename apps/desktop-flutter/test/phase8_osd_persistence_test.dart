@@ -98,9 +98,14 @@ void main() {
       final raw = readRaw();
       final ui = raw['ui'] as Map<String, Object?>?;
       final osd = ui?['osd'];
-      if (osd is Map) {
+      // 非法 id 被拒绝时 `_osdFlags` 仍为空，所以 `ui.osd` 可能整个缺席。
+      // 这里**显式断言**「要么没有 osd 段，要么有但里面没有该键」，
+      // 而不是用 `if (osd is Map)` 把缺席悄悄跳过——后者会让断言在
+      // 实现改成「总是写 osd 段」时静默失效。
+      if (osd != null) {
+        expect(osd, isA<Map>(), reason: 'ui.osd 存在时必须是对象');
         expect(
-          osd.containsKey('nonsense'),
+          (osd as Map).containsKey('nonsense'),
           isFalse,
           reason: '非法 id 不得落盘（不能靠读取时过滤来掩盖）',
         );

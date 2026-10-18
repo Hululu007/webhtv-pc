@@ -368,7 +368,8 @@ class UiPreferencesStore {
     return _persist();
   }
 
-  /// 记住按钮顺序。输入的非法 id 会被过滤、缺失项会在读取时补全。
+  /// 记住按钮顺序。输入的非法 id 会被过滤、缺失项会在**写入时**补全
+  /// （`normalizeButtonOrder` 就把缺失项追加到末尾，所以落盘的 order 长度恒为 9）。
   Future<bool> rememberButtonOrder(List<String> order) {
     final normalized = normalizeButtonOrder(order);
     if (_listEquals(normalized, _buttonOrder ?? const [])) {
@@ -433,8 +434,12 @@ class UiPreferencesStore {
 
   /// 输入里是否至少有一个合法的按钮 id。
   ///
-  /// 用于区分「显式存过（哪怕是空集）」与「文件里有个空壳对象」。
-  /// 空数组/空串一律视为未设置，避免把默认值固化进文件。
+  /// 用于区分「文件里有个空壳对象」与「真的存过内容」：
+  /// `playerButtons: {}`、`order: []`、`order: ""` **一律视为未设置**，
+  /// 这样就不会把默认值固化进文件（`design/03` §4.5 的「缺席 = 默认」）。
+  ///
+  /// 注意语义方向：**空集不算「显式存过」**。因此用户手写一个空数组
+  /// 表达「全部显示」的意图会被忽略——这与「缺席 = 默认」的既有语义一致。
   bool _hasAnyKnownId(Object? raw) {
     final ids = <String>[];
     if (raw is List) {
