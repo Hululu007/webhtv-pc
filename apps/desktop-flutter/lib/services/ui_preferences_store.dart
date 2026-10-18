@@ -24,6 +24,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../core/history_view.dart';
+import '../core/osd_config.dart';
+import '../core/player_buttons.dart';
 import 'log_service.dart';
 import 'settings_file.dart';
 
@@ -79,6 +81,18 @@ class UiPreferencesStore {
   /// 点击历史记录的行为。`null` = 从未设置过，用默认 [UiHistoryClickAction.detail]。
   String? _historyClickAction;
 
+  /// 屏显开关的**显式**设置；缺席的 id 用 [defaultOsdFlags] 补齐。
+  ///
+  /// 为什么只存显式项：与 [_themeMode] 同一理由——把默认值固化进文件会让
+  /// 「从未设置过」与「设置成默认值」无法区分，也会污染既有设置文件。
+  final Map<String, bool> _osdFlags = {};
+
+  /// 按钮顺序的**显式**设置；空表示从未设置过。
+  List<String>? _buttonOrder;
+
+  /// 按钮隐藏集的**显式**设置；null 表示从未设置过。
+  Set<String>? _buttonHidden;
+
   bool _loaded = false;
 
   /// 搜索历史上限（上游安卓 `RecordAdapter.checkToAdd` 同为 10）。
@@ -126,6 +140,25 @@ class UiPreferencesStore {
 
   /// 用户是否显式设置过（决定要不要写盘，与 `themeMode` 同理）。
   bool get hasExplicitHistoryClickAction => _historyClickAction != null;
+
+  /// 生效的屏显开关：显式设置过的项用用户值，其余用默认。
+  Map<String, bool> get osdFlags => normalizeOsdFlags(_osdFlags);
+
+  /// 用户是否显式设置过任一屏显开关（决定要不要写盘）。
+  bool get hasExplicitOsd => _osdFlags.isNotEmpty;
+
+  /// 生效的按钮顺序：显式设置过就用它（并补全缺失项），否则用默认。
+  List<String> get buttonOrder => normalizeButtonOrder(_buttonOrder);
+
+  /// 生效的按钮隐藏集。
+  ///
+  /// 注意必须传 `List`：Task 2 的 [normalizeButtonHidden] 只认 `List` 与
+  /// 逗号分隔 `String`（`_splitIds`），直接喂 `Set` 会静默落成空集。
+  Set<String> get buttonHidden => normalizeButtonHidden(_buttonHidden?.toList());
+
+  /// 用户是否显式设置过按钮排版（决定要不要写盘）。
+  bool get hasExplicitPlayerButtons =>
+      _buttonOrder != null || _buttonHidden != null;
 
   /// 是否已成功读取过磁盘内容。
   bool get loaded => _loaded;
@@ -198,6 +231,29 @@ class UiPreferencesStore {
               clickAction.trim().toLowerCase(),
             )) {
               _historyClickAction = clickAction.trim().toLowerCase();
+            }
+          }
+          // 屏显开关：只接受 bool；非法值忽略（该项回落默认）。
+          final osd = ui['osd'];
+          if (osd is Map) {
+            for (final id in OsdFlag.values) {
+              final value = osd[id];
+              if (value is bool) _osdFlags[id] = value;
+            }
+          }
+          // 按钮排版：顺序与隐藏集各自独立；格式兼容 List 与逗号分隔字符串。
+          final buttons = ui['playerButtons'];
+          if (buttons is Map) {
+            final order = buttons['order'];
+            if (order != null) {
+              final parsed = normalizeButtonOrder(order);
+              // 只有真的解析出内容才视为「显式设置过」，
+              // 否则一个空数组会把「从未设置」误判成「设置成默认」。
+              if (_hasAnyKnownId(order)) _buttonOrder = parsed;
+            }
+            final hidden = buttons['hidden'];
+            if (hidden != null && _hasAnyKnownId(hidden)) {
+              _buttonHidden = normalizeButtonHidden(hidden);
             }
           }
         }
@@ -304,6 +360,48 @@ class UiPreferencesStore {
     return _persist();
   }
 
+  /// 记住单项屏显开关。非法 id 忽略（不写坏状态）。
+  Future<bool> rememberOsdFlag(String id, bool enabled) {
+    if (!OsdFlag.values.contains(id)) return Future.value(true);
+    if (_osdFlags[id] == enabled) return Future.value(true);
+    _osdFlags[id] = enabled;
+    return _persist();
+  }
+
+  /// 记住按钮顺序。输入的非法 id 会被过滤、缺失项会在读取时补全。
+  Future<bool> rememberButtonOrder(List<String> order) {
+    final normalized = normalizeButtonOrder(order);
+    if (_listEquals(normalized, _buttonOrder ?? const [])) {
+      return Future.value(true);
+    }
+    _buttonOrder = normalized;
+    return _persist();
+  }
+
+  /// 记住按钮隐藏集。非法 id 会被过滤。
+  Future<bool> rememberButtonHidden(Set<String> hidden) {
+    final normalized = normalizeButtonHidden(hidden.toList());
+    if (_setEquals(normalized, _buttonHidden ?? const <String>{})) {
+      return Future.value(true);
+    }
+    _buttonHidden = normalized;
+    return _persist();
+  }
+
+  /// 恢复按钮排版默认：清除两个键（对齐上游 `PlayerButtonSetting.reset()`，
+  /// `PlayerButtonSetting.java:140-144`）。
+  ///
+  /// 上游还会清 `HIDDEN_SEEDED`；PC 端没有播种机制（无默认隐藏项），
+  /// 所以只清两个键。详见 `docs/phase8/design/03` §4.5。
+  Future<bool> resetPlayerButtons() {
+    if (_buttonOrder == null && _buttonHidden == null) {
+      return Future.value(true);
+    }
+    _buttonOrder = null;
+    _buttonHidden = null;
+    return _persist();
+  }
+
   /// 夹到 1~100：0 或负数会让搜索一个请求都不发，超大值会打满对端。
   static int _clampSearchThread(int value) {
     if (value < _minSearchThread) return _minSearchThread;
@@ -328,6 +426,29 @@ class UiPreferencesStore {
       if (a[i] != b[i]) return false;
     }
     return true;
+  }
+
+  bool _setEquals(Set<String> a, Set<String> b) =>
+      a.length == b.length && a.every(b.contains);
+
+  /// 输入里是否至少有一个合法的按钮 id。
+  ///
+  /// 用于区分「显式存过（哪怕是空集）」与「文件里有个空壳对象」。
+  /// 空数组/空串一律视为未设置，避免把默认值固化进文件。
+  bool _hasAnyKnownId(Object? raw) {
+    final ids = <String>[];
+    if (raw is List) {
+      for (final item in raw) {
+        if (item is String) ids.add(item.trim());
+      }
+    } else if (raw is String) {
+      for (final part in raw.split(',')) {
+        ids.add(part.trim());
+      }
+    }
+    return ids.any(
+      (id) => id.isNotEmpty && kPlayerButtons.any((spec) => spec.id == id),
+    );
   }
 
   String _videoFitKey(String siteKey, String vodId) =>
@@ -380,6 +501,17 @@ class UiPreferencesStore {
         // 点击行为同上：只有显式设置过才写，缺席 = 默认 detail。
         final clickAction = _historyClickAction;
         if (clickAction != null) ui['historyClickAction'] = clickAction;
+        // 屏显：只有显式设置过的项才写（缺席 = 默认）。
+        if (_osdFlags.isNotEmpty) ui['osd'] = _osdFlags;
+        // 按钮排版：两个键各自独立；都缺席时整个 playerButtons 不写。
+        final order = _buttonOrder;
+        final hidden = _buttonHidden;
+        if (order != null || hidden != null) {
+          ui['playerButtons'] = <String, Object?>{
+            if (order != null) 'order': order,
+            if (hidden != null) 'hidden': hidden.toList()..sort(),
+          };
+        }
         root['ui'] = ui;
         return true;
       },
