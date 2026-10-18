@@ -4,7 +4,7 @@ import 'package:webhtv_pc/core/playback_diagnostics.dart';
 
 void main() {
   group('屏显诊断主列（design/02 §3.2）', () {
-    test('7 行齐全且顺序固定', () {
+    test('无结论时 6 行齐全且顺序固定', () {
       final rows = buildOsdDiagnostics(
         videoWidth: 3840,
         videoHeight: 2160,
@@ -26,6 +26,8 @@ void main() {
         siteKey: 'muou',
         flag: '线路一',
         episodeName: 'E3',
+        succeeded: null,
+        failureKind: null,
       );
       expect(rows.map((r) => r.label).toList(), [
         '视频', '音频', '网络', '状态', '播放', '来源',
@@ -56,6 +58,8 @@ void main() {
         siteKey: null,
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       final video = rows.firstWhere((r) => r.label == '视频');
       expect(video.value, contains('未知'));
@@ -84,6 +88,8 @@ void main() {
         siteKey: 'live',
         flag: null,
         episodeName: 'CCTV-1',
+        succeeded: null,
+        failureKind: null,
       );
       final state = rows.firstWhere((r) => r.label == '状态');
       expect(state.value.contains('00:00 / 00:00'), isFalse);
@@ -111,10 +117,90 @@ void main() {
         siteKey: 's',
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       final play = rows.firstWhere((r) => r.label == '播放');
       expect(play.value, contains('静音'));
       expect(play.value, contains('1.5'));
+    });
+  });
+
+  group('屏显诊断结论行（design/02 §3.2 主列第一行）', () {
+    // 结论行（`design/02` §3.2 主列表格的**第一行**）。
+    //
+    // 为什么必须单独测：它是面板里最重要的一行（回答「这次播放到底成没成」），
+    // 而它的三种状态（无结论 / 成功 / 失败）各自是一条独立分支。
+    // 用**正向断言确切串**，不用「不含某串」——本轮的教训是
+    // 否定断言会放过完全坏掉的实现（Task 5 的直播用例就是这样漏的）。
+    test('结论行：成功时是「正常」，且排在第一行', () {
+      final rows = buildOsdDiagnostics(
+        videoWidth: 1920, videoHeight: 1080, videoCodec: 'h264',
+        videoFps: 25, videoBitrate: null,
+        audioCodec: null, audioChannels: null, audioSampleRate: null,
+        audioBitrate: null,
+        position: Duration.zero, duration: const Duration(minutes: 1),
+        buffered: Duration.zero,
+        rate: 1.0, volume: 100, muted: false,
+        formatLabel: 'HLS (m3u8)', targetHost: 'x.test',
+        siteKey: 's', flag: null, episodeName: null,
+        succeeded: true, failureKind: null,
+      );
+      expect(rows.first.label, '结论');
+      expect(rows.first.value, '正常');
+      expect(rows.map((r) => r.label).toList(), [
+        '结论', '视频', '音频', '网络', '状态', '播放', '来源',
+      ]);
+    });
+
+    test('结论行：失败时带分类', () {
+      final rows = buildOsdDiagnostics(
+        videoWidth: null, videoHeight: null, videoCodec: null,
+        videoFps: null, videoBitrate: null,
+        audioCodec: null, audioChannels: null, audioSampleRate: null,
+        audioBitrate: null,
+        position: Duration.zero, duration: Duration.zero,
+        buffered: Duration.zero,
+        rate: 1.0, volume: 100, muted: false,
+        formatLabel: '未知', targetHost: '',
+        siteKey: null, flag: null, episodeName: null,
+        succeeded: false, failureKind: 'timeout',
+      );
+      expect(rows.first.label, '结论');
+      expect(rows.first.value, '失败 · timeout');
+    });
+
+    test('结论行：失败但无分类时只有「失败」', () {
+      final rows = buildOsdDiagnostics(
+        videoWidth: null, videoHeight: null, videoCodec: null,
+        videoFps: null, videoBitrate: null,
+        audioCodec: null, audioChannels: null, audioSampleRate: null,
+        audioBitrate: null,
+        position: Duration.zero, duration: Duration.zero,
+        buffered: Duration.zero,
+        rate: 1.0, volume: 100, muted: false,
+        formatLabel: '未知', targetHost: '',
+        siteKey: null, flag: null, episodeName: null,
+        succeeded: false, failureKind: null,
+      );
+      expect(rows.first.value, '失败');
+      expect(rows.first.value.contains('·'), isFalse, reason: '无分类时不得留分隔符');
+    });
+
+    test('结论行：succeeded 为 null 时整行不出现', () {
+      final rows = buildOsdDiagnostics(
+        videoWidth: null, videoHeight: null, videoCodec: null,
+        videoFps: null, videoBitrate: null,
+        audioCodec: null, audioChannels: null, audioSampleRate: null,
+        audioBitrate: null,
+        position: Duration.zero, duration: Duration.zero,
+        buffered: Duration.zero,
+        rate: 1.0, volume: 100, muted: false,
+        formatLabel: '未知', targetHost: '',
+        siteKey: null, flag: null, episodeName: null,
+        succeeded: null, failureKind: null,
+      );
+      expect(rows.any((r) => r.label == '结论'), isFalse);
     });
   });
 
@@ -175,6 +261,8 @@ void main() {
             siteKey: null,
             flag: null,
             episodeName: null,
+            succeeded: null,
+            failureKind: null,
           ).firstWhere((r) => r.label == '视频').value;
 
       expect(videoRow(999), '未知 · 999 bps');
@@ -210,6 +298,8 @@ void main() {
         siteKey: null,
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       final video = rows.firstWhere((r) => r.label == '视频').value;
       final audio = rows.firstWhere((r) => r.label == '音频').value;
@@ -247,6 +337,8 @@ void main() {
         siteKey: null,
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       expect(rows.firstWhere((r) => r.label == '视频').value, '未知');
       expect(rows.firstWhere((r) => r.label == '音频').value, '未知');
@@ -279,6 +371,8 @@ void main() {
         siteKey: null,
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       expect(
         rows.firstWhere((r) => r.label == '状态').value,
@@ -308,6 +402,8 @@ void main() {
         siteKey: null,
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       expect(
         rows.firstWhere((r) => r.label == '状态').value,
@@ -340,6 +436,8 @@ void main() {
             siteKey: null,
             flag: null,
             episodeName: null,
+            succeeded: null,
+            failureKind: null,
           );
 
       expect(
@@ -351,9 +449,7 @@ void main() {
       expect(mutedRow, 'media-kit · 1.00× · 静音');
       expect(mutedRow.contains('音量'), isFalse);
     });
-  });
 
-  group('主列补盲点：来源行与网络行', () {
     // 杀掉「直播判定失效、但仍走进度分支」的实现。
     //
     // 为什么必须有这一条：brief 那条直播用例是**否定断言**
@@ -383,12 +479,16 @@ void main() {
         siteKey: null,
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       final state = rows.firstWhere((r) => r.label == '状态').value;
       expect(state, '直播 · 已播 00:05');
       expect(state.contains('缓冲'), isFalse, reason: '直播没有可缓冲的总时长');
     });
+  });
 
+  group('主列补盲点：来源行与网络行', () {
     // 杀掉「来源行的第一个字段不做空值守卫」的实现：
     // `[siteKey ?? '', flag, episodeName].join(' · ')` 在 siteKey 为 null
     // 而 flag 有值时会渲染出前导分隔符 ` · 线路一`。
@@ -415,6 +515,8 @@ void main() {
         siteKey: null,
         flag: '线路一',
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       expect(rows.firstWhere((r) => r.label == '来源').value, '线路一');
     });
@@ -443,6 +545,8 @@ void main() {
         siteKey: null,
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       expect(rows.map((r) => r.label).toList(), ['视频', '音频', '网络', '状态', '播放']);
     });
@@ -470,6 +574,8 @@ void main() {
         siteKey: 'muou',
         flag: '',
         episodeName: 'E3',
+        succeeded: null,
+        failureKind: null,
       );
       expect(rows.firstWhere((r) => r.label == '来源').value, 'muou · E3');
     });
@@ -501,6 +607,8 @@ void main() {
         siteKey: null,
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       final network = rows.firstWhere((r) => r.label == '网络').value;
       expect(network, 'HLS (m3u8) · example.com');
@@ -531,6 +639,8 @@ void main() {
         siteKey: null,
         flag: null,
         episodeName: null,
+        succeeded: null,
+        failureKind: null,
       );
       expect(rows.firstWhere((r) => r.label == '网络').value, 'MP4');
     });
@@ -626,23 +736,6 @@ void main() {
         rows.map((r) => r.label).toList(),
         ['运行环境', '窗口', '主题', '本地代理'],
       );
-    });
-
-    // 杀掉「附加列对拿不到的字段填「未知」」的实现——那是主列的纪律，不是附加列的。
-    // 注意：这一条只对**有值**的行断言「不含未知」，因此它单独无法区分
-    // 「拿不到就填未知」的实现（那种实现下这些行本来就有值）。
-    // 真正的守卫是上面那条 all-null → isEmpty 的用例。
-    test('附加列任何一行都不出现「未知」', () {
-      final rows = buildOsdEnvironment(
-        operatingSystemVersion: 'Windows 11',
-        windowSize: '1440×900',
-        devicePixelRatio: 1.0,
-        themeMode: 'dark',
-        proxyPort: 8899,
-      );
-      for (final row in rows) {
-        expect(row.value.contains('未知'), isFalse, reason: row.label);
-      }
     });
   });
 }

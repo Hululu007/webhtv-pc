@@ -36,9 +36,10 @@ String _bitrate(num? bitsPerSecond) {
   return '${bits.toStringAsFixed(0)} bps';
 }
 
-/// 主列：视频 / 音频 / 网络 / 状态 / 播放 / 来源。
+/// 主列：结论 / 视频 / 音频 / 网络 / 状态 / 播放 / 来源。
 ///
-/// 顺序固定，便于截图复核与断言。
+/// 顺序固定，便于截图复核与断言。结论与来源是条件行：前者在
+///「还没有结论」时省略，后者在三个来源字段都拿不到时省略。
 List<OsdDiagnosticsRow> buildOsdDiagnostics({
   required int? videoWidth,
   required int? videoHeight,
@@ -60,6 +61,10 @@ List<OsdDiagnosticsRow> buildOsdDiagnostics({
   required String? siteKey,
   required String? flag,
   required String? episodeName,
+  // 结论行（`design/02` §3.2 主列表格的**第一行**）。
+  // `succeeded == null` 表示「还没有结论」（例如刚起播），此时**不渲染该行**。
+  required bool? succeeded,
+  required Object? failureKind,
 }) {
   final hasSize = videoWidth != null && videoHeight != null &&
       videoWidth > 0 && videoHeight > 0;
@@ -100,7 +105,19 @@ List<OsdDiagnosticsRow> buildOsdDiagnostics({
     if (episodeName != null && episodeName.isNotEmpty) episodeName,
   ].join(' · ');
 
+  // 结论行（`design/02` §3.2 主列表格的第一行）。
+  //
+  // 为什么它是第一行：它回答「这次播放到底成没成」——面板里最重要的一行。
+  // 失败路径上它真实可见：错误浮层在第 1 层、屏显在第 2 层，用户能同时看到两者。
+  // `succeeded == null` 表示「还没有结论」（例如刚起播），此时**整行不渲染**。
+  final conclusion = switch (succeeded) {
+    null => null,
+    true => '正常',
+    false => failureKind == null ? '失败' : '失败 · $failureKind',
+  };
+
   return [
+    if (conclusion != null) OsdDiagnosticsRow('结论', conclusion),
     OsdDiagnosticsRow('视频', video),
     OsdDiagnosticsRow('音频', audio),
     OsdDiagnosticsRow('网络', network),
