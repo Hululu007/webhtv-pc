@@ -90,7 +90,15 @@ class PlayerOsdLayer extends StatelessWidget {
   bool get _sizeVisible => !controlsVisible && (flags[OsdFlag.size] ?? false);
 
   /// 上左：标题 + 分辨率（分辨率缺失时只显示标题一行，§3.1）。
-  bool get _cornerTopLeftVisible => _titleVisible || _sizeVisible;
+  ///
+  /// **必须把「有内容可显示」也算进来**：`size` 开而 `title` 关、且
+  /// `resolution == null` 时，两段都为空 → `join('\n')` 得到空串 →
+  /// 会渲染一个 `data == ''` 的 `Text`。那违反全站「`.data` 非空」的约束
+  /// （`Text.rich` 会在遍历 `allWidgets` 取 `.data` 的测试里静默消失，
+  /// 空串虽非 null 但同样是无内容占位）。
+  bool get _cornerTopLeftVisible =>
+      (_titleVisible && title.isNotEmpty) ||
+      (_sizeVisible && (resolution?.isNotEmpty ?? false));
 
   /// 进度：控制栏可见时强制隐藏；直播或时长未知时也隐藏。
   bool get _progressVisible =>
@@ -108,8 +116,10 @@ class PlayerOsdLayer extends StatelessWidget {
 
   /// 诊断面板：控制栏可见时强制隐藏。
   ///
-  /// `diagnostics.isNotEmpty` 是防御性判据：`buildOsdDiagnostics` 永远至少
-  /// 返回 7 行，但**空面板**（只有附加列或什么都没有）是比不显示更糟的噪音。
+  /// `diagnostics.isNotEmpty` 是防御性判据：`buildOsdDiagnostics` 至少返回
+  /// **5** 行（视频/音频/网络/状态/播放是无条件的），最多 7 行
+  /// （结论与来源是条件行，见 `osd_diagnostics.dart:120,126`）；
+  /// 但**空面板**（只有附加列或什么都没有）是比不显示更糟的噪音。
   bool get _diagnosticsVisible =>
       !controlsVisible &&
       (flags[OsdFlag.diagnostics] ?? false) &&
@@ -221,11 +231,16 @@ class _DiagnosticsPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // 诊断面板是密集信息：字号压到 10，等宽字体。
-    // 上游 9sp / 横屏 10.2sp（`PlayerOsdController.java:343-347`）。
     //
-    // 注：安卓的 `textScaleX`（横向压字）在 Flutter 的 `TextStyle` 里没有对应
-    // 字段（只有 `letterSpacing`），本层按 `docs/phase8/design/02` §3.5 的样式表
-    // 实现，不额外发明压字宽数值。
+    // 上游的取值分两处：XML 默认 **9sp**（`view_player_osd.xml:118`），
+    // 运行时按横竖屏夹取 **10.2sp / 8.0sp**
+    // （`PlayerOsdController.java:343-347` 的 `land ? 10.2f : 8.0f`）。
+    // 本层取 10，落在两者之间，且是「小字号 + 等宽」这一意图的实现。
+    //
+    // 注：安卓的 `textScaleX`（横向压字，`view_player_osd.xml:117,139` 的 0.92/0.96）
+    // 在 Flutter 的 `TextStyle` 里没有对应字段（只有 `letterSpacing`），
+    // 用 `letterSpacing` 近似会改变**字距**语义而非压缩**字形宽度**，属于伪造；
+    // 因此本层不压字宽，靠 `maxLines` 与省略号兜底。
     const style = TextStyle(
       fontSize: 10,
       height: 1.35,

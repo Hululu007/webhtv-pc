@@ -325,4 +325,34 @@ void main() {
     expect(rect.bottom, 600, reason: '贴画面最底部');
     expect(rect.height, 2, reason: '上游 2dp');
   });
+
+  // 关键用例：不得渲染 `data == ''` 的 Text。
+  //
+  // 为什么必须有这一条：`size` 开而 `title` 关、且 `resolution == null` 时，
+  // 上左两段都为空 → `join('\n')` 得到空串 → 会渲染一个 `data == ''` 的 `Text`。
+  // 全站约束要求「`.data` 非空」（`Text.rich` 会在遍历 `allWidgets` 取 `.data`
+  // 的测试里静默消失；空串虽非 null 但同样是无内容占位）。
+  // 变异测试实测确认：把 `_cornerTopLeftVisible` 改回只看开关（不看内容），
+  // 这条用例会失败。
+  testWidgets('分辨率缺失且标题关闭时不渲染空 Text', (tester) async {
+    await tester.pumpWidget(
+      wrap(
+        buildLayer(
+          // 只有 size 开，且拿不到分辨率。
+          flags: {
+            ...defaultOsdFlags(),
+            OsdFlag.title: false,
+            OsdFlag.size: true,
+            OsdFlag.time: false,
+            OsdFlag.progress: false,
+          },
+          resolution: null,
+        ),
+      ),
+    );
+    for (final text in tester.widgetList<Text>(find.byType(Text))) {
+      expect(text.data, isNot(''), reason: '不得渲染空串 Text（无内容占位）');
+    }
+    expect(find.text(''), findsNothing);
+  });
 }
