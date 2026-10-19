@@ -427,12 +427,24 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 300));
 
-    // 先确认拖动代理层真的存在——否则「遍历所有 Material 都 elevation 0」
+    // 先确认拖动代理层**真的存在**——否则「遍历所有 Material 都 elevation 0」
     // 在「拖动根本没起来」时也会通过。
+    //
+    // **不能断言 `find.byType(Overlay)`**：`MaterialApp`/`Navigator` 永远提供
+    // 一个 `Overlay`，所以那条断言**恒真**（实测：把拖动手柄换成惰性实现，
+    // 这条用例照样通过）。
+    // 有区分力的信号是**拖动代理层本身**：它是 `proxyDecorator` 产出的
+    // `Material`，底色 `surfaceContainerHigh`——静止时页面上**一个都没有**。
     expect(
-      find.byType(Overlay),
-      findsWidgets,
-      reason: '拖动代理层挂在 Overlay 上',
+      find.byWidgetPredicate(
+        (w) =>
+            w is Material &&
+            w.color ==
+                buildAppTheme(Brightness.dark).colorScheme.surfaceContainerHigh &&
+            w.elevation == 0,
+      ),
+      findsOneWidget,
+      reason: '拖动代理层必须存在（用它的底色识别，而不是恒真的 Overlay）',
     );
 
     for (final material in tester.widgetList<Material>(find.byType(Material))) {

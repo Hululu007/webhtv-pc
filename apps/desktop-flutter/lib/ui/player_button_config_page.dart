@@ -109,14 +109,18 @@ class _PlayerButtonConfigPageState extends State<PlayerButtonConfigPage> {
 
   /// 预览行文字。
   ///
+  /// 复用 `resolveVisibleButtons`（`core/player_buttons.dart:215`）而不是
+  /// 自己再写一遍「按 order 排序 + 按 hidden 过滤」：那段逻辑已经存在，
+  /// 而两处实现漂移会让预览行与实际控制栏不一致——预览行的**唯一价值**
+  /// 就是「不离开页面也能看到真实结果」。
+  ///
   /// 全部隐藏时**不能**回落成空串：全站约束要求 `Text.data` 非空
   /// （空串虽非 null 但同样是无内容占位，且会在遍历 `allWidgets` 取 `.data`
   /// 的测试里被当成缺陷——`phase8_osd_layer_test.dart:329` 是同类先例）。
   String get _previewText {
-    final byId = _byId;
     final labels = [
-      for (final id in _order)
-        if (!_hidden.contains(id)) byId[id]?.label ?? id,
+      for (final spec in resolveVisibleButtons(order: _order, hidden: _hidden))
+        spec.label,
     ];
     if (labels.isEmpty) return '（已隐藏全部按钮）';
     return labels.join('  ·  ');
