@@ -171,7 +171,8 @@ class SettingsPage extends StatelessWidget {
         // （`docs/phase8/design/00` §5 第 10 条：右键菜单不得成为唯一入口）。
         //
         // 位置：插在搜索区块之后，**不移动**既有区块的相对顺序
-        // （`test/phase5_sync_ui_test.dart` 可能按顺序断言）。
+        // （`test/phase5_sync_ui_test.dart` 逐项 `tap` 既有入口，顺序变化会让
+        // 滚动位置与点击目标错位；该文件本身不按顺序断言）。
         Text('播放器', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
         Text(
