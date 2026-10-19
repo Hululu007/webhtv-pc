@@ -274,14 +274,20 @@ try {
 
     # G12 定时器无泄漏。
     #
-    # **判据为什么长这样**（R108，一次实测换来的）：
+    # **判据为什么长这样**（R108 + R111，两次实测换来的）：
     # 1. 「定时器泄漏」由框架自己兜底——每个 `testWidgets` 结束时
     #    `flutter_test/src/binding.dart:2543` 会断言 `!timersPending`，
     #    套件全绿即已覆盖泄漏；
     # 2. 框架**抓不到**「该停时没停」（空转）：`_PlayerPageState.dispose()`
     #    会 cancel `_osdTimer`，所以空转的 ticker 不会留下待处理定时器。
-    #    空转必须用 `debugOsdTickerRunning` 观测缝断言；
-    # 3. 因此本门禁查的是「套件里有 `debugOsdTickerRunning` 断言」；
+    #    空转必须用观测缝断言；
+    # 3. 观测缝是**两层**的：套件里调 `osdTickerRunning(tester)`
+    #    （`test/support/player_page_harness.dart` 的包装），包装里调
+    #    `debugOsdTickerRunning`（`lib/ui/player_page.dart` 的
+    #    `@visibleForTesting` 函数）。**两层都要查**——只查套件会漏掉
+    #    「包装被改成返回常量」，只查包装会漏掉「套件根本没调它」。
+    #    实测踩到：本门禁原先只查套件里的 `debugOsdTickerRunning`，
+    #    而套件用的是包装名，于是**正确实现反而门禁红**（R111）。
     # 4. **绝不能改查 `transientCallbackCount`**：加载态常挂
     #    `LoadingBlock` 的 `CircularProgressIndicator`，该计数恒 ≥1
     #    （实测推进到 25 秒仍为 1），断言永远为真——那是个装饰性门禁。
@@ -293,13 +299,27 @@ try {
             $output | ForEach-Object { Write-Host $_ }
             if ($LASTEXITCODE -ne 0) { return }
             $suite = Get-Content -Raw (Join-Path $AppDir 'test/phase8_player_page_overlay_test.dart')
-            if ($suite -notmatch 'debugOsdTickerRunning') {
-                throw 'phase8_player_page_overlay_test.dart 缺少 debugOsdTickerRunning 断言（G12）'
+            $harness = Get-Content -Raw (Join-Path $AppDir 'test/support/player_page_harness.dart')
+            if ($suite -notmatch 'osdTickerRunning') {
+                throw 'phase8_player_page_overlay_test.dart 没有断言屏显刷新循环（G12）'
             }
-            if ($suite -match 'transientCallbackCount') {
-                throw 'phase8_player_page_overlay_test.dart 用了 transientCallbackCount（恒 ≥1，断言永远为真）'
+            if ($harness -notmatch 'debugOsdTickerRunning') {
+                throw 'player_page_harness.dart 的 osdTickerRunning 没有走到 debugOsdTickerRunning 观测缝（G12）'
             }
-            Write-Fact 'timer-leak-gate suite-assertion=debugOsdTickerRunning'
+            # 查 `transientCallbackCount` 时必须**先剥掉注释行**：
+            # 套件里有一条注释专门解释「为什么不能用它」，那是文档不是用法。
+            # 只按裸串匹配会把正确实现判红（实测踩到）。
+            foreach ($pair in @(
+                @{ Name = 'phase8_player_page_overlay_test.dart'; Text = $suite },
+                @{ Name = 'player_page_harness.dart'; Text = $harness }
+            )) {
+                $code = ($pair.Text -split "`n" |
+                    Where-Object { $_.TrimStart() -notmatch '^(//|///|\*|/\*)' }) -join "`n"
+                if ($code -match 'transientCallbackCount') {
+                    throw "$($pair.Name) 用了 transientCallbackCount（恒 ≥1，断言永远为真）"
+                }
+            }
+            Write-Fact 'timer-leak-gate suite=osdTickerRunning seam=debugOsdTickerRunning'
             $global:LASTEXITCODE = 0
         } finally { Pop-Location }
     }
