@@ -102,9 +102,17 @@ const ratios = [
   Ratio('r235x1', Size(1880, 800)), // 2.35:1
 ];
 
+/// 截图上屏显时钟显示的时刻，固定值（见 `setUp` 的说明）。
+final DateTime _frozenClock = DateTime(2026, 10, 20, 3, 53, 48);
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+
+  // 冻结屏显时钟：截图要入库，实时时钟会让同一份代码每次跑出不同字节的
+  // PNG（实测差异只有右上角约 34×10 像素），证据就无法复核。
+  setUp(() => debugOsdClockOverride = _frozenClock);
+  tearDown(() => debugOsdClockOverride = null);
 
   for (final ratio in ratios) {
     testWidgets('控制栏可见 / 隐藏 / 菜单打开（${ratio.name}）', (tester) async {
@@ -256,6 +264,18 @@ void main() {
       );
       if (position.maxScrollExtent > 0) {
         position.jumpTo(position.maxScrollExtent);
+        // **必须等滚动条淡出**，否则截图不可复现。
+        //
+        // `jumpTo` 会让滚动条显示，并挂一个 `fadeDuration`（300ms）的
+        // **Timer** 才开始淡出。`pumpAndSettle` 只等「有没有排队的帧」，
+        // 而那个 Timer 还没到点，于是它立刻返回、截图就把**半透明滚动条**
+        // 拍进去了。实测：连续两次跑，差异正好落在菜单右缘一条 9px 宽的
+        // 竖条上（r16x10 的差异包围盒 `(949, 232, 958, 892)`，4664~5924 像素），
+        // 其余像素逐字节相同。
+        //
+        // 这里显式推进到淡出完成之后再拍。
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 800));
         await tester.pumpAndSettle();
         await capture(
           tester,

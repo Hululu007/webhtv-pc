@@ -332,7 +332,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   Offset? _contextMenuAnchor;
 
   /// 屏显的时钟基准；由 [_osdTimer] 每秒推进。
-  DateTime _osdNow = DateTime.now();
+  ///
+  /// 取值统一走 [debugOsdClockOverride]（默认 null，即真实时间），
+  /// 好让视觉证据采集能冻结时钟、让截图可复核。
+  DateTime _osdNow = debugOsdClockOverride ?? DateTime.now();
 
   /// 屏显刷新循环（时钟/进度/诊断）。
   ///
@@ -359,7 +362,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     _danmakuLoader = widget.danmakuLoader ?? DanmakuService();
     _controller = PlayerController()..addListener(_onControllerChanged);
     windowManager.addListener(this);
-    _osdNow = DateTime.now();
+    _osdNow = debugOsdClockOverride ?? DateTime.now();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _syncOsdTimer();
@@ -1897,7 +1900,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     if (_osdNeedsTicker) {
       _osdTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
         if (!mounted) return;
-        setState(() => _osdNow = DateTime.now());
+        setState(() => _osdNow = debugOsdClockOverride ?? DateTime.now());
       });
     } else {
       _osdTimer?.cancel();
@@ -2691,3 +2694,17 @@ class _PlayerErrorOverlay extends StatelessWidget {
 @visibleForTesting
 bool debugOsdTickerRunning(State<PlayerPage> state) =>
     (state as _PlayerPageState)._osdTimer?.isActive ?? false;
+
+/// 仅供测试：冻结屏显时钟（`design/05` §8.1）。
+///
+/// **为什么必须有**：屏显右上角是**实时时钟**，每秒重绘。视觉证据采集
+/// （`integration_test/phase8_visual_flow_test.dart`）会把截图提交入库，
+/// 而实时时钟让同一份代码每次跑出**不同字节**的 PNG——实测只有右上角
+/// 约 34×10 像素在变（`player-controls-r16x10.png` 的差异包围盒是
+/// `(1390, 21, 1424, 31)`），其余像素逐字节相同。
+/// 那会让「截图证据」无法复核：无法判断差异来自代码改动还是走时。
+///
+/// 置为非 null 后时钟固定在该时刻；置回 null 恢复真实时间。
+/// 生产代码不读这个变量（默认 null），对运行时行为零影响。
+@visibleForTesting
+DateTime? debugOsdClockOverride;
