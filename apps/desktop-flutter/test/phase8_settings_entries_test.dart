@@ -302,6 +302,50 @@ void main() {
     );
   });
 
+  // 关键用例：**每个开关写的是自己的 id**，不是同一个 id 写 7 遍。
+  //
+  // 为什么必须有这一条：上面那条用例只点 `mini`，所以「7 个开关全部
+  // `setOsdFlag(OsdFlag.mini, value)`」这种实现能让**全部 7 条用例通过**
+  // （实测确认：把写路径改成写死 `mini`，7 条全绿）。
+  // 实现本身是对的（`diagnostics_pages.dart:199` 用的是循环变量 `id`），
+  // 但**回归锁是空的**——将来有人把 `id` 写成常量，没人会发现。
+  //
+  // 做法：点**两个不同的**开关（`progress` 与 `diagnostics`），
+  // 断言各自落在自己的键上、且**其余键一个都没被碰**。
+  testWidgets('每个开关写自己的 flag id（不是同一个 id 写 7 遍）', (tester) async {
+    await pumpSettings(tester);
+    // 前置：两个目标默认一开一关，方向不同，便于区分。
+    expect(state.osdFlags[OsdFlag.progress], isTrue, reason: '前置：默认开');
+    expect(state.osdFlags[OsdFlag.diagnostics], isFalse, reason: '前置：默认关');
+
+    await tester.ensureVisible(osdTile(OsdFlag.progress));
+    await settle(tester);
+    await tester.tap(osdTile(OsdFlag.progress));
+    await settleIo(tester);
+
+    await tester.ensureVisible(osdTile(OsdFlag.diagnostics));
+    await settle(tester);
+    await tester.tap(osdTile(OsdFlag.diagnostics));
+    await settleIo(tester);
+
+    // 精确整表：两个目标各自翻转，其余 5 个**必须原封不动**。
+    expect(state.osdFlags, {
+      OsdFlag.title: true,
+      OsdFlag.size: true,
+      OsdFlag.time: true,
+      OsdFlag.progress: false, // 点过 → 关
+      OsdFlag.traffic: false,
+      OsdFlag.mini: false, // 从未点过 → 保持默认
+      OsdFlag.diagnostics: true, // 点过 → 开
+    });
+    // 反向断言：`mini` 不得被顺带改掉——那正是「写死 mini」的实现会做的事。
+    expect(
+      state.osdFlags[OsdFlag.mini],
+      isFalse,
+      reason: '点 progress/diagnostics 不得影响 mini（写死 id 的实现会在这里露馅）',
+    );
+  });
+
   testWidgets('播放器按钮入口可进入配置页（断言页内特征，不只断言路由类型）', (tester) async {
     await pumpSettings(tester);
 
@@ -378,6 +422,7 @@ void main() {
     //   - 1600×1600：`tmdb_shell_entry_flow_test.dart:54`（tap TMDB 入口）
     //   - 1200×1600：`phase6_history_page_test.dart:46`（tap「直接播放」）
     //   - 1200×1800：`phase6_ai_settings_page_test.dart:38`（断言 AI 入口）
+    //   - 1280×2000：`phase5_sync_refresh_test.dart:170`（读安卓摘要文本）
     // 用**真实**视口而不是一个宽松的近似值，否则这条断言没有区分力。
     const viewports = <String, Size>{
       'phase5_sync_ui 1400x2600': Size(1400, 2600),
@@ -386,6 +431,7 @@ void main() {
       'tmdb_shell_entry 1600x1600': Size(1600, 1600),
       'phase6_history_page 1200x1600': Size(1200, 1600),
       'phase6_ai_settings 1200x1800': Size(1200, 1800),
+      'phase5_sync_refresh 1280x2000': Size(1280, 2000),
     };
 
     // 每个视口下必须被构建、且完整落在可视区内的既有目标。
@@ -405,6 +451,7 @@ void main() {
       'tmdb_shell_entry 1600x1600': ['settings-tmdb-open'],
       'phase6_history_page 1200x1600': ['settings-history-click-action'],
       'phase6_ai_settings 1200x1800': ['settings-ai-open'],
+      'phase5_sync_refresh 1280x2000': ['settings-android-summary'],
     };
 
     for (final entry in viewports.entries) {
