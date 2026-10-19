@@ -18,7 +18,7 @@
 ///
 /// [PlayerContextMenu.anchor] 必须是**父 `Stack` 的坐标**（不是屏幕坐标）。
 /// 在 `Scaffold(appBar: null, body: Stack(...))` 里两者相同，因为 Windows 桌面
-/// 全屏播放器的 body 原点就是窗口原点。`viewBox` 同理（`MediaQuery.sizeOf`）。
+/// 全屏播放器的 body 原点就是窗口原点。`viewport` 同理（`MediaQuery.sizeOf`）。
 library;
 
 import 'dart:math' as math;
@@ -194,10 +194,16 @@ class _PlayerContextMenuState extends State<PlayerContextMenu> {
           // 层级靠更亮的表面 + 发丝边表达，不靠投影。
           elevation: 0,
           color: AppPalette.nightSurface3.withValues(alpha: 0.96),
-          // 发丝边画在 `shape` 上而不是另包一层 `DecoratedBox`：`Material`
-          // 用 `ShapeBorderClipper` 裁切内容，`shape` 的边由同一套实现画出，
-          // 因此 1px 全程落在裁切区域内（`BorderSide` 默认 strokeAlignInside），
-          // 不会被裁成半像素。`DESIGN.md` The Hairline Rule。
+          // 发丝边画在 `shape` 上而不是另包一层 `DecoratedBox`。
+          //
+          // 如实说明：**这不是在修一个视觉缺陷**。实测两种写法在相同整数偏移下
+          // 渲染结果逐像素相同（115200 个通道无一不同，边缘均为 `(35,43,69)`），
+          // 所以我先前的「会被裁成半像素」猜想是**错的**。
+          //
+          // 保留 `shape` 的真实理由是可断言性：圆角、边宽、边色变成
+          // `Material.shape` 上可直接读的属性，测试不必去翻内层 `DecoratedBox`。
+          // （`BorderSide` 默认 `strokeAlignInside = -1.0`，边落在内测。）
+          // `DESIGN.md` The Hairline Rule。
           shape: RoundedRectangleBorder(
             borderRadius: AppRadius.mdAll,
             side: BorderSide(
@@ -246,6 +252,17 @@ class _PlayerContextMenuState extends State<PlayerContextMenu> {
     final widgets = <Widget>[_row(item)];
     if (item.children.isNotEmpty && _expanded.contains(item.id)) {
       for (final child in item.children) {
+        // 只支持**一级**子菜单（`design/04` §4.1）。
+        //
+        // 为什么显式断言而不是递归渲染：递归会让菜单可以无限加深，
+        // 而本层的宽度是固定的 240——第二层再缩进就没有可读空间了。
+        // 更要紧的是：`_row` 会给任何 `children` 非空的项画一个展开箭头，
+        // 若允许第二层存在却不渲染它的孩子，用户会看到一个**点了没反应**的箭头。
+        // 与其做半套，不如在构造期就拒绝。
+        assert(
+          child.children.isEmpty,
+          '右键菜单只支持一级子菜单：项 "${child.id}" 自己还有 children（design/04 §4.1）',
+        );
         widgets.add(
           Padding(
             padding: const EdgeInsets.only(left: AppSpace.lg),
@@ -262,13 +279,21 @@ class _PlayerContextMenuState extends State<PlayerContextMenu> {
     final semantic = context.semanticColors;
     final hasChildren = item.children.isNotEmpty;
     final isOpen = _expanded.contains(item.id);
-    // 禁用态压到 0.5（`design/04` §5.6、`DESIGN.md` 的 chip 禁用语义）；
-    // 选中态用星等琥珀前景；其余用 onSurface。
-    final color = !item.enabled
-        ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
-        : item.selected
-        ? semantic.magnitude
-        : theme.colorScheme.onSurface;
+    // 选中态用星等琥珀前景，其余用 onSurface。
+    //
+    // **禁用不能抹掉选中态**（`DESIGN.md:373`：「禁用只降低强调，不能抹掉状态」；
+    // 该条来自一次真实用户反馈——把 `onTap == null` 一律当成静态标签，
+    // 导致整排控件「长得一模一样且点不动」）。
+    // 所以「选中 + 禁用」是**把琥珀压暗**而不是换成中性灰：
+    // 仍能看出「这一项是选中的，只是现在不可用」。
+    // 「未选中 + 禁用」没有状态要保留，沿用原来的 onSurfaceVariant @ 0.5。
+    final color = item.selected
+        ? (item.enabled
+              ? semantic.magnitude
+              : semantic.magnitude.withValues(alpha: 0.5))
+        : (item.enabled
+              ? theme.colorScheme.onSurface
+              : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5));
 
     return InkWell(
       key: ValueKey('player-menu-item-${item.id}'),

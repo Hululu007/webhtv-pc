@@ -528,4 +528,91 @@ void main() {
       expect(rect.bottom, lessThanOrEqualTo(200 - 8));
     });
   });
+
+  group('契约守卫（design/04 §4.1）', () {
+    // 关键用例：**二级子菜单必须在构造期被拒绝**。
+    //
+    // 为什么必须有这一条：`_row` 会给任何 `children` 非空的项画一个展开箭头，
+    // 但 `_itemWidgets` 只为**顶层**项渲染孩子。若允许第二层存在，
+    // 用户会看到一个**点了没反应**的箭头——静默失效，最难发现的一类缺陷。
+    // 变异测试实测确认：去掉那条 `assert`，本用例会失败。
+    testWidgets('二级子菜单在构造期断言失败（不做半套）', (tester) async {
+      await tester.pumpWidget(
+        wrap(
+          PlayerContextMenu(
+            anchor: const Offset(100, 100),
+            viewport: const Size(1440, 900),
+            sections: const [
+              PlayerMenuSection(
+                title: '显示',
+                items: [
+                  PlayerMenuItem(
+                    id: 'aspect',
+                    label: '画面比例',
+                    children: [
+                      PlayerMenuItem(
+                        id: 'aspect-16-9',
+                        label: '16:9',
+                        // 第二层自己还有孩子 → 不被支持。
+                        children: [PlayerMenuItem(id: 'deep', label: '更深一层')],
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ],
+            onDismiss: () {},
+          ),
+        ),
+      );
+      // 展开第一层，触发对第二层的检查。
+      await tester.tap(find.text('画面比例'));
+      await tester.pump();
+      expect(
+        tester.takeException(),
+        isA<AssertionError>(),
+        reason: '二级子菜单必须被显式拒绝，而不是画一个点不动的箭头',
+      );
+    });
+
+    // 关键用例：**禁用不能抹掉选中态**（`DESIGN.md:373`）。
+    //
+    // 为什么必须有这一条：`DESIGN.md:373` 明确写着「禁用只降低强调，
+    // **不能抹掉状态**」，并记录了一次真实用户反馈（把 `onTap == null`
+    // 一律当静态标签，导致整排控件「长得一模一样且点不动」）。
+    // 原实现把「选中 + 禁用」压成中性灰，琥珀完全消失。
+    // 变异测试实测确认：改回中性灰，本用例会失败。
+    testWidgets('选中且禁用时仍保留琥珀（只是压暗）', (tester) async {
+      await tester.pumpWidget(
+        wrap(
+          PlayerContextMenu(
+            anchor: const Offset(100, 100),
+            viewport: const Size(1440, 900),
+            sections: const [
+              PlayerMenuSection(
+                title: '倍速',
+                items: [
+                  PlayerMenuItem(
+                    id: 'rate-1',
+                    label: '1.0×',
+                    selected: true,
+                    enabled: false,
+                  ),
+                ],
+              ),
+            ],
+            onDismiss: () {},
+          ),
+        ),
+      );
+      final color = tester.widget<Text>(find.text('1.0×')).style?.color;
+      expect(
+        color,
+        AppPalette.magnitude.withValues(alpha: 0.5),
+        reason: '禁用时压暗琥珀，而不是换成中性灰（DESIGN.md:373）',
+      );
+      // 反向：不得等于中性灰——那正是被修掉的行为。
+      expect(color, isNot(darkScheme.onSurfaceVariant.withValues(alpha: 0.5)));
+    });
+  });
 }
