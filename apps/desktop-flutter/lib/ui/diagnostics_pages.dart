@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/history_view.dart';
+import '../core/osd_config.dart';
 import '../core/playback_diagnostics.dart';
 import '../services/log_service.dart';
 import '../services/storage.dart';
@@ -14,6 +15,7 @@ import 'ai_settings_page.dart';
 import 'app.dart';
 import 'common.dart';
 import 'config_pages.dart';
+import 'player_button_config_page.dart';
 import 'source_field.dart';
 import 'tokens.dart';
 
@@ -159,6 +161,59 @@ class SettingsPage extends StatelessWidget {
         const SizedBox(height: 8),
         Text(
           '下一次搜索立即生效；已经在跑的搜索不受影响。',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const Divider(height: 32),
+        // 播放器区块（`docs/phase8/design/02` §5、`design/03` §6.1）。
+        //
+        // 为什么放在设置页：屏显开关与按钮排版是**一次定好、长期生效**的偏好，
+        // 与主题、历史点击行为同类。同时它们也是**非右键的等价路径**
+        // （`docs/phase8/design/00` §5 第 10 条：右键菜单不得成为唯一入口）。
+        //
+        // 位置：插在搜索区块之后，**不移动**既有区块的相对顺序
+        // （`test/phase5_sync_ui_test.dart` 可能按顺序断言）。
+        Text('播放器', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          '屏显（OSD）：播放画面上叠加的信息角标。',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 8),
+        Column(
+          key: const ValueKey('settings-osd'),
+          children: [
+            for (final id in OsdFlag.values)
+              SwitchListTile(
+                key: ValueKey('settings-osd-$id'),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(_osdLabel(id)),
+                subtitle: id == OsdFlag.traffic
+                    ? const Text('本版本未采集网速')
+                    : null,
+                // 网速未实现 → 置灰。**不得**让开关可点却无效果：
+                // 那比没有开关更糟（`DESIGN.md` 关于筛选按钮的同类教训）。
+                value: state.osdFlags[id] ?? false,
+                onChanged: id == OsdFlag.traffic
+                    ? null
+                    : (value) => state.setOsdFlag(id, value),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        FilledButton.tonalIcon(
+          key: const ValueKey('settings-player-buttons'),
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => PlayerButtonConfigPage(state: state),
+            ),
+          ),
+          icon: const Icon(Icons.tune),
+          label: const Text('播放器按钮排版'),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '调整底部控制栏的按钮顺序与显示状态。',
           style: Theme.of(context).textTheme.bodySmall,
         ),
         const Divider(height: 32),
@@ -338,6 +393,31 @@ class SettingsPage extends StatelessWidget {
       buffer.write('，同步服务已开启');
     }
     return buffer.toString();
+  }
+}
+
+/// 屏显开关的中文名（`docs/phase8/design/02` §5.1）。
+///
+/// 与 [OsdFlag] 的 id 一一对应；未知 id 回落成 id 本身（不抛异常，
+/// 与 `normalizeOsdFlags` 的「只接受合法值」同一口径）。
+String _osdLabel(String id) {
+  switch (id) {
+    case OsdFlag.title:
+      return '标题';
+    case OsdFlag.size:
+      return '分辨率';
+    case OsdFlag.time:
+      return '时钟';
+    case OsdFlag.progress:
+      return '播放进度';
+    case OsdFlag.traffic:
+      return '网速';
+    case OsdFlag.mini:
+      return '迷你进度条';
+    case OsdFlag.diagnostics:
+      return '诊断面板';
+    default:
+      return id;
   }
 }
 
