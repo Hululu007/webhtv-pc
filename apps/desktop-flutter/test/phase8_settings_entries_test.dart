@@ -478,15 +478,33 @@ void main() {
         );
       }
 
-      // 新增的两个入口在同一视口下也必须可达（否则新功能自己就不可达）。
-      for (final key in const [
-        'settings-osd',
-        'settings-player-buttons',
-      ]) {
+    }
+
+    // 新增的两个入口也必须**可达**（否则新功能自己就不可达）。
+    //
+    // 判据是「**滚动后**可见」，不是「无需滚动就可见」：设置页是长表单
+    // （本页内容总高约 2540px），要求每个条目在任意视口下都免滚动可见
+    // 是不成立的要求——`1400×2400` 下最后两个条目必然在视口外。
+    // `design/00` §5 第 10 条要的是**存在非右键的等价路径**，
+    // 滚动即可满足；`design/03` §6.1 也只要求「设置页有入口」。
+    //
+    // **必须单独一轮**：`Scrollable` 会把偏移量存进 `PageStorage` 并在
+    // 重建同类型子树时恢复，所以上面那轮一旦滚动过，下一轮的
+    // `settings-theme-mode`（在顶部）就不再被构建——实测会红在
+    // `ui_redesign_visual 1440x2400：settings-theme-mode 必须被构建`。
+    for (final entry in viewports.entries) {
+      await pumpSettings(tester, size: entry.value);
+      for (final key in const ['settings-osd', 'settings-player-buttons']) {
+        final finder = find.byKey(ValueKey(key));
+        await tester.scrollUntilVisible(
+          finder,
+          200,
+          scrollable: find.byType(Scrollable).first,
+        );
         expect(
-          find.byKey(ValueKey(key)),
+          finder,
           findsOneWidget,
-          reason: '${entry.key}：新增入口 $key 必须被构建',
+          reason: '${entry.key}：新增入口 $key 滚动后仍不可达',
         );
       }
     }

@@ -164,60 +164,6 @@ class SettingsPage extends StatelessWidget {
           style: Theme.of(context).textTheme.bodySmall,
         ),
         const Divider(height: 32),
-        // 播放器区块（`docs/phase8/design/02` §5、`design/03` §6.1）。
-        //
-        // 为什么放在设置页：屏显开关与按钮排版是**一次定好、长期生效**的偏好，
-        // 与主题、历史点击行为同类。同时它们也是**非右键的等价路径**
-        // （`docs/phase8/design/00` §5 第 10 条：右键菜单不得成为唯一入口）。
-        //
-        // 位置：插在搜索区块之后，**不移动**既有区块的相对顺序
-        // （`test/phase5_sync_ui_test.dart` 逐项 `tap` 既有入口，顺序变化会让
-        // 滚动位置与点击目标错位；该文件本身不按顺序断言）。
-        Text('播放器', style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 8),
-        Text(
-          '屏显（OSD）：播放画面上叠加的信息角标。',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-        const SizedBox(height: 8),
-        Column(
-          key: const ValueKey('settings-osd'),
-          children: [
-            for (final id in OsdFlag.values)
-              SwitchListTile(
-                key: ValueKey('settings-osd-$id'),
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                title: Text(_osdLabel(id)),
-                subtitle: id == OsdFlag.traffic
-                    ? const Text('本版本未采集网速')
-                    : null,
-                // 网速未实现 → 置灰。**不得**让开关可点却无效果：
-                // 那比没有开关更糟（`DESIGN.md` 关于筛选按钮的同类教训）。
-                value: state.osdFlags[id] ?? false,
-                onChanged: id == OsdFlag.traffic
-                    ? null
-                    : (value) => state.setOsdFlag(id, value),
-              ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        FilledButton.tonalIcon(
-          key: const ValueKey('settings-player-buttons'),
-          onPressed: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => PlayerButtonConfigPage(state: state),
-            ),
-          ),
-          icon: const Icon(Icons.tune),
-          label: const Text('播放器按钮排版'),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          '调整底部控制栏的按钮顺序与显示状态。',
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-        const Divider(height: 32),
         // TMDB 区块（`04` §10.3）：设置页必须有独立入口。
         // 只靠详情页状态条会形成死锁——未配置时详情页也可能没有区块，
         // 用户就永远进不来（发布包实测缺陷）。
@@ -351,6 +297,65 @@ class SettingsPage extends StatelessWidget {
           ),
           icon: const Icon(Icons.monitor_heart_outlined),
           label: const Text('打开站点健康'),
+        ),
+        const Divider(height: 32),
+        // 播放器区块（`docs/phase8/design/02` §5、`design/03` §6.1）。
+        //
+        // 为什么放在设置页：屏显开关与按钮排版是**一次定好、长期生效**的偏好，
+        // 与主题、历史点击行为同类。同时它们也是**非右键的等价路径**
+        // （`docs/phase8/design/00` §5 第 10 条：右键菜单不得成为唯一入口）。
+        //
+        // **位置必须在最末尾**（Task 11 回归时修正，实测）：
+        // 本页是**惰性 `ListView`**，只有进入视口（含 cacheExtent）的条目才会
+        // 被构建。新增区块插在中间会把后面所有既有入口整体下推，而
+        // `integration_test/ui_redesign_visual_flow_test.dart:991` 用
+        // `1440×2400` 视口断言 `settings-site-health-open` 必须被构建——
+        // 实测：插在搜索区块之后 → 内容总高 2000 → 2540，站点健康入口落到
+        // 视口外，`find` 直接找不到，既有集成测试红。
+        // 放到最末尾后，被下推的只有**本区块自己**，既有入口位置不变。
+        Text('播放器', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          '屏显（OSD）：播放画面上叠加的信息角标。',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 8),
+        Column(
+          key: const ValueKey('settings-osd'),
+          children: [
+            for (final id in OsdFlag.values)
+              SwitchListTile(
+                key: ValueKey('settings-osd-$id'),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(_osdLabel(id)),
+                subtitle: id == OsdFlag.traffic
+                    ? const Text('本版本未采集网速')
+                    : null,
+                // 网速未实现 → 置灰。**不得**让开关可点却无效果：
+                // 那比没有开关更糟（`DESIGN.md` 关于筛选按钮的同类教训）。
+                value: state.osdFlags[id] ?? false,
+                onChanged: id == OsdFlag.traffic
+                    ? null
+                    : (value) => state.setOsdFlag(id, value),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        FilledButton.tonalIcon(
+          key: const ValueKey('settings-player-buttons'),
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => PlayerButtonConfigPage(state: state),
+            ),
+          ),
+          icon: const Icon(Icons.tune),
+          label: const Text('播放器按钮排版'),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '调整底部控制栏的按钮顺序与显示状态。',
+          style: Theme.of(context).textTheme.bodySmall,
         ),
       ],
     );
