@@ -334,6 +334,7 @@ class AppError implements Exception {
     this.cause,
     this.stackTrace,
     this.statusCode,
+    this.diagnostic,
   });
 
   final AppErrorKind kind;
@@ -351,6 +352,12 @@ class AppError implements Exception {
   final StackTrace? stackTrace;
   final int? statusCode;
 
+  /// 只进日志的请求上下文（动作、脱敏 URL、query 参数名）。
+  ///
+  /// **为什么不放 [detail]**：`detail` 会进 [userMessage] 显示在横幅里，
+  /// 请求上下文只对排障有用，对用户是噪声。
+  final String? diagnostic;
+
   bool get isCancellation => kind == AppErrorKind.siteCancelled;
 
   /// 单行日志文本，不含原始异常堆栈。
@@ -360,6 +367,44 @@ class AppError implements Exception {
     if (statusCode != null) buffer.write(' | status=$statusCode');
     return buffer.toString();
   }
+
+  /// 多行诊断块：单行摘要 + 请求上下文 + 堆栈（有则带）。
+  ///
+  /// **为什么需要**：用户反馈「详情加载失败」只有一句站源文案，看不到是哪次
+  /// 请求、也没有堆栈（2026-10-20）。[logLine] 保持单行不变，避免高频日志膨胀；
+  /// 失败路径改用本 getter 记录可复现的证据。
+  String get logBlock {
+    final buffer = StringBuffer(logLine);
+    if (diagnostic != null && diagnostic!.isNotEmpty) {
+      buffer.write(' | $diagnostic');
+    }
+    final stack = stackTrace;
+    if (stack != null) {
+      const maxFrames = 12;
+      final frames = stack
+          .toString()
+          .trimRight()
+          .split('\n')
+          .where((line) => line.trim().isNotEmpty)
+          .take(maxFrames)
+          .join('\n');
+      if (frames.isNotEmpty) buffer.write('\n$frames');
+    }
+    return buffer.toString();
+  }
+
+  /// 补上排障信息（请求上下文 / 堆栈）。已有的不覆盖，返回新实例。
+  AppError withDiagnostics({String? diagnostic, StackTrace? stackTrace}) =>
+      AppError(
+        kind,
+        message,
+        detail: detail,
+        retryable: retryable,
+        cause: cause,
+        stackTrace: this.stackTrace ?? stackTrace,
+        statusCode: statusCode,
+        diagnostic: this.diagnostic ?? diagnostic,
+      );
 
   String get userMessage {
     final buffer = StringBuffer(describeErrorKind(kind));

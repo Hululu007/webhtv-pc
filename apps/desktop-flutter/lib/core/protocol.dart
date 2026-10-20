@@ -813,6 +813,16 @@ class VodFilterGroup {
   }
 }
 
+/// 网盘聚合类站源（`spring.jar` / 插件第 1646 行）的目录条目 id 前缀。
+///
+/// 插件把分享资源挂在这个前缀下，并在收到 `t=atvp_detail:…` 时剥前缀展开；
+/// 拿这条 id 去 `ids=` 详情接口会被判为业务错误（真机实测 2026-10-20）。
+const String bridgeFolderVodIdPrefix = 'atvp_detail:';
+
+/// `vod_id` 是否为网盘聚合的目录条目（历史记录没有 `vod_tag`，只能认前缀）。
+bool isBridgeFolderVodId(String vodId) =>
+    vodId.startsWith(bridgeFolderVodIdPrefix);
+
 /// 影视条目。
 class Vod {
   Vod({
@@ -847,7 +857,8 @@ class Vod {
   /// 剧集地址，`$$$` 分隔线路，`#` 分隔剧集，`剧集名$地址` 组成一部剧集。
   final String? vodPlayUrl;
 
-  /// 条目类型（TVBox 约定）：`folder` = 目录（需用 `t=<vod_id>` 展开）、
+  /// 条目类型（TVBox 约定，见 [Vod.isFolder]）：`folder` = 目录（需用
+  /// `t=<vod_id>` 展开）、
   /// `file` = 终态条目（可直接播）。
   ///
   /// **为什么必须单独建模**：网盘聚合类站源（实测 170 站点里 93 个共用
@@ -857,7 +868,14 @@ class Vod {
   final String? vodTag;
 
   /// 是否为目录条目（需展开而不是直接取详情）。
-  bool get isFolder => vodTag == 'folder';
+  ///
+  /// 除显式 `vod_tag: folder` 外，还认网盘聚合插件的 id 前缀
+  /// （[bridgeFolderVodIdPrefix]）：历史记录只保存 `vod_id`，重建 [Vod] 时
+  /// `vod_tag` 已经丢失。不认前缀的话，从历史点进 `atvp_detail:` 条目会拿
+  /// folder 壳去 `ids=` 详情接口，被站源判为业务错误（2026-10-20 用户反馈：
+  /// 「点击历史记录无法进入详情」）。
+  bool get isFolder =>
+      vodTag == 'folder' || (vodTag == null && isBridgeFolderVodId(vodId));
 
   final Map<String, Object?> extra;
 

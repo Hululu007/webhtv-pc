@@ -2371,7 +2371,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       _detailError = failure;
       _detailPhase = LoadPhase.failed;
       log.error(
-        '详情加载失败 site=${site.key} vod=${vod.vodId} ${failure.logLine}',
+        // 失败路径用多行诊断（动作 + 脱敏请求 + 堆栈）：只给分类文案时，
+        // 用户和开发者都无法判断是哪一次请求、为什么失败（2026-10-20 反馈）。
+        '详情加载失败 site=${site.key} vod=${vod.vodId} '
+        'folder=${vod.isFolder} ${failure.logBlock}',
         scope: 'site',
       );
     }

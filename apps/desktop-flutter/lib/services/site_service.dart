@@ -96,10 +96,15 @@ class SiteService {
       final value = await body();
       _record(siteKey, action, true, stopwatch.elapsed, null);
       return SiteCallResult(value: value, latency: stopwatch.elapsed);
-    } catch (error) {
+    } catch (error, stackTrace) {
       final failure = error is AppError
-          ? error
-          : AppError(AppErrorKind.unknown, '$error', cause: error);
+          ? error.withDiagnostics(stackTrace: stackTrace)
+          : AppError(
+              AppErrorKind.unknown,
+              '$error',
+              cause: error,
+              stackTrace: stackTrace,
+            );
       _record(siteKey, action, false, stopwatch.elapsed, failure.logLine);
       throw failure;
     }

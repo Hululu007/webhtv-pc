@@ -730,6 +730,8 @@ class HttpApiClient {
   void close() => _client.close();
 
   Future<SiteResult> execute(HttpApiCall call, {required String siteKey}) async {
+    // 只进日志的请求上下文：动作 + 脱敏 URL + 参数名（不含取值，§9.3.1）。
+    final diagnostic = 'action=${call.action ?? "unknown"} ${call.summary}';
     final http.Response response;
     try {
       http.Response received;
@@ -741,21 +743,25 @@ class HttpApiClient {
         received = await _client.get(call.uri, headers: call.headers).timeout(timeout);
       }
       response = received;
-    } on TimeoutException catch (error) {
+    } on TimeoutException catch (error, stackTrace) {
       throw AppError(
         AppErrorKind.siteTimeout,
         '站点请求超时（${timeout.inSeconds}s）',
         detail: '$siteKey ${call.action}',
         retryable: true,
         cause: error,
+        stackTrace: stackTrace,
+        diagnostic: diagnostic,
       );
-    } catch (error) {
+    } catch (error, stackTrace) {
       throw AppError(
         AppErrorKind.siteNetwork,
         '站点请求失败：${error.runtimeType}',
         detail: '$siteKey ${redactUrl(call.uri.toString())}',
         retryable: true,
         cause: error,
+        stackTrace: stackTrace,
+        diagnostic: diagnostic,
       );
     }
 
@@ -766,6 +772,7 @@ class HttpApiClient {
         detail: '$siteKey ${call.action}',
         statusCode: response.statusCode,
         retryable: response.statusCode >= 500,
+        diagnostic: diagnostic,
       );
     }
 
@@ -774,11 +781,21 @@ class HttpApiClient {
         AppErrorKind.siteParse,
         '站点响应超过大小上限',
         detail: '$siteKey ${response.bodyBytes.length} bytes',
+        diagnostic: diagnostic,
       );
     }
 
     final body = _decodeResponseText(response);
-    return HttpApiResponseParser.parse(body, siteKey: siteKey);
+    try {
+      return HttpApiResponseParser.parse(body, siteKey: siteKey);
+    } on AppError catch (error, stackTrace) {
+      // 解析层只认 siteKey；不补上下文的话，「站源请求失败」无法区分是
+      // 详情、分类还是播放哪一次请求（用户反馈 2026-10-20）。
+      throw error.withDiagnostics(
+        diagnostic: diagnostic,
+        stackTrace: stackTrace,
+      );
+    }
   }
 
   /// 站点响应可能返回 GBK/GB2312（老式 CMS），因此不能直接信任 `http` 包的

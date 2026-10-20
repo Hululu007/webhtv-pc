@@ -97,11 +97,9 @@ class _HistoryPageState extends State<HistoryPage> {
       }
       if (site == null) continue;
       try {
-        final parent = Vod(
-          vodId: item.vodId,
-          vodName: item.vodName,
-          vodTag: item.vodId.startsWith('atvp_detail:') ? 'folder' : null,
-        );
+        // `vod_tag` 不在历史里；`Vod.isFolder` 会按 id 前缀补出 folder 语义，
+        // 这里不再重复一遍前缀判断（详情页走的是同一个判定）。
+        final parent = Vod(vodId: item.vodId, vodName: item.vodName);
         final result = parent.isFolder
             ? await service.folderDetail(site, parent)
             : await service.detail(site, item.vodId);
