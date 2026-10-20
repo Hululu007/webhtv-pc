@@ -87,6 +87,7 @@ class StartupInfo {
     required this.logDir,
     required this.databasePath,
     this.databaseError,
+    this.storageWarnings = const [],
     this.startupLatency = Duration.zero,
   });
 
@@ -101,6 +102,13 @@ class StartupInfo {
   final String logDir;
   final String databasePath;
   final String? databaseError;
+
+  /// 启动时实测不可写的目录，形如 `目录: 错误`。空表示全部可写。
+  ///
+  /// 与 [databaseError] 分开：数据库只读往往只是**同一个原因的一个结果**，
+  /// 把目录级探测结果单独带出来，用户与排障者才能一眼看出「整个目录写不了」，
+  /// 而不是去反复删库重建。
+  final List<String> storageWarnings;
   final Duration startupLatency;
 
   String get oneLine =>
@@ -114,6 +122,8 @@ class StartupInfo {
     'cache=$cacheDir',
     'logs=$logDir',
     'db=$databasePath${databaseError == null ? "" : " (降级: $databaseError)"}',
+    if (storageWarnings.isNotEmpty)
+      'writable=NO: ${storageWarnings.join("; ")}',
   ].join('\n');
 }
 
@@ -303,6 +313,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   late final SyncState syncState;
 
   StartupInfo? _startupInfo;
+  List<String> _storageWarnings = const [];
   LoadPhase _configPhase = LoadPhase.idle;
   LoadPhase _contentPhase = LoadPhase.idle;
   LoadPhase _detailPhase = LoadPhase.idle;
@@ -474,6 +485,12 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   int get tmdbConfigId => _activeRecord?.id ?? 0;
 
   StartupInfo? get startupInfo => _startupInfo;
+
+  /// 启动时实测不可写的目录（`目录: 错误`）。空表示全部可写。
+  ///
+  /// UI 用它决定是否显示「数据目录不可写」横幅——这类故障以前是静默的：
+  /// 用户只看到历史没了，日志里那条错误还写不进日志文件。
+  List<String> get storageWarnings => _storageWarnings;
   LoadPhase get configPhase => _configPhase;
   LoadPhase get contentPhase => _contentPhase;
   LoadPhase get detailPhase => _detailPhase;
@@ -724,8 +741,27 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       log.warning('部分目录创建失败：${directoryFailures.join("; ")}');
     }
 
+    // 目录「存在」不代表「可写」：Windows 强制完整性控制下，低完整性进程
+    // 对中等完整性目录只读，而 DACL 看起来完全正常。先实测一次，否则后面
+    // 只能看到一个 SQLITE_READONLY，看不出根因（2026-10-20 现场故障）。
+    final writeFailures = <String>[];
+    for (final dir in [paths.configDir, paths.dataDir, paths.logDir]) {
+      final error = await paths.probeWritable(dir);
+      if (error != null) writeFailures.add('$dir: $error');
+    }
+    _storageWarnings = writeFailures;
+    if (writeFailures.isNotEmpty) {
+      // 日志文件本身很可能就在这批不可写的目录里，必须同时打 stderr：
+      // 否则这条唯一的线索只留在内存缓冲里，随进程退出一起消失。
+      stderr.writeln('[storage] 数据目录不可写：${writeFailures.join("; ")}');
+    }
+
     LogService.logDirectoryOverride = paths.logDir;
     await log.open(paths.logDir);
+    for (final failure in writeFailures) {
+      log.error('数据目录不可写，本次运行不会保存历史/设置：$failure',
+          scope: 'storage');
+    }
 
     // 安卓接入与同步设置（Phase 5）：读取失败不阻塞启动，退回默认（全关）。
     await syncState.load();
@@ -798,6 +834,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       logDir: paths.logDir,
       databasePath: paths.databasePath,
       databaseError: openResult.error,
+      storageWarnings: _storageWarnings,
       startupLatency: stopwatch.elapsed,
     );
     log.info(_startupInfo!.oneLine, scope: 'startup');

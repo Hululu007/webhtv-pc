@@ -496,6 +496,8 @@ class _AppShellState extends State<AppShell> {
             onOpenConfig: _openConfigPage,
             onOpenSitePicker: _openSitePicker,
           ),
+          if (_state.storageWarnings.isNotEmpty)
+            _StorageWarningBanner(warnings: _state.storageWarnings),
           Expanded(
             child: Row(
               children: [
@@ -541,6 +543,46 @@ class _AppShellState extends State<AppShell> {
       case ShellSection.logs:
         return LogsPage(state: _state);
     }
+  }
+}
+
+/// 数据目录不可写横幅。
+///
+/// 为什么必须上屏：这类故障以前是**静默降级**——用户只会发现「历史记录没了」，
+/// 而唯一的线索（`PathAccessException` / `SQLITE_READONLY`）恰好写不进日志文件；
+/// 能看见的那条 SQLite 报错又会把人引向「删库重建」，而真正的原因是**整个数据
+/// 目录不可写**（Windows 低完整性进程对中等完整性目录只读）。
+class _StorageWarningBanner extends StatelessWidget {
+  const _StorageWarningBanner({required this.warnings});
+
+  final List<String> warnings;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textStyle = TextStyle(color: scheme.onErrorContainer, fontSize: 12);
+    return Container(
+      width: double.infinity,
+      color: scheme.errorContainer,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpace.xl,
+        vertical: AppSpace.sm,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.folder_off_outlined, size: 18, color: scheme.onErrorContainer),
+          const SizedBox(width: AppSpace.sm),
+          Expanded(
+            child: SelectableText(
+              '数据目录不可写，本次运行不会保存历史与设置：${warnings.join("；")}',
+              style: textStyle,
+              maxLines: 3,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

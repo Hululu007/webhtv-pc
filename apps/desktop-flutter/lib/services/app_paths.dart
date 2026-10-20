@@ -107,6 +107,27 @@ class AppPaths {
     }
     return failures;
   }
+
+  /// 实测 [dir] 是否**真的**可写：建一个探针文件再删掉。
+  ///
+  /// 为什么要写一次而不是只看 DACL：Windows 的强制完整性控制（MIC）会让
+  /// **低完整性进程**对中等完整性对象只读，而此时 DACL 完全正常
+  /// （`Maple:(I)(F)`），写入仍返回 EACCES。结论是「权限看起来没问题，
+  /// 数据库却报 readonly」——只有真的写一次才发现得了（2026-10-20 实测：
+  /// exe 因所在目录带 Low 标签而以 Low IL 启动）。
+  ///
+  /// 返回 `null` 表示可写；否则返回错误描述。
+  Future<String?> probeWritable(String dir) async {
+    final probe = File(p.join(dir, '.write-probe.tmp'));
+    try {
+      await Directory(dir).create(recursive: true);
+      await probe.writeAsString('ok', flush: true);
+      await probe.delete();
+      return null;
+    } catch (error) {
+      return '$error';
+    }
+  }
 }
 
 extension _IfEmpty on String {
