@@ -29,6 +29,7 @@ import 'search_page.dart';
 import 'tmdb_detail_page.dart';
 import 'tmdb_detail_view.dart';
 import 'common.dart';
+import 'scroll_behavior.dart';
 import 'tmdb_widgets.dart';
 import 'tokens.dart';
 
@@ -134,32 +135,35 @@ class _BrowseTabBarState extends State<_BrowseTabBar> {
           Expanded(
             // 桌面端的竖滚轮在 Flutter 里不驱动横向滚动，需要显式转一次，
             // 否则分类多到溢出时滚轮推不动这条（§17.4 鼠标可用）。
-            child: _WheelScroll(
-              controller: _controller,
-              child: SingleChildScrollView(
+            // 鼠标左右拖由 `HorizontalMouseDrag` 打开（同样 §17.4）。
+            child: HorizontalMouseDrag(
+              child: _WheelScroll(
                 controller: _controller,
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    // 首页**没有推荐内容**时不显示「默认推荐」标签：那个标签点进去
-                    // 只有空态（实测 126 站点里 40 个如此），留在条上只会误导用户。
-                    if (hasHomeList)
-                      _BrowseTab(
-                        key: const ValueKey('browse-tab-default'),
-                        label: '默认推荐',
-                        selected: selected == null,
-                        onTap: loading ? null : state.selectDefaultListing,
-                      ),
-                    for (final item in classes)
-                      _BrowseTab(
-                        key: ValueKey('browse-tab-${item.typeId}'),
-                        label: item.typeName,
-                        selected: selected == item.typeId,
-                        onTap: loading
-                            ? null
-                            : () => state.loadCategory(item.typeId),
-                      ),
-                  ],
+                child: SingleChildScrollView(
+                  controller: _controller,
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      // 首页**没有推荐内容**时不显示「默认推荐」标签：那个标签点进去
+                      // 只有空态（实测 126 站点里 40 个如此），留在条上只会误导用户。
+                      if (hasHomeList)
+                        _BrowseTab(
+                          key: const ValueKey('browse-tab-default'),
+                          label: '默认推荐',
+                          selected: selected == null,
+                          onTap: loading ? null : state.selectDefaultListing,
+                        ),
+                      for (final item in classes)
+                        _BrowseTab(
+                          key: ValueKey('browse-tab-${item.typeId}'),
+                          label: item.typeName,
+                          selected: selected == item.typeId,
+                          onTap: loading
+                              ? null
+                              : () => state.loadCategory(item.typeId),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),

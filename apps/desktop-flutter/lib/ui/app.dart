@@ -25,6 +25,7 @@ import 'diagnostics_pages.dart';
 import 'library_pages.dart';
 import 'live_page.dart';
 import 'player_page.dart';
+import 'scroll_behavior.dart';
 import 'search_page.dart';
 import 'spider_page.dart';
 import 'theme.dart';
@@ -1010,23 +1011,25 @@ class _SitePickerDialogState extends State<SitePickerDialog> {
               // 分组 chip 行：横向可滚，命中关键字时只列出现存的分组。
               SizedBox(
                 height: 34,
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: [
-                      _GroupChip(
-                        label: '全部',
-                        selected: _group.isEmpty,
-                        onTap: () => setState(() => _group = ''),
-                      ),
-                      for (final group in groups)
+                child: HorizontalMouseDrag(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
                         _GroupChip(
-                          key: ValueKey('site-group-$group'),
-                          label: group,
-                          selected: _group == group,
-                          onTap: () => setState(() => _group = group),
+                          label: '全部',
+                          selected: _group.isEmpty,
+                          onTap: () => setState(() => _group = ''),
                         ),
-                    ],
+                        for (final group in groups)
+                          _GroupChip(
+                            key: ValueKey('site-group-$group'),
+                            label: group,
+                            selected: _group == group,
+                            onTap: () => setState(() => _group = group),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               ),

@@ -38,6 +38,7 @@ import '../core/tmdb_media.dart';
 import '../services/tmdb_service.dart';
 import 'app.dart' show PosterImage;
 import 'common.dart';
+import 'scroll_behavior.dart';
 import 'tokens.dart';
 import 'tmdb_widgets.dart'
     show TmdbLoadPhase, TmdbVideoTile, SeasonChipStrip;
@@ -613,51 +614,54 @@ class TmdbLineSelector extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  for (final line in lines) ...[
-                    Tooltip(
-                      // `message` 是字符串，**不**产生 `Text` widget，
-                      // 因此不会干扰按文本断言的既有门禁。
-                      message: line.flag == recentFlag
-                          ? '最近播放'
-                          : line.displayName,
-                      child: ChoiceChip(
-                        key: ValueKey('tmdb-line-${line.flag}'),
-                        label: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // 「最近播放」标记（`design/02` §5）：在标签**前**加
-                            // 14px 图标。标记**不抢**选中态——用户手动切走后
-                            // 标记仍在，能切回来。key 挂在 `Icon` 上（不是
-                            // `ChoiceChip` 上），既有的 `tmdb-line-*` 门禁
-                            // 按「chip 本身是 ChoiceChip」计数，不受影响。
-                            if (line.flag == recentFlag) ...[
-                              Icon(
-                                Icons.history,
-                                key: ValueKey('tmdb-line-recent-${line.flag}'),
-                                size: 14,
+            // 线路多到溢出时用鼠标左右拖（`scroll_behavior.dart`）。
+            child: HorizontalMouseDrag(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final line in lines) ...[
+                      Tooltip(
+                        // `message` 是字符串，**不**产生 `Text` widget，
+                        // 因此不会干扰按文本断言的既有门禁。
+                        message: line.flag == recentFlag
+                            ? '最近播放'
+                            : line.displayName,
+                        child: ChoiceChip(
+                          key: ValueKey('tmdb-line-${line.flag}'),
+                          label: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // 「最近播放」标记（`design/02` §5）：在标签**前**加
+                              // 14px 图标。标记**不抢**选中态——用户手动切走后
+                              // 标记仍在，能切回来。key 挂在 `Icon` 上（不是
+                              // `ChoiceChip` 上），既有的 `tmdb-line-*` 门禁
+                              // 按「chip 本身是 ChoiceChip」计数，不受影响。
+                              if (line.flag == recentFlag) ...[
+                                Icon(
+                                  Icons.history,
+                                  key: ValueKey('tmdb-line-recent-${line.flag}'),
+                                  size: 14,
+                                ),
+                                const SizedBox(width: AppSpace.xs),
+                              ],
+                              Text(
+                                episodeCounts.containsKey(line.flag)
+                                    ? '${line.displayName}（${episodeCounts[line.flag]} 集）'
+                                    : line.displayName,
                               ),
-                              const SizedBox(width: AppSpace.xs),
                             ],
-                            Text(
-                              episodeCounts.containsKey(line.flag)
-                                  ? '${line.displayName}（${episodeCounts[line.flag]} 集）'
-                                  : line.displayName,
-                            ),
-                          ],
+                          ),
+                          selected: line.flag == selectedFlag,
+                          onSelected: onChanged == null
+                              ? null
+                              : (_) => onChanged!.call(line),
                         ),
-                        selected: line.flag == selectedFlag,
-                        onSelected: onChanged == null
-                            ? null
-                            : (_) => onChanged!.call(line),
                       ),
-                    ),
-                    const SizedBox(width: 8),
+                      const SizedBox(width: 8),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
           ),
@@ -933,19 +937,21 @@ class _TmdbEpisodeStripState extends State<TmdbEpisodeStrip> {
   /// 把控件挤出 800×600 测试视口）。
   Widget _buildRangeBar(BuildContext context) => SizedBox(
     height: 36,
-    child: ListView.separated(
-      key: ValueKey('${widget.keyPrefix}-range-strip'),
-      controller: _rangeScroll,
-      scrollDirection: Axis.horizontal,
-      itemCount: widget.ranges.length,
-      separatorBuilder: (_, _) => const SizedBox(width: 8),
-      itemBuilder: (context, index) => ChoiceChip(
-        key: ValueKey('${widget.keyPrefix}-range-$index'),
-        label: Text(widget.ranges[index].label),
-        selected: index == _safeRangeIndex,
-        onSelected: widget.onRangeChanged == null
-            ? null
-            : (_) => widget.onRangeChanged!(index),
+    child: HorizontalMouseDrag(
+      child: ListView.separated(
+        key: ValueKey('${widget.keyPrefix}-range-strip'),
+        controller: _rangeScroll,
+        scrollDirection: Axis.horizontal,
+        itemCount: widget.ranges.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (context, index) => ChoiceChip(
+          key: ValueKey('${widget.keyPrefix}-range-$index'),
+          label: Text(widget.ranges[index].label),
+          selected: index == _safeRangeIndex,
+          onSelected: widget.onRangeChanged == null
+              ? null
+              : (_) => widget.onRangeChanged!(index),
+        ),
       ),
     ),
   );
@@ -989,16 +995,19 @@ class _TmdbEpisodeStripState extends State<TmdbEpisodeStrip> {
     }
     return SizedBox(
       height: widget.height,
-      child: ListView.separated(
-        key: ValueKey('${widget.keyPrefix}-strip'),
-        scrollDirection: Axis.horizontal,
-        itemCount: entries.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 10),
-        itemBuilder: (context, index) => SizedBox(
-          width: widget.cardWidth,
-          child: _tile(
-            originalIndex: entries[index].$1,
-            card: entries[index].$2,
+      // 集数多到溢出时用鼠标左右拖（用户反馈 2026-10-20）。
+      child: HorizontalMouseDrag(
+        child: ListView.separated(
+          key: ValueKey('${widget.keyPrefix}-strip'),
+          scrollDirection: Axis.horizontal,
+          itemCount: entries.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 10),
+          itemBuilder: (context, index) => SizedBox(
+            width: widget.cardWidth,
+            child: _tile(
+              originalIndex: entries[index].$1,
+              card: entries[index].$2,
+            ),
           ),
         ),
       ),
@@ -1892,24 +1901,27 @@ class _PhotoWall extends StatelessWidget {
   Widget build(BuildContext context) {
     return SizedBox(
       height: itemWidth / aspectRatio,
-      child: ListView.separated(
-        key: const ValueKey('tmdb-photo-wall'),
-        scrollDirection: Axis.horizontal,
-        itemCount: urls.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, index) => InkWell(
-          key: ValueKey('$keyPrefix-$index'),
-          onTap: () => showTmdbPhotoViewer(
-            context,
-            urls: urls,
-            url: urls[index],
-            title: title,
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(6),
-            child: SizedBox(
-              width: itemWidth,
-              child: PosterImage(url: urls[index], fit: BoxFit.cover),
+      // 剧照/海报同样用鼠标左右拖（用户反馈 2026-10-20）。
+      child: HorizontalMouseDrag(
+        child: ListView.separated(
+          key: const ValueKey('tmdb-photo-wall'),
+          scrollDirection: Axis.horizontal,
+          itemCount: urls.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 8),
+          itemBuilder: (context, index) => InkWell(
+            key: ValueKey('$keyPrefix-$index'),
+            onTap: () => showTmdbPhotoViewer(
+              context,
+              urls: urls,
+              url: urls[index],
+              title: title,
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: SizedBox(
+                width: itemWidth,
+                child: PosterImage(url: urls[index], fit: BoxFit.cover),
+              ),
             ),
           ),
         ),
@@ -2106,47 +2118,50 @@ class _PeopleWall extends StatelessWidget {
     final theme = Theme.of(context);
     return SizedBox(
       height: 178,
-      child: ListView.separated(
-        key: ValueKey(keyValue),
-        scrollDirection: Axis.horizontal,
-        itemCount: people.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 10),
-        itemBuilder: (context, index) {
-          final person = people[index];
-          return SizedBox(
-            width: 104,
-            child: InkWell(
-              key: ValueKey('$keyPrefix-${person.personId}'),
-              onTap: onTap == null ? null : () => onTap!.call(person),
-              borderRadius: BorderRadius.circular(8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: SizedBox(
-                      height: 116,
-                      child: PosterImage(url: person.profileUrl),
+      // 人多到溢出时用鼠标左右拖。
+      child: HorizontalMouseDrag(
+        child: ListView.separated(
+          key: ValueKey(keyValue),
+          scrollDirection: Axis.horizontal,
+          itemCount: people.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 10),
+          itemBuilder: (context, index) {
+            final person = people[index];
+            return SizedBox(
+              width: 104,
+              child: InkWell(
+                key: ValueKey('$keyPrefix-${person.personId}'),
+                onTap: onTap == null ? null : () => onTap!.call(person),
+                borderRadius: BorderRadius.circular(8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: SizedBox(
+                        height: 116,
+                        child: PosterImage(url: person.profileUrl),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    person.name,
-                    style: theme.textTheme.bodySmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  Text(
-                    person.subtitle,
-                    style: theme.textTheme.labelSmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
+                    const SizedBox(height: 4),
+                    Text(
+                      person.name,
+                      style: theme.textTheme.bodySmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      person.subtitle,
+                      style: theme.textTheme.labelSmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -2167,48 +2182,51 @@ class _RecommendationWall extends StatelessWidget {
     final theme = Theme.of(context);
     return SizedBox(
       height: 218,
-      child: ListView.separated(
-        key: const ValueKey('tmdb-recommendation-wall'),
-        scrollDirection: Axis.horizontal,
-        itemCount: items.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 10),
-        itemBuilder: (context, index) {
-          final item = items[index];
-          final key = item.identity?.key ?? 'item-$index';
-          return SizedBox(
-            width: 130,
-            child: InkWell(
-              key: ValueKey('tmdb-recommendation-$key'),
-              onTap: onTap == null ? null : () => onTap!.call(item),
-              borderRadius: BorderRadius.circular(8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: SizedBox(
-                      height: 180,
-                      child: PosterImage(url: item.posterUrl),
+      // 推荐位多到溢出时用鼠标左右拖。
+      child: HorizontalMouseDrag(
+        child: ListView.separated(
+          key: const ValueKey('tmdb-recommendation-wall'),
+          scrollDirection: Axis.horizontal,
+          itemCount: items.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 10),
+          itemBuilder: (context, index) {
+            final item = items[index];
+            final key = item.identity?.key ?? 'item-$index';
+            return SizedBox(
+              width: 130,
+              child: InkWell(
+                key: ValueKey('tmdb-recommendation-$key'),
+                onTap: onTap == null ? null : () => onTap!.call(item),
+                borderRadius: BorderRadius.circular(8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: SizedBox(
+                        height: 180,
+                        child: PosterImage(url: item.posterUrl),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    item.title,
-                    style: theme.textTheme.bodySmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  Text(
-                    item.subtitle,
-                    style: theme.textTheme.labelSmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
+                    const SizedBox(height: 4),
+                    Text(
+                      item.title,
+                      style: theme.textTheme.bodySmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      item.subtitle,
+                      style: theme.textTheme.labelSmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -2357,37 +2375,40 @@ class PersonWorkFilterRow extends StatelessWidget {
     final scheme = theme.colorScheme;
     return SizedBox(
       height: 34,
-      child: ListView.separated(
-        key: ValueKey(keyValue),
-        scrollDirection: Axis.horizontal,
-        itemCount: options.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final option = options[index];
-          final isSelected = option.key == selected;
-          return InkWell(
-            key: ValueKey('$keyValue-${option.key}'),
-            onTap: () => onSelected(option.key),
-            borderRadius: BorderRadius.circular(16),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: isSelected
-                    ? scheme.primary.withValues(alpha: 0.18)
-                    : scheme.surfaceContainerLow,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Text(
-                '${option.label} ${option.count}',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: isSelected ? scheme.primary : scheme.onSurfaceVariant,
-                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+      // 筛选项多到溢出时用鼠标左右拖。
+      child: HorizontalMouseDrag(
+        child: ListView.separated(
+          key: ValueKey(keyValue),
+          scrollDirection: Axis.horizontal,
+          itemCount: options.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 8),
+          itemBuilder: (context, index) {
+            final option = options[index];
+            final isSelected = option.key == selected;
+            return InkWell(
+              key: ValueKey('$keyValue-${option.key}'),
+              onTap: () => onSelected(option.key),
+              borderRadius: BorderRadius.circular(16),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? scheme.primary.withValues(alpha: 0.18)
+                      : scheme.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Text(
+                  '${option.label} ${option.count}',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: isSelected ? scheme.primary : scheme.onSurfaceVariant,
+                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                  ),
                 ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -2661,32 +2682,35 @@ class _TmdbPersonPageState extends State<TmdbPersonPage> {
           const SizedBox(height: 8),
           SizedBox(
             height: 150,
-            child: ListView.separated(
-              key: const ValueKey('tmdb-person-photos'),
-              scrollDirection: Axis.horizontal,
-              itemCount: _photos.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 8),
-              itemBuilder: (context, index) => InkWell(
-                key: ValueKey('tmdb-person-photo-$index'),
-                onTap: () {
-                  if (widget.onOpenPhoto != null) {
-                    widget.onOpenPhoto!(_photos, _photos[index]);
-                    return;
-                  }
-                  showTmdbPhotoViewer(
-                    context,
-                    urls: _photos,
-                    url: _photos[index],
-                    title: widget.person.name,
-                  );
-                },
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
-                  child: SizedBox(
-                    // 人物照片是 2:3 竖图：框比与素材一致，不让两侧露灰底。
-                    width: 100,
-                    height: 150,
-                    child: PosterImage(url: _photos[index], fit: BoxFit.cover),
+            // 人物照片条：鼠标左右拖。
+            child: HorizontalMouseDrag(
+              child: ListView.separated(
+                key: const ValueKey('tmdb-person-photos'),
+                scrollDirection: Axis.horizontal,
+                itemCount: _photos.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 8),
+                itemBuilder: (context, index) => InkWell(
+                  key: ValueKey('tmdb-person-photo-$index'),
+                  onTap: () {
+                    if (widget.onOpenPhoto != null) {
+                      widget.onOpenPhoto!(_photos, _photos[index]);
+                      return;
+                    }
+                    showTmdbPhotoViewer(
+                      context,
+                      urls: _photos,
+                      url: _photos[index],
+                      title: widget.person.name,
+                    );
+                  },
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: SizedBox(
+                      // 人物照片是 2:3 竖图：框比与素材一致，不让两侧露灰底。
+                      width: 100,
+                      height: 150,
+                      child: PosterImage(url: _photos[index], fit: BoxFit.cover),
+                    ),
                   ),
                 ),
               ),

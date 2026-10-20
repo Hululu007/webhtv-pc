@@ -16,6 +16,7 @@ import 'app.dart';
 import 'common.dart';
 import 'config_pages.dart';
 import 'player_button_config_page.dart';
+import 'scroll_behavior.dart';
 import 'source_field.dart';
 import 'tokens.dart';
 
@@ -497,41 +498,43 @@ class _HealthTable extends StatelessWidget {
     if (items.isEmpty) {
       return const Text('还没有调用记录。浏览、搜索或播放后会累计成功率与耗时。');
     }
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: DataTable(
-        columns: const [
-          DataColumn(label: Text('站点')),
-          DataColumn(label: Text('首页')),
-          DataColumn(label: Text('分类')),
-          DataColumn(label: Text('详情')),
-          DataColumn(label: Text('播放')),
-          DataColumn(label: Text('平均耗时')),
-          DataColumn(label: Text('最近错误')),
-        ],
-        rows: [
-          for (final item in items)
-            DataRow(
-              cells: [
-                DataCell(Text(item.siteKey)),
-                DataCell(Text(_rate(item.homeOk, item.homeTotal))),
-                DataCell(Text(_rate(item.categoryOk, item.categoryTotal))),
-                DataCell(Text(_rate(item.detailOk, item.detailTotal))),
-                DataCell(Text(_rate(item.playOk, item.playTotal))),
-                DataCell(Text('${item.avgLatencyMs}ms')),
-                DataCell(
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 320),
-                    child: Text(
-                      item.lastError ?? '-',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+    return HorizontalMouseDrag(
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: DataTable(
+          columns: const [
+            DataColumn(label: Text('站点')),
+            DataColumn(label: Text('首页')),
+            DataColumn(label: Text('分类')),
+            DataColumn(label: Text('详情')),
+            DataColumn(label: Text('播放')),
+            DataColumn(label: Text('平均耗时')),
+            DataColumn(label: Text('最近错误')),
+          ],
+          rows: [
+            for (final item in items)
+              DataRow(
+                cells: [
+                  DataCell(Text(item.siteKey)),
+                  DataCell(Text(_rate(item.homeOk, item.homeTotal))),
+                  DataCell(Text(_rate(item.categoryOk, item.categoryTotal))),
+                  DataCell(Text(_rate(item.detailOk, item.detailTotal))),
+                  DataCell(Text(_rate(item.playOk, item.playTotal))),
+                  DataCell(Text('${item.avgLatencyMs}ms')),
+                  DataCell(
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 320),
+                      child: Text(
+                        item.lastError ?? '-',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
-        ],
+                ],
+              ),
+          ],
+        ),
       ),
     );
   }

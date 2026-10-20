@@ -18,6 +18,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../core/player_buttons.dart';
+import 'scroll_behavior.dart';
 import 'tokens.dart';
 
 /// 顶栏纱的高度。
@@ -144,15 +145,18 @@ class PlayerOverlayActionRow extends StatelessWidget {
       }
       children.add(buttons[i]);
     }
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      // 不需要显式关滚动条：`MaterialScrollBehavior.buildScrollbar` 对
-      // `Axis.horizontal` 直接返回 child（只有纵向才包 `Scrollbar`），
-      // 这正好等于上游 `view_control_vod_action.xml:9` 的 `scrollbars="none"`。
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: children,
+    // 动作行溢出时用鼠标左右拖（横向条，§17.4）。
+    return HorizontalMouseDrag(
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        // 不需要显式关滚动条：`MaterialScrollBehavior.buildScrollbar` 对
+        // `Axis.horizontal` 直接返回 child（只有纵向才包 `Scrollbar`），
+        // 这正好等于上游 `view_control_vod_action.xml:9` 的 `scrollbars="none"`。
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: children,
+        ),
       ),
     );
   }

@@ -24,6 +24,7 @@ import '../core/tmdb_season.dart';
 import '../state/tmdb_state.dart';
 import 'app.dart' show PosterImage;
 import 'common.dart';
+import 'scroll_behavior.dart';
 
 /// 季度绑定的语义化选择类型定义在纯逻辑层（`lib/core/tmdb_season.dart`），
 /// 此处重导出，使 UI 层与既有门禁用例只需依赖一个模块。
@@ -306,26 +307,29 @@ class SeasonChipStrip extends StatelessWidget {
     if (seasons.length <= 1) return const SizedBox.shrink();
     return SizedBox(
       height: tmdbSeasonSelectorHeight,
-      child: ListView.separated(
-        key: ValueKey(switcherKey),
-        scrollDirection: Axis.horizontal,
-        padding: EdgeInsets.symmetric(
-          horizontal: padding.horizontal / 2,
-          vertical: 6,
+      // 季数多到溢出时用鼠标左右拖。
+      child: HorizontalMouseDrag(
+        child: ListView.separated(
+          key: ValueKey(switcherKey),
+          scrollDirection: Axis.horizontal,
+          padding: EdgeInsets.symmetric(
+            horizontal: padding.horizontal / 2,
+            vertical: 6,
+          ),
+          itemCount: seasons.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 8),
+          itemBuilder: (context, index) {
+            final season = seasons[index];
+            final selectable =
+                selectableSeasons.contains(season) && onChanged != null;
+            return ChoiceChip(
+              key: ValueKey('$chipKeyPrefix-$season'),
+              label: Text(_seasonLabel(season)),
+              selected: season == selectedSeason,
+              onSelected: selectable ? (_) => onChanged!(season) : null,
+            );
+          },
         ),
-        itemCount: seasons.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final season = seasons[index];
-          final selectable =
-              selectableSeasons.contains(season) && onChanged != null;
-          return ChoiceChip(
-            key: ValueKey('$chipKeyPrefix-$season'),
-            label: Text(_seasonLabel(season)),
-            selected: season == selectedSeason,
-            onSelected: selectable ? (_) => onChanged!(season) : null,
-          );
-        },
       ),
     );
   }
