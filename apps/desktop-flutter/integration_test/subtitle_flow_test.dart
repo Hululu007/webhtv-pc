@@ -28,6 +28,7 @@ import 'package:webhtv_pc/ui/player_page.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../test/fixture_support.dart';
+import 'phase8_player_test_support.dart';
 
 void evidence(String message) => debugPrint('PHASE3-EVIDENCE $message');
 
@@ -141,15 +142,27 @@ void main() {
     );
 
     // 2) 关闭：字幕菜单 →「关闭字幕」。
+    //
+    // 每次点浮层上的按钮前都要先唤醒：轮询字幕状态可能已经过去 3 秒，
+    // 浮层会按 `design/01` §4.4 自动隐藏，隐藏期间 `IgnorePointer`
+    // 会让点击打空（`tester.tap` 只打印 warning，随后断言以「找不到」失败）。
+    await revealPlayerControls(tester);
     await tester.tap(find.byTooltip('字幕轨'));
     await tester.pumpAndSettle();
     expect(find.text('关闭字幕'), findsOneWidget);
     await tester.tap(find.text('关闭字幕'));
-    await tester.pumpAndSettle(const Duration(seconds: 2));
+    // 字幕开关要经过 mpv，是真实异步。这里等**状态本身**，不等界面静止——
+    // 带时长的 `pumpAndSettle` 在播放器页上永不返回（见 support 文件头）。
+    for (var attempt = 0;
+        attempt < 20 && player.state.track.subtitle.id != 'no';
+        attempt++) {
+      await tester.pump(const Duration(milliseconds: 250));
+    }
     expect(player.state.track.subtitle.id, 'no');
     evidence('subtitle-off id=${player.state.track.subtitle.id}');
 
     // 3) 重新开启：同一菜单选回外挂字幕。
+    await revealPlayerControls(tester);
     await tester.tap(find.byTooltip('字幕轨'));
     await tester.pumpAndSettle();
     final externalLabel = find.textContaining('简体中文');

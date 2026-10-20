@@ -155,6 +155,60 @@ final rect = tester.getRect(finder);
    `ui_redesign_visual 1440x2400：settings-theme-mode 必须被构建`。
    新增入口的可达性检查必须与既有入口的检查**分成两轮**。
 
+### 1.6 播放器页上不能用「带时长」的 `pumpAndSettle`（第 9 类缺陷）
+
+**现象**：3 个既有集成套件直到最终审查才红——而它们从未被任何门禁跑过。
+根因有两层，修法不同。
+
+**(a) 屏显时钟让带时长的 `pumpAndSettle` 永不返回。**
+
+`OsdFlag.time` 默认 `true`（`lib/core/osd_config.dart:61`），
+`lib/ui/player_osd.dart:86` 的 `_clockVisible = controlsVisible || flags[time]`
+让时钟**永远**显示，于是 `_osdNeedsTicker` 恒为真：1 秒一次的 `Timer.periodic`
+常驻，每秒 `setState`。`pumpAndSettle(const Duration(seconds: n))` 以 n 为步长，
+只要 **n ≥ 1 秒**，每一步都必然跨过一次 tick，`hasScheduledFrame` 永远为真，
+一直泵到 10 分钟默认超时才抛 `pumpAndSettle timed out`
+（实测 `subtitle_flow_test.dart:148` 于 `10:09` 抛出）。
+
+- **不带时长**的 `pumpAndSettle()` 不受影响：默认步长 100ms，能收敛。
+- 要「等一段真实时间」→ `settlePlayerPage(tester, total: ...)`。
+- 要「等某个条件成立」→ 显式轮询（套件里本来就有这个写法）。
+
+**(b) 控制浮层 3 秒自动隐藏后 `IgnorePointer` 会吃掉点击。**
+
+`tester.tap` 默认只 `warnIfMissed` 打一句警告，断言随后以「找不到 / 状态没变」
+的形式失败，看不出真正原因。→ 点浮层上的按钮前先 `revealPlayerControls(tester)`；
+它先读 `debugPlayerControlsVisible` 再决定点不点，因为单击是**切换**语义。
+
+两个辅助都在 `integration_test/phase8_player_test_support.dart`。
+
+**(c) 门禁为什么没抓到——这才是本轮的真正教训。**
+
+G11 原稿写「含在 G2 里（全量 `flutter test`）」。但 `flutter test` 默认只跑
+`test/`，**不跑 `integration_test/`**。挂载 `PlayerPage` 的既有集成套件有 12 个，
+一个都没跑过。**「全量单元测试全绿」不等于「既有回归全绿」**——
+把两类套件合并成一句话，等于给集成套件开了一张空头支票。
+
+规则：**门禁条目必须点名到可执行的文件列表**，不能写「含在 X 里」。
+
+### 1.7 「假绿」的第 10 类：观测缝撞上真实设备
+
+给播放器页加鼠标悬停唤醒（`01` §4.5）后，测试里想模拟悬停。
+`tester.createGesture(kind: PointerDeviceKind.mouse)` 是 widget 测试的标准写法，
+但在 **`LiveTestWidgetsFlutterBinding`（真实窗口的集成测试）** 下会直接炸：
+
+```
+'mouse_tracker.dart': Failed assertion: line 220:
+'(event is PointerAddedEvent) == (lastEvent is PointerRemovedEvent)': is not true.
+```
+
+原因：真实窗口已经在跟踪真实的鼠标设备，再加一个指针就破了 MouseTracker 的
+added/removed 配对不变式。**同一个 API 在 widget 测试里可靠、在集成测试里不可靠。**
+
+规则：集成测试不要模拟指针设备；用产品的主路径（这里就是「单击画面唤醒」），
+并配合 `@visibleForTesting` 状态观测缝（`debugPlayerControlsVisible`）来判断
+「该不该点」。仓库里既有的正确写法是 `ui_redesign_visual_flow_test.dart:659`。
+
 ---
 
 ## 2. 新增测试文件
@@ -307,8 +361,8 @@ final rect = tester.getRect(finder);
 | 测试文件 | 锁定的内容 | 本轮风险 | 处置 |
 | --- | --- | --- | --- |
 | `integration_test/ui_redesign_visual_flow_test.dart:671-693` | `find.byTooltip('字幕轨')` / `'弹幕（开启）'` / `'全屏（F11）'` 各 `findsOneWidget`；`'更多'` 在 `AppBar` 内；`'字幕样式'/'弹幕设置'/'画面比例与缩放（contain）'` 全局 `findsNothing` | **高**：顶栏改浮层 | **保留 `AppBar` 类型**（`01` §4.1）；四个 tooltip 精确串不变；`'更多'` 仍在 `AppBar.actions` |
-| `integration_test/subtitle_flow_test.dart:144,153` | 直接 `tap(find.byTooltip('字幕轨'))` | **高** | 顶栏按钮常驻，不进可配置集合（`03` §5.3） |
-| `integration_test/danmaku_flow_test.dart:156,175` | 直接 `tap('弹幕（开启）'/'弹幕（关闭）')` | **高** | 同上 |
+| `integration_test/subtitle_flow_test.dart:144,153` | 直接 `tap(find.byTooltip('字幕轨'))` | **高** | 顶栏按钮常驻，不进可配置集合（`03` §5.3）；**另外两处已实测会红，见下方 §5.2** |
+| `integration_test/danmaku_flow_test.dart:156,175` | 直接 `tap('弹幕（开启）'/'弹幕（关闭）')` | **高** | 同上（含 §5.2 的两处修正） |
 | `integration_test/ui_redesign_visual_flow_test.dart:696-707` | `tap('更多')` 后 6 个菜单项文字存在 | 中 | 顶栏「更多」菜单**不删**（`04` §4.3） |
 | `test/phase3_player_display_test.dart:6-40` | `PlayerVideoFitMode` 五枚举的 `fit`/`aspectRatio`/`label`；`resolvePlayerGesture` 四分支 | 中 | **不改**这些定义；右键是独立回调（`04` §6） |
 | `test/phase3_player_display_test.dart:42-58` | `PlayerSubtitleStyle` 默认值（透明底、有描边、`bottomPadding=24`） | 低 | **不改** |
@@ -329,6 +383,28 @@ pump 播放器页。本轮在 `PlayerPage` 内部包一层暗色 `Theme`（`01` 
 
 **决策：暗色 `Theme` 必须包在 `PlayerPage.build` 内部**，不是路由层。
 
+### 5.2 已实测被打破的 5 处（本轮补修，非设计预期）
+
+上表第一行的「顶栏按钮常驻」只解决了**位置**问题，没解决**可达性**问题。
+实际跑下来，这几个套件红的根因都**不是**按钮被收进溢出菜单：
+
+| 位置 | 实测现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| `subtitle_flow_test.dart:148` | `pumpAndSettle timed out`，时间戳 `10:09` | 屏显时钟每秒 `setState`，`pumpAndSettle(2s)` 永不收敛（§1.6a） | 改为轮询 `track.subtitle.id == 'no'` |
+| `danmaku_flow_test.dart:157,176` | 同上（`pumpAndSettle(1s)`） | 同上 | 改为单次 `pump()`（该开关只改本地状态，无真实异步） |
+| `danmaku_flow_test.dart:175` | 点击打空 → `resumed.style.enabled` 仍为 false | 前面的轮询已耗掉 3 秒以上，浮层自动隐藏后 `IgnorePointer` 吃掉点击（§1.6b） | 点击前 `revealPlayerControls(tester)` |
+| `phase7_resume_flow_test.dart:145` | `pumpAndSettle timed out` | 点剧集卡片后已落在 `PlayerPage` 上（§1.6a） | `settlePlayerPage(total: 10s)` |
+| `phase7_resume_flow_test.dart:205` | 同上 | 路由退场动画期间播放器还在树里，ticker 还在跑 | `settlePlayerPage(total: 5s)` |
+
+`mvp_a_flow_test.dart:342,361` 是同一形态，同样已修；该套件在本机另有 2 条
+**基线即红**的环境失败（见 §6 的 G11 说明），与本轮无关。
+
+配套新增：
+
+- `integration_test/phase8_player_test_support.dart`：`settlePlayerPage`、`revealPlayerControls`。
+- `test/phase8_controls_hover_test.dart`：2 条，锁 `01` §4.5 悬停唤醒的**两侧**
+  （去掉 `MouseRegion` → 第 1 条红；去掉 `if (!_controlsVisible)` 守卫 → 第 2 条红）。
+
 ---
 
 ## 6. 门禁表
@@ -345,7 +421,7 @@ pump 播放器页。本轮在 `PlayerPage` 内部包一层暗色 `Theme`（`01` 
 | G8 | 截图证据 | `py -3 tools/phase8/verify_screenshots.py` | 13 张截图存在、非空，且与 `manifest.txt` **逐字节一致**（可复核） |
 | G9 | 无阴影/无 elevation | `py -3 tools/phase8/verify_flat_field.py` | 新增文件中无 `BoxShadow` / 非 0 `elevation` |
 | G10 | 字号未改 | `py -3 tools/phase8/verify_metric_neutral.py` | `theme.dart` 的 `_textTheme` 与基线逐字相同 |
-| G11 | 既有测试回归 | `flutter test` + 3 个受影响集成套件 | 全绿（`05` §5 的 10 条逐条确认） |
+| G11 | 既有测试回归 | 步骤 `player-integration-regression`：逐个 `flutter test integration_test/{subtitle,danmaku,phase7_resume}_flow_test.dart -d windows` | 3 个套件全绿 |
 | G12 | 定时器无泄漏 | `flutter test test/phase8_player_page_overlay_test.dart` | 该套件全绿，且套件调 `osdTickerRunning`、包装走到 `debugOsdTickerRunning` 观测缝 |
 
 > **G12 的判据为什么长这样**（`R108` + `R111`，两次实测换来的）：
@@ -375,6 +451,24 @@ pump 播放器页。本轮在 `PlayerPage` 内部包一层暗色 `Theme`（`01` 
 > 6. **查 `transientCallbackCount` 前必须先剥掉注释行**：套件里有一条注释
 >    专门解释「为什么不能用它」（第 4 点），那是文档不是用法。只按裸串匹配
 >    会把正确实现判红（同样实测踩到）。
+
+> **G11 为什么只点名 3 个套件、另外两个为什么不进来**：
+>
+> 挂载 `PlayerPage` 的既有集成套件共 **12 个**。G11 收录的是「必须绿且确实
+> 覆盖播放器行为」的 3 个：`subtitle_flow_test`（字幕菜单 → 关闭 → 重开）、
+> `danmaku_flow_test`（弹幕开关）、`phase7_resume_flow_test`（详情页 → 播放页 → 弹出路由）。
+>
+> 两个被排除的，理由可复核：
+>
+> - `mvp_a_flow_test.dart`：**基线 `ec79422` 上同样 6 通过 / 2 失败**，失败名单一致
+>   （`主界面可交互…` 是被一条*测试完成后*才冒出的 `SocketException`
+>   连向真实内网 `192.168.50.2:9978` 牵连；`渲染 UI 页面…:525` 找不到 `fixture` 文本）。
+>   属环境问题，不是回归。放进必绿清单会让门禁**永久红**，等于没有门禁。
+> - `ui_redesign_visual_flow_test.dart`：它的产出是 `.impeccable/review/*.png`，
+>   跑一次就改写工作区里**已提交**的图片，不适合当回归门禁（它是证据采集）。
+>
+> 代价必须写明：这两个套件里的播放器路径**不在门禁保护范围内**，改动播放器页后
+> 要手动跑一次。本轮已经手动跑过（基线对照见上）。
 
 一键验收：
 

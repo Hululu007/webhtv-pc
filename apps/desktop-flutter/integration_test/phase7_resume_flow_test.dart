@@ -34,6 +34,7 @@ import 'package:webhtv_pc/ui/player_page.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../test/fixture_support.dart';
+import 'phase8_player_test_support.dart';
 
 void evidence(String message) =>
     debugPrint('PHASE7-EVIDENCE resume-flow $message');
@@ -142,7 +143,9 @@ void main() {
     }
     expect(episodeCard, findsOneWidget, reason: '未找到剧集卡片入口');
     await tester.tap(episodeCard);
-    await tester.pumpAndSettle(const Duration(seconds: 10));
+    // 点击剧集卡片后就落在 PlayerPage 上：屏显时钟每秒重绘，
+    // 带时长的 `pumpAndSettle` 在这里永不 settle（见 phase8_player_test_support）。
+    await settlePlayerPage(tester, total: const Duration(seconds: 10));
 
     final playerPage = tester.widget<PlayerPage>(find.byType(PlayerPage));
     expect(
@@ -202,7 +205,9 @@ void main() {
     // 释放播放器路由。
     final context = tester.element(find.byType(PlayerPage));
     Navigator.of(context).pop();
-    await tester.pumpAndSettle(const Duration(seconds: 5));
+    // 路由退场动画期间播放器还在树里，ticker 也还在跑；
+    // 带时长的 `pumpAndSettle` 会在这里挂到 10 分钟超时。
+    await settlePlayerPage(tester, total: const Duration(seconds: 5));
     expect(find.byType(PlayerPage), findsNothing);
     evidence('step=6 player-released');
   });

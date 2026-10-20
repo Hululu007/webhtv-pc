@@ -30,6 +30,7 @@ import 'package:webhtv_pc/ui/player_page.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../test/fixture_support.dart';
+import 'phase8_player_test_support.dart';
 
 /// 把可复查事实写入测试输出，供 Phase 1 验收报告引用。
 void evidence(String message) => debugPrint('PHASE1-EVIDENCE $message');
@@ -339,7 +340,9 @@ void main() {
     }
     expect(episodeCard, findsOneWidget, reason: '未找到剧集卡片入口');
     await tester.tap(episodeCard);
-    await tester.pumpAndSettle(const Duration(seconds: 10));
+    // 点击剧集卡片后就落在 PlayerPage 上：屏显时钟每秒重绘，
+    // 带时长的 `pumpAndSettle` 在这里永不 settle（见 phase8_player_test_support）。
+    await settlePlayerPage(tester, total: const Duration(seconds: 10));
 
     // 断言：进入的播放器确实带上了历史续播位置（不是从头开始）。
     final playerPage = tester.widget<PlayerPage>(find.byType(PlayerPage));
@@ -358,7 +361,9 @@ void main() {
     // 释放播放器：弹出播放器路由，避免真实播放器残留。
     final context = tester.element(find.byType(PlayerPage));
     Navigator.of(context).pop();
-    await tester.pumpAndSettle(const Duration(seconds: 5));
+    // 路由退场动画期间播放器还在树里，ticker 也还在跑；
+    // 带时长的 `pumpAndSettle` 会在这里挂到 10 分钟超时。
+    await settlePlayerPage(tester, total: const Duration(seconds: 5));
     expect(find.byType(PlayerPage), findsNothing);
   });
 

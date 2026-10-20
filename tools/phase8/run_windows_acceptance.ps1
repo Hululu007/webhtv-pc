@@ -11,10 +11,10 @@
 #   G8  截图证据（13 张与清单逐字节一致）  → 步骤 screenshot-evidence
 #   G9  无阴影/无 elevation               → 步骤 flat-field
 #   G10 字号未改                          → 步骤 metric-neutral
-#   G11 既有测试回归                      → **含在 G2 里**（全量 flutter test）
+#   G11 既有测试回归                      → 步骤 player-integration-regression
 #   G12 定时器无泄漏                      → 步骤 timer-leak-gate
 #
-# G7 与 G11 没有独立步骤，因为它们分别是 G4/G2 的一个子集；
+# G7 没有独立步骤，因为它是 G4 的一个子集；
 # 这里显式写明，避免「12 个门禁只有 10 个步骤」看起来像漏了。
 #
 # 用法：
@@ -168,7 +168,11 @@ try {
         try { & puro -e $PuroEnvironment -p . dart analyze } finally { Pop-Location }
     }
 
-    # G2（含 G11 既有测试回归——全量 flutter test 覆盖所有既有套件）
+    # G2 单元测试。
+    #
+    # **注意**：`flutter test` 默认只跑 `test/`，**不含** `integration_test/`。
+    # 所以 G2 并不能代表「既有套件全绿」——挂载 PlayerPage 的既有集成套件
+    # 由 G11（player-integration-regression）单独跑。
     Invoke-Checked 'flutter-unit-tests' {
         Push-Location $AppDir
         try { & puro -e $PuroEnvironment -p . flutter test } finally { Pop-Location }
@@ -227,6 +231,52 @@ try {
     } else {
         Write-Step 'windows-integration-tests (跳过)'
         Write-Fact 'windows-integration-tests skipped'
+    }
+
+    # G11 既有测试回归：挂载 PlayerPage 的既有集成套件。
+    #
+    # **为什么必须单列**：`flutter test`（G2）默认只跑 `test/`，不跑
+    # `integration_test/`。原稿把 G11 写成「含在 G2 里」，于是 12 个挂载
+    # 播放器页的既有套件**从来没被跑过**。代价是真实的：Phase 8 引入了两个
+    # 会让这些套件红的改动，全部漏到最终审查才发现——
+    #   1. 屏显时钟每秒 setState → 带时长的 `pumpAndSettle` 永不 settle
+    #      （实测 `subtitle_flow_test.dart:148` 在 10:09 超时）；
+    #   2. 控制浮层 3 秒自动隐藏 + IgnorePointer → 第二次点击静默打空。
+    #
+    # 只收录**必须绿**的套件。两个已知红的没有进来，原因写在
+    # `docs/phase8/design/05` §6 的 G11 说明里：
+    #   - `mvp_a_flow_test.dart`：基线 `ec79422` 上同样 6 通过 / 2 失败
+    #     （连真实内网 192.168.50.2:9978 的 SocketException 被记到最后一条用例，
+    #     以及 525 行找不到 `fixture` 文本），是环境问题，不是回归；
+    #   - `ui_redesign_visual_flow_test.dart`：它的产出是
+    #     `.impeccable/review/*.png`，跑一次就改写工作区里的已提交图片，
+    #     不适合放在门禁里（它是证据采集，不是回归网）。
+    if (-not $SkipIntegrationTests) {
+        Invoke-Checked 'player-integration-regression' {
+            Push-Location $AppDir
+            try {
+                $global:LASTEXITCODE = 0
+                $playerSuites = @(
+                    'integration_test/subtitle_flow_test.dart',
+                    'integration_test/danmaku_flow_test.dart',
+                    'integration_test/phase7_resume_flow_test.dart'
+                )
+                foreach ($suite in $playerSuites) {
+                    $output = & puro -e $PuroEnvironment -p . flutter test $suite -d windows 2>&1
+                    $output | ForEach-Object { Add-Content -Path $LogFile -Value $_ -Encoding utf8 }
+                    $output | ForEach-Object { Write-Host $_ }
+                    if ($LASTEXITCODE -ne 0) {
+                        $global:LASTEXITCODE = 1
+                        return
+                    }
+                }
+                $global:LASTEXITCODE = 0
+                Write-Fact "player-integration-regression suites=$($playerSuites.Count) green=all"
+            } finally { Pop-Location }
+        }
+    } else {
+        Write-Step 'player-integration-regression (跳过)'
+        Write-Fact 'player-integration-regression skipped'
     }
 
     # G5

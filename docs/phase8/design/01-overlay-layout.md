@@ -177,6 +177,18 @@ MouseRegion(
 会让 3 秒计时器被无限重置，控制栏永不隐藏。`onHover` 只用于**从隐藏态唤醒**，
 且必须带"当前不可见才唤醒"的判断。
 
+**落地状态**：
+
+- **鼠标移动唤醒：已实现**。第 1 层（画面层）包 `MouseRegion(onHover:)`，
+  守卫就是上面那句 `if (!_controlsVisible) _touchControls();`。
+  两侧都有用例锁（`test/phase8_controls_hover_test.dart`）：
+  去掉 `MouseRegion` → 第 1 条红；去掉守卫 → 第 2 条红。
+- **「指针停在浮层上不隐藏」：未实现**，且原因是结构性的。控制浮层是
+  `Positioned.fill`，它的 `onEnter` 实际等于「指针在窗口内」——无条件保持可见
+  会让控制条**永不隐藏**（本轮第一版就是这么写的，实测后回退）。
+  要做对，必须把 `MouseRegion` 收缩到顶栏/底栏两条**实际条面**上
+  （`player_overlay.dart` 的两个 `Positioned`），属于独立改动。
+
 ### 4.6 状态机
 
 ```

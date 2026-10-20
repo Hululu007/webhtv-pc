@@ -1363,61 +1363,69 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                   children: [
                     // 第 1 层：画面 + 弹幕 + 加载/错误。
                     Positioned.fill(
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: _toggleControlsByGesture,
-                        onDoubleTap: _handleDoubleTapGesture,
-                        onLongPressStart: (_) => _beginGestureSpeed(),
-                        onLongPressEnd: (_) => _endGestureSpeed(),
-                        onLongPressCancel: _endGestureSpeed,
-                        // 右键：打开菜单（`design/04` §5.1）。
-                        // 两个回调都指向同一方法，方法内部幂等。
-                        onSecondaryTapDown: (details) =>
-                            _openContextMenu(details.globalPosition),
-                        onSecondaryTap: () {},
-                        child: Stack(
-                          children: [
-                            Positioned.fill(
-                              child: Video(
-                                controller: _controller.videoController,
-                                fit: _videoFitMode.fit,
-                                aspectRatio: _videoFitMode.aspectRatio,
-                                controls: NoVideoControls,
-                                subtitleViewConfiguration:
-                                    _subtitleStyle.configuration,
-                              ),
-                            ),
-                            // 弹幕叠加层（§21 Phase 3 / §13.1 直播弹幕）：绘制在视频上方、
-                            // 控制层下方。关闭时（style.enabled=false）不绘制任何内容。
-                            Positioned.fill(
-                              child: DanmakuOverlay(
-                                items: _danmakuItems,
-                                position: _controller.position,
-                                style: _danmakuStyle,
-                                liveItems: _liveItems,
-                                liveNowMs: _liveNowMs,
-                              ),
-                            ),
-                            if (_controller.isLoading)
-                              const Positioned.fill(child: LoadingBlock()),
-                            if (_loadError != null)
+                      // 指针在画面上移动即唤醒（`design/01` §4.5）。
+                      // **只在隐藏态唤醒**：可见时若也调 `_touchControls`，
+                      // 指针每动一次都会重置 3 秒计时器，控制栏将永不隐藏。
+                      child: MouseRegion(
+                        onHover: (_) {
+                          if (!_controlsVisible) _touchControls();
+                        },
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: _toggleControlsByGesture,
+                          onDoubleTap: _handleDoubleTapGesture,
+                          onLongPressStart: (_) => _beginGestureSpeed(),
+                          onLongPressEnd: (_) => _endGestureSpeed(),
+                          onLongPressCancel: _endGestureSpeed,
+                          // 右键：打开菜单（`design/04` §5.1）。
+                          // 两个回调都指向同一方法，方法内部幂等。
+                          onSecondaryTapDown: (details) =>
+                              _openContextMenu(details.globalPosition),
+                          onSecondaryTap: () {},
+                          child: Stack(
+                            children: [
                               Positioned.fill(
-                                child: Center(
-                                  child: _PlayerErrorOverlay(
-                                    message: _loadError!,
-                                    url: _request.url,
-                                    onRetry: _load,
-                                    onResume: _resumeFromLatestProgress,
-                                    onNext: _playNext,
-                                    canGoNext:
-                                        (_episodesCache.isNotEmpty
-                                            ? _episodesCache.length
-                                            : _episodes.length) >
-                                        _request.episodeIndex + 1,
-                                  ),
+                                child: Video(
+                                  controller: _controller.videoController,
+                                  fit: _videoFitMode.fit,
+                                  aspectRatio: _videoFitMode.aspectRatio,
+                                  controls: NoVideoControls,
+                                  subtitleViewConfiguration:
+                                      _subtitleStyle.configuration,
                                 ),
                               ),
-                          ],
+                              // 弹幕叠加层（§21 Phase 3 / §13.1 直播弹幕）：绘制在视频上方、
+                              // 控制层下方。关闭时（style.enabled=false）不绘制任何内容。
+                              Positioned.fill(
+                                child: DanmakuOverlay(
+                                  items: _danmakuItems,
+                                  position: _controller.position,
+                                  style: _danmakuStyle,
+                                  liveItems: _liveItems,
+                                  liveNowMs: _liveNowMs,
+                                ),
+                              ),
+                              if (_controller.isLoading)
+                                const Positioned.fill(child: LoadingBlock()),
+                              if (_loadError != null)
+                                Positioned.fill(
+                                  child: Center(
+                                    child: _PlayerErrorOverlay(
+                                      message: _loadError!,
+                                      url: _request.url,
+                                      onRetry: _load,
+                                      onResume: _resumeFromLatestProgress,
+                                      onNext: _playNext,
+                                      canGoNext:
+                                          (_episodesCache.isNotEmpty
+                                              ? _episodesCache.length
+                                              : _episodes.length) >
+                                          _request.episodeIndex + 1,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -2694,6 +2702,21 @@ class _PlayerErrorOverlay extends StatelessWidget {
 @visibleForTesting
 bool debugOsdTickerRunning(State<PlayerPage> state) =>
     (state as _PlayerPageState)._osdTimer?.isActive ?? false;
+
+/// 仅供测试：控制浮层当前是否可见（`design/01` §4.4）。
+///
+/// **为什么必须有这个缝**：浮层隐藏时只是 `opacity: 0` + `IgnorePointer`，
+/// 里面的按钮**仍然在树里**，`find.byTooltip(...)` 照样命中。于是测试无法
+/// 从「找得到」判断它能不能点：隐藏态下点击被 `IgnorePointer` 吃掉，
+/// `tester.tap` 默认只打印一条 warning，断言随后以「菜单没打开」的
+/// 形式失败，看不出真正原因（实测 `subtitle_flow_test.dart`、
+/// `danmaku_flow_test.dart` 都是这样红的）。
+///
+/// 也不适合让测试去读 `IgnorePointer.ignoring`：那要按祖先链定位到
+/// 第 3 层里那个特定的 `IgnorePointer`，浮层结构一改就静默失准。
+@visibleForTesting
+bool debugPlayerControlsVisible(State<PlayerPage> state) =>
+    (state as _PlayerPageState)._controlsVisible;
 
 /// 仅供测试：冻结屏显时钟（`design/05` §8.1）。
 ///

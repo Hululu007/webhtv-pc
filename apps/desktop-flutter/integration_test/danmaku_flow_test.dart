@@ -29,6 +29,7 @@ import 'package:webhtv_pc/ui/player_page.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../test/fixture_support.dart';
+import 'phase8_player_test_support.dart';
 
 void evidence(String message) => debugPrint('PHASE3-EVIDENCE $message');
 
@@ -153,8 +154,14 @@ void main() {
     );
 
     // 2) 关闭：AppBar 弹幕按钮。
+    //
+    // AppBar 本身在控制浮层里，3 秒后随浮层一起隐藏（`design/01` §4.4），
+    // 隐藏期间 `IgnorePointer` 会让这次点击打空。先唤醒。
+    await revealPlayerControls(tester);
     await tester.tap(find.byTooltip('弹幕（开启）'));
-    await tester.pumpAndSettle(const Duration(seconds: 1));
+    // 这个开关只改本地状态，没有真实异步，一帧即生效。
+    // 带时长的 `pumpAndSettle` 在播放器页上永不返回（见 support 文件头）。
+    await tester.pump();
     final paused = tester.widget<DanmakuOverlay>(
       find.byType(DanmakuOverlay).first,
     );
@@ -172,8 +179,9 @@ void main() {
     evidence('danmaku-off enabled=${paused.style.enabled} painted=false');
 
     // 3) 重新开启。
+    await revealPlayerControls(tester);
     await tester.tap(find.byTooltip('弹幕（关闭）'));
-    await tester.pumpAndSettle(const Duration(seconds: 1));
+    await tester.pump();
     final resumed = tester.widget<DanmakuOverlay>(
       find.byType(DanmakuOverlay).first,
     );

@@ -197,7 +197,7 @@ pwsh -File tools/phase8/run_windows_acceptance.ps1 -SkipIntegrationTests
 
 ### 11.2 本轮修掉的真实缺陷（摘要）
 
-完整记录见 `.superpowers/sdd/01-player-overlay/progress.md`（裁决 R1–R111）。
+完整记录见 `.superpowers/sdd/01-player-overlay/progress.md`（裁决 R1–R115）。
 
 | 缺陷 | 性质 |
 | --- | --- |
@@ -211,6 +211,10 @@ pwsh -File tools/phase8/run_windows_acceptance.ps1 -SkipIntegrationTests
 | `ReorderableListView` 用 `onReorderItem` 时手动减一会多减一次 | brief 的用例只做向上拖动，测不到 |
 | 7 个屏显开关只点过 `mini` → 写死 id 的实现全绿 | 回归锁为空 |
 | G12 门禁比实现更严 → 正确实现反而红 | 门禁假失败 |
+| 屏显时钟每秒 `setState` → 既有套件的 `pumpAndSettle(≥1s)` 永不返回 | 3 个套件在 `10:09` 超时；**门禁从未跑过它们** |
+| 控制浮层 3 秒自动隐藏后 `IgnorePointer` 吃掉点击 | `tester.tap` 只打 warning，断言以「找不到」失败，看不出真因 |
+| G11 声称「含在 G2 的全量 `flutter test` 里」 | `flutter test` 不含 `integration_test/`——**空头支票** |
+| 第一版悬停保持包在 `Positioned.fill` 上 → 控制条永不隐藏 | 自造缺陷，已回退（`01` §4.5 落地状态） |
 
 ### 11.3 已知的遗留与待签字
 
@@ -218,6 +222,7 @@ pwsh -File tools/phase8/run_windows_acceptance.ps1 -SkipIntegrationTests
 | --- | --- |
 | 分隔线颜色用 `colorScheme.outline` 而非 `dividerColor` | **待设计签字**。`dividerColor`（`#232C46@0.72`）压在视频上实测约 1.2:1，视觉上等于看不见；`outline`（`#3A4560`）约 1.9:1。这是对 `DESIGN.md` The Hairline Rule 的**有意例外**——该规则针对主题表面，而本浮层坐在视频帧上。改回是一行的事。 |
 | 直播状态屏显 | 仅从删除中救回，**未新增**设计文档与测试覆盖 |
-| 鼠标移动唤醒控制栏（`design/01` §4.5） | 未实现（可接受降级：单击唤醒是主路径） |
+| 鼠标移动唤醒控制栏（`design/01` §4.5） | **已实现**（第 1 层 `MouseRegion(onHover:)`，只在隐藏态唤醒；`test/phase8_controls_hover_test.dart` 锁两侧） |
+| 「指针停在浮层上不隐藏」（`design/01` §4.4 隐藏时机） | **未实现**。控制浮层是 `Positioned.fill`，`onEnter` 等于「指针在窗口内」，无条件保持会永不隐藏（第一版实现踩到并回退）。要做对需把 `MouseRegion` 收缩到顶栏/底栏两条实际条面 |
 | `_formatDuration` 在 `player_osd.dart` 与 `player_page.dart` 各一份 | 两份 7 行纯函数，均有测试覆盖；`osd_diagnostics.dart` 里还有一份同体但异名的 `_duration` |
 | 拖动到边缘自动滚动（按钮配置页） | 不支持（9 个两行 `ListTile` 在 600px 高窗口会溢出，但真实桌面窗口更高） |
