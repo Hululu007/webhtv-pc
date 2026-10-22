@@ -1,6 +1,8 @@
 # Build outputs
 build/
 **/build/
+# CI/本地发布打包产物（scripts/package_windows.ps1）
+/dist/
 .dart_tool/
 .gradle/
 .idea/

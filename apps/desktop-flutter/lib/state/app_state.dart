@@ -94,7 +94,11 @@ import 'search_state.dart';
 import 'sync_state.dart';
 import 'tmdb_state.dart';
 
-const String appVersion = '0.1.0';
+/// 版本号：CI 用 `--dart-define=APP_VERSION=<pubspec version>` 注入，
+/// 使 exe 文件版本、启动日志、备份/恢复清单与发布 tag 同一口径（§20.1）；
+/// 本地构建与测试保留默认值 `0.1.0`，行为不变。
+const String appVersion =
+    String.fromEnvironment('APP_VERSION', defaultValue: '0.1.0');
 const String appBuildFlavor = 'MVP-A (Windows)';
 
 /// 启动诊断信息，用于日志页与验收证据（§20.3 “启动日志记录版本、平台、
