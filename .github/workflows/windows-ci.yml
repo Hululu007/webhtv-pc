@@ -111,16 +111,34 @@ jobs:
         shell: pwsh
         run: dart analyze
 
-      - name: Unit tests
-        working-directory: apps/desktop-flutter
-        shell: pwsh
-        timeout-minutes: 30
-        run: flutter test
-
+      # 必须排在单测之前：13 个 phase8 播放器用例会真实实例化 media_kit 的
+      # NativePlayer，而 media_kit 在 Windows 上要求 `libmpv-2.dll` 位于
+      # `%PATH%`。该 DLL 由 media_kit_libs_windows_video 的 CMake 在**原生构建时**
+      # 下载并解压到 build/windows/x64/libmpv/，所以只有先构建才有它。
+      #
+      # 本地能跑通只是因为开发机 PATH 里恰好有 libmpv 目录（如 F:/Tools/libmpv），
+      # CI runner 没有——这是一处真实的隐性环境依赖，必须在流水线里显式消除，
+      # 不能靠跳过用例掩盖。
       - name: Build Windows release
         working-directory: apps/desktop-flutter
         shell: pwsh
         run: flutter build windows --release "--dart-define=APP_VERSION=${{ steps.meta.outputs.version }}"
+
+      - name: Unit tests
+        working-directory: apps/desktop-flutter
+        shell: pwsh
+        timeout-minutes: 30
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $libmpv = Get-ChildItem -Path 'build/windows/x64' -Filter 'libmpv-2.dll' -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $libmpv) {
+            throw '未找到 libmpv-2.dll：media_kit 的播放器用例无法运行（Release 构建应已下载解压它）。'
+          }
+          Write-Host "libmpv：$($libmpv.FullName)"
+          $env:PATH = "$($libmpv.Directory.FullName);$env:PATH"
+          flutter test
 
       - name: Package portable zip
         shell: pwsh
