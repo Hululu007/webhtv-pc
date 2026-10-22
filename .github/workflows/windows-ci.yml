@@ -4,12 +4,21 @@ name: Windows CI
 # 产物只作为 workflow artifact 保留，不发 Release（发布见 windows-release.yml）。
 #
 # 设计依据：docs/webhtv-pc-design.md §20（构建与打包）、§19.1（CI 矩阵）。
-# 为什么不在每次 dev 分支推送都跑：单测约 13 分钟、Windows runner 计费更高；
-# 需要时用 workflow_dispatch 手动触发。
+#
+# 关于 dev* 分支：
+#   GitHub 只把**默认分支（main）**上的工作流登记到 Actions API，因此
+#   `workflow_dispatch` / `gh workflow list` 在 main 还没有本文件时不可用。
+#   而 push 事件只要求文件存在于被推送的那个 ref，所以 dev* 推送能正常触发。
+#   main 合入本文件后，workflow_dispatch 与 GitHub 页面的 Run workflow 即可用。
+#
+# 单测约 13 分钟、Windows runner 计费更高，因此不覆盖所有分支：
+# 只跑 main、dev* 与 PR，其它分支用 workflow_dispatch（main 具备后）。
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'dev*'
   pull_request:
     branches: [main]
   workflow_dispatch:
