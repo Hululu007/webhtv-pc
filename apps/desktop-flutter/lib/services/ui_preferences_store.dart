@@ -18,14 +18,30 @@
 /// - `historyClickAction`：**点击历史记录的行为**（`detail` 进详情页 /
 ///   `play` 直接播放，上游 `HistoryActivity#onItemClick` 是直接播放，
 ///   PC 端默认改为进详情页，见 `docs/phase6/design/01` §4.1）。
+///
+/// 另外管理 `settings.json` **顶层** `player` 段（Phase 9）：
+/// 播放参数（缓冲/硬解/自动连播/失败回退/预加载/片头片尾开关/LUT）。
+/// 放在顶层而不是 `ui` 里，是因为它属于播放行为而不是界面偏好，日后
+/// 同步到安卓时也是独立键。
 library;
 
 import 'dart:convert';
 import 'dart:io';
 
 import '../core/history_view.dart';
+import '../core/danmaku_settings.dart';
+import '../core/danmaku_style.dart';
+import '../core/doh_settings.dart';
+import '../core/following.dart';
+import '../core/live_settings.dart';
+import '../core/subtitle_settings.dart';
 import '../core/osd_config.dart';
 import '../core/player_buttons.dart';
+import '../core/outbound_proxy.dart';
+import '../core/parse_failover.dart';
+import '../core/player_options.dart';
+import '../core/site_group_rules.dart';
+import '../core/site_order.dart';
 import 'log_service.dart';
 import 'settings_file.dart';
 
@@ -93,6 +109,53 @@ class UiPreferencesStore {
   /// 按钮隐藏集的**显式**设置；null 表示从未设置过。
   Set<String>? _buttonHidden;
 
+  /// 播放参数的**显式**设置；null 表示从未设置过（用默认值）。
+  ///
+  /// Phase 9 起新增。默认值必须等价于 Phase 0–8 的行为，见
+  /// `docs/phase9/design/01` §5。
+  PlayerOptions? _playerOptions;
+
+  /// 直播设置的**显式**设置；null 表示从未设置过（用默认值）。
+  LiveSettings? _liveSettings;
+
+  /// 字幕源设置的**显式**设置；null 表示从未设置过（默认全关）。
+  SubtitleSettings? _subtitleSettings;
+
+  /// 弹幕库设置的**显式**设置；null 表示从未设置过（默认全关）。
+  DanmakuSettings? _danmakuSettings;
+
+  /// 弹幕显示样式的**显式**设置；null 表示从未设置过（等价 Phase 3–8）。
+  ///
+  /// Phase 9 P0-7 新增。与 `_danmakuSettings`（库地址/自动搜索）分开存：
+  /// 一个是「去哪找弹幕」，一个是「怎么画」。
+  DanmakuStyle? _danmakuStyle;
+
+  /// 站点排序偏好的**显式**设置；null 表示从未设置过（配置顺序）。
+  SiteOrderSettings? _siteOrder;
+
+  /// 解析接口失败切换的**显式**设置；null 表示从未设置过（关闭）。
+  ParseFailoverSettings? _parseFailover;
+
+  /// 广告过滤总开关的**显式**设置；null 表示从未设置过（默认开启）。
+  bool? _adBlockEnabled;
+
+  /// 站点分组规则的**显式**设置；null 表示从未设置过（4 条内置全开）。
+  SiteGroupSettings? _siteGroupSettings;
+
+  /// 出站代理的**显式**设置；null 表示从未设置过（关闭）。
+  OutboundProxySettings? _outboundProxy;
+
+  /// DoH 的**显式**设置；null 表示从未设置过（关闭）。
+  ///
+  /// Phase 9 P2-8 新增。与配置文件的 `doh`（服务商列表）分开存。
+  DohSettings? _dohSettings;
+
+  /// 隐身模式的**显式**设置；null 表示从未设置过（关闭）。
+  bool? _incognito;
+
+  /// 追番设置的**显式**设置；null 表示从未设置过（自动检查关闭）。
+  FollowingSettings? _followingSettings;
+
   bool _loaded = false;
 
   /// 搜索历史上限（上游安卓 `RecordAdapter.checkToAdd` 同为 10）。
@@ -159,6 +222,80 @@ class UiPreferencesStore {
   /// 用户是否显式设置过按钮排版（决定要不要写盘）。
   bool get hasExplicitPlayerButtons =>
       _buttonOrder != null || _buttonHidden != null;
+
+  /// 生效的播放参数。
+  PlayerOptions get playerOptions =>
+      (_playerOptions ?? const PlayerOptions.defaults()).normalized();
+
+  /// 用户是否显式设置过播放参数。
+  bool get hasExplicitPlayerOptions => _playerOptions != null;
+
+  /// 生效的直播设置。
+  LiveSettings get liveSettings => _liveSettings ?? const LiveSettings.defaults();
+
+  /// 用户是否显式设置过直播设置。
+  bool get hasExplicitLiveSettings => _liveSettings != null;
+
+  /// 生效的字幕源设置。
+  SubtitleSettings get subtitleSettings =>
+      _subtitleSettings ?? SubtitleSettings();
+
+  /// 用户是否显式设置过字幕源。
+  bool get hasExplicitSubtitleSettings => _subtitleSettings != null;
+
+  /// 生效的弹幕库设置。
+  DanmakuSettings get danmakuSettings =>
+      _danmakuSettings ?? const DanmakuSettings.defaults();
+
+  /// 用户是否显式设置过弹幕库。
+  bool get hasExplicitDanmakuSettings => _danmakuSettings != null;
+
+  /// 生效的弹幕显示样式。
+  DanmakuStyle get danmakuStyle => _danmakuStyle ?? DanmakuStyle.defaults;
+
+  /// 用户是否显式设置过弹幕显示样式。
+  bool get hasExplicitDanmakuStyle => _danmakuStyle != null;
+
+  /// 生效的站点排序偏好。
+  SiteOrderSettings get siteOrder =>
+      _siteOrder ?? const SiteOrderSettings.defaults();
+
+  /// 用户是否显式设置过站点排序。
+  bool get hasExplicitSiteOrder => _siteOrder != null;
+
+  /// 生效的广告过滤开关（默认开启：配置里写了规则才生效，不写就无效果）。
+  bool get adBlockEnabled => _adBlockEnabled ?? true;
+
+  /// 生效的站点分组规则。
+  SiteGroupSettings get siteGroupSettings =>
+      _siteGroupSettings ?? const SiteGroupSettings.defaults();
+
+  /// 生效的出站代理设置。
+  OutboundProxySettings get outboundProxy =>
+      _outboundProxy ?? const OutboundProxySettings.defaults();
+
+  /// 生效的 DoH 设置（默认关闭）。
+  DohSettings get dohSettings => _dohSettings ?? DohSettings.defaults;
+
+  /// 是否显式设置过 DoH。
+  bool get hasExplicitDohSettings => _dohSettings != null;
+
+  /// 隐身模式（默认关闭；关闭时行为与 Phase 0–8 一致）。
+  bool get incognito => _incognito ?? false;
+
+  /// 是否显式设置过隐身模式。
+  bool get hasExplicitIncognito => _incognito != null;
+
+  /// 生效的追番设置。
+  FollowingSettings get followingSettings =>
+      _followingSettings ?? FollowingSettings.defaults;
+
+  /// 是否显式设置过追番。
+  bool get hasExplicitFollowingSettings => _followingSettings != null;
+
+  /// 生效的解析接口失败切换设置。
+  ParseFailoverSettings get parseFailover =>
+      (_parseFailover ?? const ParseFailoverSettings.defaults()).normalized();
 
   /// 是否已成功读取过磁盘内容。
   bool get loaded => _loaded;
@@ -256,6 +393,57 @@ class UiPreferencesStore {
               _buttonHidden = normalizeButtonHidden(hidden);
             }
           }
+        }
+        // 顶层段（Phase 9）：与 `ui` 段同级，不能被 `ui` 是否存在影响。
+        final player = decoded['player'];
+        if (player is Map && player.isNotEmpty) {
+          _playerOptions = PlayerOptions.fromJson(player);
+        }
+        final live = decoded['live'];
+        if (live is Map && live.isNotEmpty) {
+          _liveSettings = LiveSettings.fromJson(live);
+        }
+        final subtitles = decoded['subtitles'];
+        if (subtitles is Map && subtitles.isNotEmpty) {
+          _subtitleSettings = SubtitleSettings.fromJson(subtitles);
+        }
+        final danmaku = decoded['danmaku'];
+        if (danmaku is Map && danmaku.isNotEmpty) {
+          _danmakuSettings = DanmakuSettings.fromJson(danmaku);
+        }
+        final danmakuDisplay = decoded['danmakuDisplay'];
+        if (danmakuDisplay is Map && danmakuDisplay.isNotEmpty) {
+          _danmakuStyle = DanmakuStyle.fromJson(danmakuDisplay);
+        }
+        final siteOrder = decoded['siteOrder'];
+        if (siteOrder is Map && siteOrder.isNotEmpty) {
+          _siteOrder = SiteOrderSettings.fromJson(siteOrder);
+        }
+        final parseFailover = decoded['parseFailover'];
+        if (parseFailover is Map && parseFailover.isNotEmpty) {
+          _parseFailover = ParseFailoverSettings.fromJson(parseFailover);
+        }
+        final adBlock = decoded['adBlock'];
+        if (adBlock is Map && adBlock['enabled'] is bool) {
+          _adBlockEnabled = adBlock['enabled'] as bool;
+        }
+        final siteGroup = decoded['siteRules'];
+        if (siteGroup is Map && siteGroup.isNotEmpty) {
+          _siteGroupSettings = SiteGroupSettings.fromJson(siteGroup);
+        }
+        final outbound = decoded['outboundProxy'];
+        if (outbound is Map && outbound.isNotEmpty) {
+          _outboundProxy = OutboundProxySettings.fromJson(outbound);
+        }
+        final doh = decoded['doh'];
+        if (doh is Map && doh.isNotEmpty) {
+          _dohSettings = DohSettings.fromJson(doh);
+        }
+        final incognito = decoded['incognito'];
+        if (incognito is bool) _incognito = incognito;
+        final following = decoded['following'];
+        if (following is Map && following.isNotEmpty) {
+          _followingSettings = FollowingSettings.fromJson(following);
         }
       }
       _loaded = true;
@@ -386,6 +574,99 @@ class UiPreferencesStore {
       return Future.value(true);
     }
     _buttonHidden = normalized;
+    return _persist();
+  }
+
+  /// 记住出站代理设置。
+  Future<bool> rememberOutboundProxy(OutboundProxySettings settings) {
+    if (_outboundProxy == settings) return Future.value(true);
+    _outboundProxy = settings;
+    return _persist();
+  }
+
+  /// 记住 DoH 设置。
+  Future<bool> rememberDohSettings(DohSettings settings) {
+    if (_dohSettings == settings) return Future.value(true);
+    _dohSettings = settings;
+    return _persist();
+  }
+
+  /// 记住隐身模式。
+  Future<bool> rememberIncognito(bool incognito) {
+    if (_incognito == incognito) return Future.value(true);
+    _incognito = incognito;
+    return _persist();
+  }
+
+  /// 记住追番设置。
+  Future<bool> rememberFollowingSettings(FollowingSettings settings) {
+    if (_followingSettings == settings) return Future.value(true);
+    _followingSettings = settings;
+    return _persist();
+  }
+
+  /// 记住站点分组规则。
+  Future<bool> rememberSiteGroupSettings(SiteGroupSettings settings) {
+    if (_siteGroupSettings == settings) return Future.value(true);
+    _siteGroupSettings = settings;
+    return _persist();
+  }
+
+  /// 记住广告过滤开关。
+  Future<bool> rememberAdBlockEnabled(bool enabled) {
+    if (_adBlockEnabled == enabled) return Future.value(true);
+    _adBlockEnabled = enabled;
+    return _persist();
+  }
+
+  /// 记住解析接口失败切换设置。
+  Future<bool> rememberParseFailover(ParseFailoverSettings settings) {
+    final normalized = settings.normalized();
+    if (_parseFailover == normalized) return Future.value(true);
+    _parseFailover = normalized;
+    return _persist();
+  }
+
+  /// 记住站点排序偏好。
+  Future<bool> rememberSiteOrder(SiteOrderSettings settings) {
+    if (_siteOrder == settings) return Future.value(true);
+    _siteOrder = settings;
+    return _persist();
+  }
+
+  /// 记住弹幕库设置。
+  Future<bool> rememberDanmakuSettings(DanmakuSettings settings) {
+    if (_danmakuSettings == settings) return Future.value(true);
+    _danmakuSettings = settings;
+    return _persist();
+  }
+
+  /// 记住弹幕显示样式。
+  Future<bool> rememberDanmakuStyle(DanmakuStyle style) {
+    if (_danmakuStyle == style) return Future.value(true);
+    _danmakuStyle = style;
+    return _persist();
+  }
+
+  /// 记住字幕源设置。
+  Future<bool> rememberSubtitleSettings(SubtitleSettings settings) {
+    if (_subtitleSettings == settings) return Future.value(true);
+    _subtitleSettings = settings;
+    return _persist();
+  }
+
+  /// 记住直播设置。
+  Future<bool> rememberLiveSettings(LiveSettings settings) {
+    if (_liveSettings == settings) return Future.value(true);
+    _liveSettings = settings;
+    return _persist();
+  }
+
+  /// 记住播放参数。归一化后比较，避免大小写/空格造成无意义写盘。
+  Future<bool> rememberPlayerOptions(PlayerOptions options) {
+    final normalized = options.normalized();
+    if (_playerOptions == normalized) return Future.value(true);
+    _playerOptions = normalized;
     return _persist();
   }
 
@@ -520,6 +801,64 @@ class UiPreferencesStore {
           };
         }
         root['ui'] = ui;
+        // 播放参数：只有显式设置过才写（缺席 = 默认，与 ui 段同一口径）。
+        final player = _playerOptions;
+        if (player != null) root['player'] = player.normalized().toJson();
+        final live = _liveSettings;
+        if (live != null) root['live'] = live.toJson();
+        final subtitles = _subtitleSettings;
+        if (subtitles != null) root['subtitles'] = subtitles.toJson();
+        final danmaku = _danmakuSettings;
+        if (danmaku != null) root['danmaku'] = danmaku.toJson();
+        final danmakuStyle = _danmakuStyle;
+        if (danmakuStyle != null) {
+          // 显式改回默认时把旧段删掉，避免留下「看起来设置过」的脏数据。
+          if (danmakuStyle.isDefault) {
+            root.remove('danmakuDisplay');
+          } else {
+            root['danmakuDisplay'] = danmakuStyle.toJson();
+          }
+        }
+        final siteOrder = _siteOrder;
+        if (siteOrder != null) root['siteOrder'] = siteOrder.toJson();
+        final parseFailover = _parseFailover;
+        if (parseFailover != null) {
+          root['parseFailover'] = parseFailover.toJson();
+        }
+        final adBlockEnabled = _adBlockEnabled;
+        if (adBlockEnabled != null) {
+          root['adBlock'] = <String, Object?>{'enabled': adBlockEnabled};
+        }
+        final siteGroup = _siteGroupSettings;
+        if (siteGroup != null) root['siteRules'] = siteGroup.toJson();
+        final outbound = _outboundProxy;
+        if (outbound != null) root['outboundProxy'] = outbound.toJson();
+        final doh = _dohSettings;
+        if (doh != null) {
+          // 显式改回默认（关闭且无端点）时删段，避免留下「看起来设置过」的脏数据。
+          if (doh.isDefault) {
+            root.remove('doh');
+          } else {
+            root['doh'] = doh.toJson();
+          }
+        }
+        final following = _followingSettings;
+        if (following != null) {
+          if (following.isDefault) {
+            root.remove('following');
+          } else {
+            root['following'] = following.toJson();
+          }
+        }
+        final incognito = _incognito;
+        if (incognito != null) {
+          // 默认值不写盘（缺席 = false）；显式关掉时删掉旧键。
+          if (incognito) {
+            root['incognito'] = true;
+          } else {
+            root.remove('incognito');
+          }
+        }
         return true;
       },
     );

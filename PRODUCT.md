@@ -59,9 +59,14 @@ Android 模拟器壳、单站点播放器都无法诚实地复制这套机制。
 
 ## Capabilities and Constraints
 
-已实现（Phase 0–5）：配置导入与多配置、站点浏览/分类/筛选、搜索、详情与多线路多剧集、
-播放器（media-kit，含倍速/全屏/进度恢复/线路切换/字幕/画面比例）、直播与 EPG、弹幕、
-TMDB 元数据、安卓桥接与同步、诊断与日志。
+已实现（Phase 0–8）：配置导入与多配置、站点浏览/分类/筛选、搜索、详情与多线路多剧集、
+播放器（media-kit，含倍速/全屏/进度恢复/线路切换/字幕/弹幕/画面比例/四层浮层/屏显/
+右键菜单/按钮排版）、直播与 EPG、TMDB 元数据、AI 集季识别、安卓桥接与实时同步、诊断与日志、
+主题开关与配置品牌字段（wallpaper/logo）呈现。
+
+**已确认的缺口**：与安卓版 `webtv2` 的逐项对比、迁移方案与验收条件见
+`docs/phase9/README.md`。当前判定为 34 项待迁移（P0 8 / P1 10 / P2 9 / P3 7）与 8 类
+明确不迁移；不迁移项必须在 UI 与对外说明中如实披露，不得用「对齐安卓」含糊带过。
 
 硬约束（产品边界，不得突破）：
 
@@ -73,11 +78,10 @@ TMDB 元数据、安卓桥接与同步、诊断与日志。
 
 UI 相关约束：
 
-- 配置协议携带 `wallpaper` / `logo` / `notice` 三个品牌字段。当前 `wallpaper` 与 `logo`
-  被解析并持久化（`core/config_parser.dart`、`core/protocol.dart`、`services/storage.dart`），
-  但 `lib/ui/` 从未呈现。**已确认：必须让它们真正生效**——配置提供的品牌优先级高于 PC 端自身身份。
-- 主题当前完全跟随系统；`services/ui_preferences_store.dart` 只存 `lastSiteKey` 与
-  `videoFitModes`，没有主题偏好。**已确认：要新增用户可见的主题开关并持久化。**
+- 配置协议携带 `wallpaper` / `logo` / `notice` 三个品牌字段；`wallpaper` 与 `logo`
+  已真正生效（`lib/ui/app.dart`），配置提供的品牌优先级高于 PC 端自身身份。
+- 主题开关已实现（暗色 / 亮色 / 跟随系统）并持久化（`services/ui_preferences_store.dart`），
+  默认暗色。
 
 ## Brand Commitments
 

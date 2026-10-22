@@ -1,5 +1,5 @@
 #EXTM3U url-tvg="http://127.0.0.1:18080/live/epg.xml"
-#EXTINF:-1 tvg-id="cctv1" tvg-name="CCTV1" tvg-logo="http://127.0.0.1:18080/live/logo/cctv1.png" tvg-chno="1" group-title="央视",CCTV-1 综合
+#EXTINF:-1 tvg-id="cctv1" tvg-name="CCTV1" tvg-logo="http://127.0.0.1:18080/live/logo/cctv1.png" tvg-chno="1" group-title="央视" catchup="default" catchup-source="http://127.0.0.1:18080/media/sample.m3u8?start=${(b)timestamp}&end=${(e)timestamp}",CCTV-1 综合
 http://127.0.0.1:18080/media/sample.m3u8
 #EXTINF:-1 tvg-id="cctv2" tvg-name="CCTV2" tvg-logo="http://127.0.0.1:18080/live/logo/cctv2.png" tvg-chno="2" group-title="央视",CCTV-2 财经
 http://127.0.0.1:18080/media/sample.m3u8

@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 
 import '../core/app_error.dart';
 import '../core/epg.dart';
+import '../core/live_catchup.dart';
 import '../core/protocol.dart';
 import '../services/live_service.dart';
 import '../state/app_state.dart';
@@ -224,7 +225,121 @@ class _LivePageState extends State<LivePage> {
             sourceName: _selectedSourceName ?? 'live',
             startLine: startLine,
           ),
+          onLiveSourceFallback: () => _fallbackSourceRequest(channel),
         ),
+      ),
+    );
+  }
+
+  /// 源级回退：在其他已加载/可加载的直播源里找同名频道。
+  ///
+  /// 归一化只去掉常见清晰度后缀与标点，不做模糊匹配——宁可找不到，
+  /// 也不要把「CCTV5」切到「CCTV5+」。
+  Future<PlaybackRequest?> _fallbackSourceRequest(LiveChannel channel) async {
+    if (!_state.liveSettings.sourceFallback) return null;
+    final current = _selectedSourceName;
+    for (final source in _sources) {
+      if (source.name == current) continue;
+      var result = _states[source.name]?.result;
+      if (result == null) {
+        try {
+          result = await _state.liveService.load(source);
+          if (!mounted) return null;
+          setState(() {
+            _states[source.name] = _SourceState(result: result);
+          });
+        } catch (error) {
+          _state.log.warning(
+            '回退源加载失败 name=${source.name} $error',
+            scope: 'live',
+          );
+          continue;
+        }
+      }
+      final match = _findChannel(result.playlist, channel.name);
+      if (match == null) continue;
+      setState(() => _preview = match);
+      return LivePage.requestForChannel(match, sourceName: source.name);
+    }
+    return null;
+  }
+
+  LiveChannel? _findChannel(LivePlaylist playlist, String name) {
+    final target = _normalizeChannelName(name);
+    if (target.isEmpty) return null;
+    for (final group in playlist.groups) {
+      for (final channel in group.channels) {
+        if (channel.urls.isEmpty) continue;
+        if (_normalizeChannelName(channel.name) == target) return channel;
+      }
+    }
+    return null;
+  }
+
+  String _normalizeChannelName(String raw) {
+    var text = raw.trim().toLowerCase();
+    text = text.replaceAll(RegExp(r'[（(][^)）]*[)）]'), '');
+    text = text.replaceAll(
+      RegExp(r'高清|超清|蓝光|4k|8k|hd|fhd|uhd|频道'),
+      '',
+    );
+    return text.replaceAll(RegExp(r'[^0-9a-z一-鿿]'), '');
+  }
+
+  /// 回看：用节目单的起止时间 + catchup 模板生成地址。
+  ///
+  /// 没有 catchup 参数时不生成地址（入口本身也不显示）。
+  Future<void> _playCatchup(LiveChannel channel, EpgProgram program) async {
+    final source = _sources.firstWhere(
+      (item) => item.name == _selectedSourceName,
+      orElse: () => _sources.first,
+    );
+    final spec = channel.catchup.isEmpty ? source.catchup : channel.catchup;
+    final channelUrl = channel.urls.isEmpty ? '' : channel.urls.first;
+    final url = formatCatchupUrl(
+      spec: spec,
+      channelUrl: channelUrl,
+      startMs: program.startMs,
+      endMs: program.stopMs,
+    );
+    if (url == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('该节目无法回看：回看参数不完整')),
+      );
+      _state.log.warning(
+        '回看地址生成失败 channel=${channel.name} program=${program.title}',
+        scope: 'live',
+      );
+      return;
+    }
+    _state.log.info(
+      '回看 channel=${channel.name} program=${program.title} '
+      'url=${redactUrl(url)}',
+      scope: 'live',
+    );
+    final request = PlaybackRequest(
+      url: url,
+      title: '${channel.name} · ${program.title}',
+      siteKey: source.name,
+      vodId: channel.name,
+      vodName: channel.name,
+      episodeName: program.title,
+      flag: '回看',
+      playLines: [
+        VodPlayLine(
+          flag: '回看',
+          episodes: [VodEpisode(name: program.title, url: url)],
+        ),
+      ],
+      headers: channel.header.toJson().map(
+        (key, value) => MapEntry(key, value.toString()),
+      ),
+      directUrl: true,
+    );
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PlayerPage(state: _state, request: request),
       ),
     );
   }
@@ -291,6 +406,8 @@ class _LivePageState extends State<LivePage> {
               preview: _preview,
               onPreview: (channel) => setState(() => _preview = channel),
               onPlay: _play,
+              defaultCatchup: selected.catchup,
+              onCatchup: _playCatchup,
             ),
             _ => const SizedBox.shrink(),
           },
@@ -409,6 +526,8 @@ class _PlaylistView extends StatelessWidget {
     required this.preview,
     required this.onPreview,
     required this.onPlay,
+    required this.defaultCatchup,
+    required this.onCatchup,
   });
 
   final LivePlaylist playlist;
@@ -427,6 +546,10 @@ class _PlaylistView extends StatelessWidget {
   final LiveChannel? preview;
   final ValueChanged<LiveChannel> onPreview;
   final void Function(LiveChannel channel, {int startLine}) onPlay;
+
+  /// 源级默认回看参数（频道未声明时继承）。
+  final CatchupSpec defaultCatchup;
+  final void Function(LiveChannel channel, EpgProgram program) onCatchup;
 
   @override
   Widget build(BuildContext context) {
@@ -476,6 +599,10 @@ class _PlaylistView extends StatelessWidget {
                     guide: guide,
                     nowMs: nowMs,
                     onPlay: (index) => onPlay(preview!, startLine: index),
+                    catchup: preview!.catchup.isEmpty
+                        ? defaultCatchup
+                        : preview!.catchup,
+                    onCatchup: (program) => onCatchup(preview!, program),
                   ),
                 ),
               ],
@@ -658,12 +785,18 @@ class _ChannelDetail extends StatelessWidget {
     required this.guide,
     required this.nowMs,
     required this.onPlay,
+    required this.catchup,
+    required this.onCatchup,
   });
 
   final LiveChannel channel;
   final EpgGuide? guide;
   final int nowMs;
   final ValueChanged<int> onPlay;
+
+  /// 生效的回看参数（频道级优先，源级兜底）。
+  final CatchupSpec catchup;
+  final ValueChanged<EpgProgram> onCatchup;
 
   @override
   Widget build(BuildContext context) {
@@ -721,7 +854,12 @@ class _ChannelDetail extends StatelessWidget {
           Expanded(
             child: TabBarView(
               children: [
-                _ProgramList(programs: programs, nowMs: nowMs),
+                _ProgramList(
+                  programs: programs,
+                  nowMs: nowMs,
+                  catchup: catchup,
+                  onCatchup: onCatchup,
+                ),
                 _LineList(channel: channel, onPlay: onPlay),
               ],
             ),
@@ -734,10 +872,17 @@ class _ChannelDetail extends StatelessWidget {
 
 /// 节目单列表：当前节目高亮，已播出置灰（§13.3「显示当前节目」）。
 class _ProgramList extends StatelessWidget {
-  const _ProgramList({required this.programs, required this.nowMs});
+  const _ProgramList({
+    required this.programs,
+    required this.nowMs,
+    required this.catchup,
+    required this.onCatchup,
+  });
 
   final List<EpgProgram> programs;
   final int nowMs;
+  final CatchupSpec catchup;
+  final ValueChanged<EpgProgram> onCatchup;
 
   @override
   Widget build(BuildContext context) {
@@ -753,12 +898,21 @@ class _ProgramList extends StatelessWidget {
             : finished
             ? theme.textTheme.bodySmall?.color
             : null;
+        final canCatchup = finished && !catchup.isEmpty;
         return ListTile(
           dense: true,
           selected: live,
           leading: live
               ? Icon(Icons.play_circle_fill, size: 18, color: color)
               : null,
+          trailing: canCatchup
+              ? IconButton(
+                  tooltip: '回看 ${program.title}',
+                  icon: const Icon(Icons.replay, size: 18),
+                  onPressed: () => onCatchup(program),
+                )
+              : null,
+          onTap: canCatchup ? () => onCatchup(program) : null,
           title: Text(
             program.title,
             maxLines: 2,

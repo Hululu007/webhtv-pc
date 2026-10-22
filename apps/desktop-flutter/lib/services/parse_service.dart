@@ -25,6 +25,7 @@ import 'package:http/http.dart' as http;
 
 import '../core/app_error.dart';
 import '../core/http_api.dart';
+import '../core/parse_failover.dart';
 import '../core/parse_runtime.dart';
 import '../core/protocol.dart';
 
@@ -127,6 +128,50 @@ class ParseService {
         );
     }
     return result;
+  }
+
+  /// 执行一次解析；[selection] 失败且启用失败切换时，按配置顺序尝试其他接口。
+  ///
+  /// - 只对「解析类错误」重试（网络/HTTP/解码/非法/空结果）；
+  /// - 非解析错误（例如调用方 bug）立即上抛，不做无意义重试；
+  /// - 全部失败时抛出**最后一个**错误，保留可诊断原因。
+  Future<ParseRunResult> runWithFallback({
+    required ParseSelection selection,
+    required List<ParseEntry> entries,
+    required String webUrl,
+    String? flag,
+    String? source,
+    ParseFailoverSettings failover = const ParseFailoverSettings.defaults(),
+  }) async {
+    final attempts = [
+      selection,
+      ...parseFailoverSelections(
+        primary: selection,
+        entries: entries,
+        settings: failover,
+      ),
+    ];
+    Object? lastError;
+    for (var index = 0; index < attempts.length; index++) {
+      final attempt = attempts[index];
+      try {
+        return await run(
+          selection: attempt,
+          entries: entries,
+          webUrl: webUrl,
+          flag: flag,
+          source: source,
+        );
+      } catch (error) {
+        lastError = error;
+        final retryable = isParseError(error);
+        if (!retryable || index == attempts.length - 1) rethrow;
+      }
+    }
+    // 理论上不可达；保留以免静态分析认为缺返回值。
+    throw lastError is AppError
+        ? lastError
+        : AppError(AppErrorKind.parseInvalid, '解析失败：$lastError');
   }
 
   /// type=1：`GET 解析器url + 目标url`（对齐 `jsonParse`）。

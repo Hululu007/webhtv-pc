@@ -8,7 +8,6 @@ import 'package:flutter/services.dart';
 
 import '../core/app_error.dart';
 import '../core/history_view.dart';
-import '../services/proxy_server.dart';
 import '../services/storage.dart';
 import '../services/tmdb_history.dart';
 import '../state/app_state.dart';
@@ -16,8 +15,13 @@ import '../core/protocol.dart';
 import 'app.dart';
 import 'browse_pages.dart';
 import 'common.dart';
-import 'player_page.dart';
+import 'playback_resume.dart';
 import 'tokens.dart';
+import 'viewing_report_page.dart';
+
+// `restoreHistoryPlaybackTarget` 已下沉到服务层（`proxy_server.dart`）；
+// 这里重新导出，保持既有测试与调用方的 import 不变。
+export '../services/proxy_server.dart' show restoreHistoryPlaybackTarget;
 
 /// 历史卡片的目标列宽。
 ///
@@ -164,6 +168,13 @@ class _HistoryPageState extends State<HistoryPage> {
               // 多选态下只留「取消」在工具栏，其余动作在下面的多选工具栏里。
               if (_view.mode == HistoryViewMode.none) ...[
                 // 列表为空时**两个删除入口都不渲染**（§3.2）。
+                OutlinedButton.icon(
+                  key: const ValueKey('history-viewing-report'),
+                  onPressed: _openViewingReport,
+                  icon: const Icon(Icons.insights_outlined),
+                  label: const Text('观影报告'),
+                ),
+                const SizedBox(width: 8),
                 if (items.isNotEmpty)
                   OutlinedButton.icon(
                     key: const ValueKey('history-bulk-delete'),
@@ -556,6 +567,17 @@ class _HistoryPageState extends State<HistoryPage> {
     setState(() => _view = _view.exitMode());
   }
 
+  /// 打开观影报告（Phase 9 · P2-2）。
+  ///
+  /// 空列表也允许进入：报告页有自己的空态与范围切换，不需要先有历史。
+  Future<void> _openViewingReport() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ViewingReportPage(state: _state),
+      ),
+    );
+  }
+
   /// 清空历史确认。
   ///
   /// 文案与逻辑**与既有实现一字不差**（`mvp_a_flow_test` 锁定「清空历史」），
@@ -616,23 +638,13 @@ class _HistoryPageState extends State<HistoryPage> {
     if (mounted) setState(() {});
   }
 
-  /// 把旧版本保存的本地代理地址还原成站点入口目标。
+  /// 从历史恢复播放（实现见 `playback_resume.dart`：崩溃恢复横幅共用同一条路径）。
   ///
-  /// 旧记录可能把 `http://127.0.0.1:<port>/p/<token>/<base64>` 写进了
-  /// `episode_id`。token 已失效，但路径最后一段仍包含原始站点目标，可以无损恢复。
-  String _historyEntryTarget(PlaybackHistory item) =>
-      restoreHistoryPlaybackTarget(item.episodeId);
-
-  /// 从历史恢复播放。
-  ///
-  /// 设计约束：历史只保存剧集地址与站点 key，恢复时需要重新解析播放决策，
-  /// 避免把过期直链直接交给播放器（§15.2 “继续播放”）。
-  /// 按「点击历史行为」设置分流（`docs/phase6/design/01` §4.1）。
-  ///
+  /// 按「点击历史行为」设置分流（`docs/phase6/design/01` §4.1）：
   /// 默认 `detail`（进详情页），`play` 则是既有行为（直接续播）。
   Future<void> _openBySetting(PlaybackHistory item) {
     return _state.historyClickAction == UiHistoryClickAction.play
-        ? _resume(item)
+        ? resumeHistoryEntry(context, _state, item)
         : _openDetail(item);
   }
 
@@ -674,71 +686,6 @@ class _HistoryPageState extends State<HistoryPage> {
         ),
       ),
     );
-  }
-
-  Future<void> _resume(PlaybackHistory item) async {
-    final state = _state;
-    final episodeTarget = _historyEntryTarget(item);
-    final result = state.config;
-    final site = result?.sites
-        .where((candidate) => candidate.key == item.siteKey)
-        .firstOrNull;
-    if (site == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('该记录所属站点已不在当前配置中：${item.siteKey}')),
-      );
-      return;
-    }
-    await state.selectSite(site);
-    try {
-      final decision = await state.resolvePlayback(
-        episodeTarget: episodeTarget,
-        flag: item.flag,
-        vodId: item.vodId,
-      );
-      if (decision == null || decision.url == null) {
-        throw AppError(
-          AppErrorKind.playbackUrlMissing,
-          '历史记录没有可用播放地址',
-          detail: episodeTarget,
-        );
-      }
-      if (!mounted) return;
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => PlayerPage(
-            state: state,
-            request: PlaybackRequest(
-              url: decision.url!,
-              // 续播后再次写进度时必须保留**同一个入口目标**，否则这一条历史会
-              // 被刚解析出的可播地址覆盖，下一次续播又失败。
-              episodeTarget: episodeTarget,
-              headers: decision.headers?.asRequestHeaders ?? const {},
-              title: item.vodName,
-              siteKey: item.siteKey,
-              vodId: item.vodId,
-              vodName: item.vodName,
-              episodeName: item.episodeName,
-              flag: item.flag,
-              startPosition: Duration(milliseconds: item.positionMs),
-              vodPic: item.vodPic,
-              // 外挂字幕（§10.3）/弹幕（§21 Phase 3）：历史恢复同样带入。
-              subtitles: decision.subs,
-              danmaku: decision.danmaku,
-              subtitleHeaders:
-                  decision.assetHeaders?.asRequestHeaders ?? const {},
-            ),
-          ),
-        ),
-      );
-    } catch (error) {
-      final failure = error is AppError
-          ? error
-          : AppError(AppErrorKind.unknown, '$error', cause: error);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(failure.userMessage)));
-    }
   }
 }
 
@@ -843,17 +790,6 @@ extension _FirstOrNull<T> on Iterable<T> {
     }
     return null;
   }
-}
-
-/// 兼容旧版本把本地代理地址写进历史记录的情况。
-String restoreHistoryPlaybackTarget(String episodeId) {
-  final uri = Uri.tryParse(episodeId);
-  if (uri != null && uri.path.startsWith(LocalProxyServer.pathPrefix)) {
-    final encoded = uri.pathSegments.isEmpty ? '' : uri.pathSegments.last;
-    final decoded = LocalProxyServer.decodeTarget(encoded);
-    if (decoded != null) return decoded.toString();
-  }
-  return episodeId;
 }
 
 /// 便于测试与诊断：把历史列表渲染成纯文本。

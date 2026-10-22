@@ -15,8 +15,9 @@
 /// 未实现形态（`*.py`、Android JAR）继续返回结构化不可用结论，
 /// UI 显示运行时未安装/未支持，不得显示空列表（§8.1、§9.9）。
 ///
-/// 注意：`api` 直接指向 `*.js` 的站点仍不可用——JS 站源必须经
-/// `spider-local:<key>` 注册（manifest 声明 runtime/权限/限制，§9.7、§9.8）。
+/// `api` 直接指向 `*.js` / `*.py` 的站点由 [DirectSpiderRegistrar] 自动落地为
+/// `spider-local` manifest（Phase 9 P1-7），再走同一条 sidecar 路径；
+/// 自动注册失败时如实报「运行时未就绪」，不静默降级。
 library;
 
 import 'dart:async';
@@ -301,6 +302,17 @@ class SpiderRouter {
   /// 运行时缓存键：同一 `type` 可能有不同 ABI，不能只用 type 做键。
   String _cacheKey(Site site) => '${site.type}:${site.api.trim().toLowerCase()}';
 
+  /// 直连 js/py 站点自动注册结果（`site.key` → 已注册 spider）。
+  ///
+  /// 由 `AppState` 在导入配置后填充；为空时直连站点按「未注册」如实报错。
+  Map<String, LocalSpider> directSpiders = const {};
+
+  /// 更新直连站点注册结果（并清理旧缓存，使下次判定拿到新结论）。
+  void setDirectSpiders(Map<String, LocalSpider> spiders) {
+    directSpiders = spiders;
+    _cache.clear();
+  }
+
   /// 带注册表的可用性判定（§8.1）。
   ///
   /// 本地 `spider-local:` 站点必须能在注册表中找到合法 manifest 才可用；
@@ -308,7 +320,21 @@ class SpiderRouter {
   /// 未安装运行时（无 Python/Node/Java）也必须如实报告而不是静默失败。
   SiteAvailability classifySite(Site site) {
     if (CspJvmBinding.matches(site.api)) return _classifyCsp(site);
-    if (!SpiderLocalBinding.matches(site.api)) return classify(site);
+    if (!SpiderLocalBinding.matches(site.api)) {
+      // 直连 js/py：已自动注册则按本地 spider 判定，否则如实报未就绪。
+      final direct = directSpiders[site.key];
+      if (direct != null) return _classifyLocal(direct);
+      final kindReason = _directUnavailableReason(site);
+      if (kindReason != null) {
+        return SiteAvailability(
+          available: false,
+          runtimeName: kindReason,
+          stage: 'Phase 3',
+          reason: '直连站源尚未注册（需要先成功下载并生成 manifest）',
+        );
+      }
+      return classify(site);
+    }
 
     final local = SpiderLocalBinding(registry: registry!).resolve(site.api);
     if (local == null) {
@@ -346,6 +372,53 @@ class SpiderRouter {
       available: true,
       runtimeName: '本地 Spider (webhtv-ipc-v1)',
       stage: 'MVP-B',
+      reason: 'runtime=${local.manifest.runtime} '
+          'capabilities=${local.manifest.capabilities.sorted.join(",")}',
+    );
+  }
+
+  /// 直连 js/py 站点的运行时可读名；非该形态返回 null。
+  static String? _directUnavailableReason(Site site) {
+    if (site.type != 3) return null;
+    final api = site.api.trim().toLowerCase();
+    if (api.endsWith('.js') || api.contains('.js?')) {
+      return 'Node Spider (tvbox-js-v1)';
+    }
+    if (api.endsWith('.py') || api.contains('.py?')) {
+      return 'Python Spider (tvbox-python-v1)';
+    }
+    return null;
+  }
+
+  /// 已注册的本地 spider 的可用性判定（与 `spider-local:` 同一口径）。
+  SiteAvailability _classifyLocal(LocalSpider local) {
+    if (!local.entryExists) {
+      return SiteAvailability(
+        available: false,
+        runtimeName: '本地 Spider (webhtv-ipc-v1)',
+        stage: 'Phase 3',
+        reason: 'manifest 声明的入口不存在：${local.manifest.entry}',
+      );
+    }
+    final command = LocalSpiderCommand.resolve(
+      spider: local,
+      hostPath: _hostPath(),
+      jsHostPath: jsHostPath,
+      jvmHostPath: jvmHostPath,
+      log: log,
+    );
+    if (command == null) {
+      return SiteAvailability(
+        available: false,
+        runtimeName: '本地 Spider (webhtv-ipc-v1)',
+        stage: 'Phase 3',
+        reason: '运行时 ${local.manifest.runtime} 未安装或不受支持',
+      );
+    }
+    return SiteAvailability(
+      available: true,
+      runtimeName: '本地 Spider (webhtv-ipc-v1)',
+      stage: 'Phase 3',
       reason: 'runtime=${local.manifest.runtime} '
           'capabilities=${local.manifest.capabilities.sorted.join(",")}',
     );
@@ -554,6 +627,26 @@ class SpiderRouter {
   }
 
   SiteRuntime _create(Site site) {
+    // 直连 js/py：已自动注册则复用本地 spider 运行时。
+    final direct = directSpiders[site.key];
+    if (direct != null && supervisor != null) {
+      final command = LocalSpiderCommand.resolve(
+        spider: direct,
+        hostPath: _hostPath(),
+        jsHostPath: jsHostPath,
+        jvmHostPath: jvmHostPath,
+        log: log,
+      );
+      if (command != null) {
+        return SidecarRuntime(
+          site: site,
+          spider: direct,
+          command: command,
+          supervisor: supervisor!,
+          log: log,
+        );
+      }
+    }
     // `csp_*`：桌面 JVM 站源，复用同一份 `webhtv-ipc-v1` sidecar 运行时（§9.3）。
     if (CspJvmBinding.matches(site.api)) {
       final binding = cspBinding;

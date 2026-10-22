@@ -5,6 +5,7 @@
 library;
 
 import 'dart:io';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,8 +14,12 @@ import 'package:window_manager/window_manager.dart';
 
 import '../core/app_error.dart';
 import '../core/protocol.dart';
+import '../core/session_recovery.dart';
 import '../core/site_group.dart';
+import '../core/site_group_rules.dart';
+import '../services/app_paths.dart';
 import '../services/log_service.dart';
+import '../services/session_recovery_store.dart';
 import '../services/startup_trace.dart';
 import '../services/storage.dart';
 import '../state/app_state.dart';
@@ -22,8 +27,11 @@ import 'browse_pages.dart';
 import 'common.dart';
 import 'config_pages.dart';
 import 'diagnostics_pages.dart';
+import 'following_page.dart';
 import 'library_pages.dart';
 import 'live_page.dart';
+import 'playback_resume.dart';
+import 'recovery_banner.dart';
 import 'player_page.dart';
 import 'scroll_behavior.dart';
 import 'search_page.dart';
@@ -142,6 +150,24 @@ Future<void> main(List<String> args) async {
   StartupTrace.mark('entry');
   WidgetsFlutterBinding.ensureInitialized();
   StartupTrace.mark('binding');
+  // 崩溃恢复（Phase 9 P2-8）：把未捕获异常写入有界崩溃日志，供下次启动展示。
+  // 只写日志，不吞掉 Flutter 的默认报错展示。
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    recordCrashForPaths(
+      kind: 'flutter',
+      error: details.exceptionAsString(),
+      stack: details.stack?.toString(),
+    );
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    recordCrashForPaths(
+      kind: 'uncaught',
+      error: '$error',
+      stack: stack.toString(),
+    );
+    return true;
+  };
   MediaKit.ensureInitialized();
   StartupTrace.mark('media-kit');
   await windowManager.ensureInitialized();
@@ -176,6 +202,29 @@ Future<void> main(List<String> args) async {
   StartupTrace.mark('window-ready-awaited');
 }
 
+/// 记录一次崩溃：stderr + 有界崩溃日志文件（Phase 9 · P2-8）。
+///
+/// stderr 必须先写：日志目录不可写时（FIC 只读现场）那是唯一还看得见的线索。
+void recordCrashForPaths({
+  required String kind,
+  required String error,
+  String? stack,
+  AppPaths? paths,
+}) {
+  final entry = formatCrashEntry(
+    at: DateTime.now(),
+    kind: kind,
+    error: error,
+    stack: stack,
+  );
+  try {
+    stderr.writeln(entry);
+  } catch (_) {}
+  try {
+    SessionRecoveryStore.appendCrashForPaths(paths ?? AppPaths.resolve(), entry);
+  } catch (_) {}
+}
+
 class WebHtvApp extends StatefulWidget {
   const WebHtvApp({super.key, this.startup = const StartupArguments()});
 
@@ -185,13 +234,15 @@ class WebHtvApp extends StatefulWidget {
   State<WebHtvApp> createState() => _WebHtvAppState();
 }
 
-class _WebHtvAppState extends State<WebHtvApp> {
+class _WebHtvAppState extends State<WebHtvApp> with WindowListener {
   final AppState _state = AppState();
   bool _bootstrapped = false;
 
   @override
   void initState() {
     super.initState();
+    // 窗口关闭时标记「正常退出」（崩溃恢复靠它区分强杀）。
+    windowManager.addListener(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       StartupTrace.mark('first-frame');
     });
@@ -230,8 +281,17 @@ class _WebHtvAppState extends State<WebHtvApp> {
 
   @override
   void dispose() {
+    windowManager.removeListener(this);
+    // 正常退出：删除会话标记（同步写，进程可能马上结束）。
+    _state.endSessionCleanly();
     _state.dispose();
     super.dispose();
+  }
+
+  @override
+  void onWindowClose() {
+    // 窗口关闭路径不一定会走到 `dispose`，这里必须再标一次。
+    _state.endSessionCleanly();
   }
 
   @override
@@ -285,7 +345,17 @@ class _SplashPage extends StatelessWidget {
 /// 侧栏入口。
 ///
 /// §17.2 的「搜索页」在 MVP-B 是必须项，因此与首页同级放在侧栏。
-enum ShellSection { browse, live, search, history, favorites, spiders, settings, logs }
+enum ShellSection {
+  browse,
+  live,
+  search,
+  history,
+  favorites,
+  following,
+  spiders,
+  settings,
+  logs,
+}
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key, required this.state, required this.startup});
@@ -472,6 +542,7 @@ class _AppShellState extends State<AppShell> {
       builder: (_) => SitePickerDialog(
         items: _state.siteItems,
         log: _state.log,
+        rules: _state.siteGroupSettings.enabledRules,
         // 把"当前站点"传进去：换源对话框必须能标出你现在在哪个源上。
         selectedKey: _state.selectedSite?.key,
       ),
@@ -480,6 +551,54 @@ class _AppShellState extends State<AppShell> {
       _section = ShellSection.browse;
       await _state.selectSite(selected);
     }
+  }
+
+  /// 崩溃恢复：用标记里的标识信息按历史续播路径重新解析并播放。
+  ///
+  /// 标记里**没有** URL/Header（见 `core/session_recovery.dart`），
+  /// 因此这里必须走 `resumeHistoryEntry` 重新解析，而不是直接起播。
+  Future<void> _resumeRecovered(SessionPlaybackContext context_) async {
+    final item = PlaybackHistory(
+      id: 0,
+      siteKey: context_.siteKey,
+      vodId: context_.vodId,
+      vodName: context_.vodName,
+      flag: context_.flag,
+      episodeName: context_.episodeName,
+      episodeId: context_.episodeId,
+      positionMs: context_.positionMs,
+      durationMs: context_.durationMs,
+      updatedAt: context_.updatedAtMs,
+    );
+    await _state.dismissRecovery();
+    if (!mounted) return;
+    await resumeHistoryEntry(context, _state, item);
+  }
+
+  Future<void> _showCrashLog() async {
+    final text = _state.recoveryCrashLog;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('崩溃日志（最近一段）'),
+        content: SizedBox(
+          width: 640,
+          height: 360,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              text ?? '没有可用的崩溃日志。',
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -499,11 +618,20 @@ class _AppShellState extends State<AppShell> {
           ),
           if (_state.storageWarnings.isNotEmpty)
             _StorageWarningBanner(warnings: _state.storageWarnings),
+          if (_state.pendingRecovery != null)
+            RecoveryBanner(
+              marker: _state.pendingRecovery!,
+              hasCrashLog: _state.recoveryCrashLog != null,
+              onResume: _resumeRecovered,
+              onShowLog: _showCrashLog,
+              onDismiss: () => _state.dismissRecovery(),
+            ),
           Expanded(
             child: Row(
               children: [
                 _SideBar(
                   section: _section,
+                  updateCount: _state.followingUpdateCount,
                   onSelect: (value) => setState(() => _section = value),
                 ),
                 const VerticalDivider(width: 1),
@@ -537,6 +665,8 @@ class _AppShellState extends State<AppShell> {
         return HistoryPage(state: _state);
       case ShellSection.favorites:
         return FavoritesPage(state: _state);
+      case ShellSection.following:
+        return FollowingPage(state: _state);
       case ShellSection.spiders:
         return SpiderPage(state: _state);
       case ShellSection.settings:
@@ -725,10 +855,15 @@ class _WallpaperBackdrop extends StatelessWidget {
 }
 
 class _SideBar extends StatelessWidget {
-  const _SideBar({required this.section, required this.onSelect});
+  const _SideBar({
+    required this.section,
+    required this.onSelect,
+    this.updateCount = 0,
+  });
 
   final ShellSection section;
   final ValueChanged<ShellSection> onSelect;
+  final int updateCount;
 
   @override
   Widget build(BuildContext context) {
@@ -738,36 +873,44 @@ class _SideBar extends StatelessWidget {
       minWidth: 76,
       groupAlignment: -0.9,
       labelType: NavigationRailLabelType.all,
-      destinations: const [
-        NavigationRailDestination(
+      destinations: [
+        const NavigationRailDestination(
           icon: Icon(Icons.grid_view),
           label: Text('首页'),
         ),
-        NavigationRailDestination(
+        const NavigationRailDestination(
           icon: Icon(Icons.live_tv),
           label: Text('直播'),
         ),
-        NavigationRailDestination(
+        const NavigationRailDestination(
           icon: Icon(Icons.search),
           label: Text('搜索'),
         ),
-        NavigationRailDestination(
+        const NavigationRailDestination(
           icon: Icon(Icons.history),
           label: Text('最近观看'),
         ),
-        NavigationRailDestination(
+        const NavigationRailDestination(
           icon: Icon(Icons.bookmark_border),
           label: Text('收藏'),
         ),
         NavigationRailDestination(
+          icon: Badge(
+            isLabelVisible: updateCount > 0,
+            label: Text('$updateCount'),
+            child: const Icon(Icons.star_border),
+          ),
+          label: const Text('追番'),
+        ),
+        const NavigationRailDestination(
           icon: Icon(Icons.extension),
           label: Text('Spider'),
         ),
-        NavigationRailDestination(
+        const NavigationRailDestination(
           icon: Icon(Icons.tune),
           label: Text('设置'),
         ),
-        NavigationRailDestination(
+        const NavigationRailDestination(
           icon: Icon(Icons.receipt_long),
           label: Text('日志'),
         ),
@@ -826,6 +969,7 @@ class SitePickerDialog extends StatefulWidget {
     required this.items,
     required this.log,
     this.selectedKey,
+    this.rules = builtinSiteGroupRules,
   });
 
   final List<SiteListItem> items;
@@ -840,6 +984,9 @@ class SitePickerDialog extends StatefulWidget {
   /// 用户配置里有上百个站点时，没有任何东西告诉他"你现在在哪个上面"，
   /// 只能靠记忆（截图复核时发现，2026-10-11）。
   final String? selectedKey;
+
+  /// 生效的分组规则（Phase 9 P1-5）；默认 4 条内置规则。
+  final List<SiteGroupRule> rules;
 
   @override
   State<SitePickerDialog> createState() => _SitePickerDialogState();
@@ -882,7 +1029,7 @@ class _SitePickerDialogState extends State<SitePickerDialog> {
         'stage=${availability.stage ?? "-"} '
         'available=${availability.available} '
         'searchable=${site.searchable} '
-        'groups=${siteGroupsOf(site.name).join("|")} '
+        'groups=${siteGroupsOf(site.name, rules: widget.rules).join("|")} '
         'reason=${availability.reason ?? "-"}',
         scope: 'site',
       );
@@ -893,7 +1040,7 @@ class _SitePickerDialogState extends State<SitePickerDialog> {
   List<String> get _groups {
     final seen = <String>[];
     for (final item in _keywordMatched) {
-      for (final group in siteGroupsOf(item.site.name)) {
+      for (final group in siteGroupsOf(item.site.name, rules: widget.rules)) {
         if (!seen.contains(group)) seen.add(group);
       }
     }
@@ -1168,6 +1315,7 @@ const List<(String, String)> playerShortcuts = [
   ('↑ / ↓', '音量 +5 / -5'),
   ('M', '静音切换'),
   ('[ / ]', '上一集 / 下一集'),
+  ('Alt + [ / ]', '跳过片头 / 片尾'),
   ('F11 / F', '全屏切换'),
   ('Esc', '退出全屏'),
 ];

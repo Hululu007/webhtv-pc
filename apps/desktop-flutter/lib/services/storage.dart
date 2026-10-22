@@ -16,7 +16,12 @@ import 'package:sqlite3/sqlite3.dart';
 
 import '../core/android_sync.dart';
 import '../core/app_error.dart';
+import '../core/danmaku_match.dart';
+import '../core/following.dart';
 import '../core/protocol.dart';
+import '../core/site_injection.dart';
+import '../core/skip_segments.dart';
+import '../core/subtitle_provider.dart';
 
 /// 播放历史（§15.1）。
 class PlaybackHistory {
@@ -241,11 +246,15 @@ class AppDatabase {
   ///
   /// - `1` → `2`：Phase 4 新增四张 TMDB 表（`docs/phase4/design/03` §6.1）；
   /// - `2` → `3`：Phase 5 新增 `history_deletions` 删除标记表
-  ///   （`docs/phase5/design/02` §4.5）。
+  ///   （`docs/phase5/design/02` §4.5）；
+  /// - `3` → `4`：Phase 9 新增 `skip_segments`（片头片尾）、`subtitle_match`
+  ///   与 `danmaku_match`（字幕/弹幕匹配记忆），见 `docs/phase9/design/01`–`02`；
+  /// - `4` → `5`：Phase 9 站点注入（`injected_sites`），见 `README.md` P1-2；
+  /// - `5` → `6`：Phase 9 追番（`following`），见 `README.md` P2-1。
   ///
-  /// 两次升级都是**加法式**（`CREATE TABLE IF NOT EXISTS`）：旧库打开后
+  /// 升级都是**加法式**（`CREATE TABLE IF NOT EXISTS`）：旧库打开后
   /// 自动获得新表且不丢数据，无需分支式升级逻辑。
-  static const int schemaVersion = 3;
+  static const int schemaVersion = 6;
 
   /// 打开数据库；失败返回错误原因而不是抛出，保证启动不被阻塞（§16.3）。
   static StoreOpenResult open(String path) {
@@ -372,6 +381,9 @@ class AppDatabase {
     ''');
     _migrateTmdb();
     _migrateSync();
+    _migratePlaybackExtras();
+    _migrateSiteInjection();
+    _migrateFollowing();
     _db.execute(
       "INSERT INTO meta(key, value) VALUES('schema_version', '$schemaVersion') "
       'ON CONFLICT(key) DO UPDATE SET value=excluded.value;',
@@ -404,6 +416,72 @@ class AppDatabase {
       'CREATE INDEX IF NOT EXISTS idx_history_deletions_at '
       'ON history_deletions(deleted_at DESC);',
     );
+  }
+
+  /// Phase 9 · 播放增强的三张表（`docs/phase9/design/01`–`02`）。
+  ///
+  /// - `skip_segments`：按「影片」保存片头/片尾标记（不是按集：同一部剧各集
+  ///   的片头片尾通常一致，按集存会让用户逐集标记）；
+  /// - `subtitle_match` / `danmaku_match`：按「站点 + 影片 + 集名」记住用户
+  ///   手动选择，避免每次播放都重新搜索。
+  ///
+  /// 全部加法式，不改既有表。
+  void _migratePlaybackExtras() {
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS skip_segments (
+        site_key TEXT NOT NULL,
+        vod_id TEXT NOT NULL,
+        opening_ms INTEGER,
+        ending_ms INTEGER,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(site_key, vod_id)
+      );
+    ''');
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS subtitle_match (
+        site_key TEXT NOT NULL,
+        vod_id TEXT NOT NULL,
+        episode_name TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        language TEXT NOT NULL DEFAULT '',
+        url TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(site_key, vod_id, episode_name)
+      );
+    ''');
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS danmaku_match (
+        site_key TEXT NOT NULL,
+        vod_id TEXT NOT NULL,
+        episode_name TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        entry_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        episode TEXT NOT NULL DEFAULT '',
+        url TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(site_key, vod_id, episode_name)
+      );
+    ''');
+  }
+
+  /// Phase 9 · 站点注入表（`README.md` P1-2）。
+  ///
+  /// 注入站点与用户导入的配置**分开存放**：配置记录保持原样，注入在读取时合并，
+  /// 删除注入即恢复原配置，不会污染导出/同步的配置 JSON。
+  void _migrateSiteInjection() {
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS injected_sites (
+        key TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type INTEGER NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    ''');
   }
 
   /// Phase 4 · TMDB 元数据增强的四张新表（`docs/phase4/design/03` §6.1）。
@@ -514,7 +592,199 @@ class AppDatabase {
     );
   }
 
+  /// Phase 9 · 追番表（`docs/phase9/README.md` P2-1）。
+  ///
+  /// 主键 `(series_key, season)`：同一部剧的不同季各自一条。
+  /// `has_update` / `unwatched` 不落库，由模型按水位实时算，避免两处漂移。
+  void _migrateFollowing() {
+    _db.execute('''
+      CREATE TABLE IF NOT EXISTS following (
+        series_key TEXT NOT NULL,
+        season INTEGER NOT NULL DEFAULT 0,
+        site_key TEXT NOT NULL,
+        vod_id TEXT NOT NULL,
+        vod_name TEXT NOT NULL,
+        vod_pic TEXT,
+        flag TEXT NOT NULL DEFAULT '',
+        source_flag TEXT NOT NULL DEFAULT '',
+        tracked_season INTEGER NOT NULL DEFAULT 0,
+        latest_released_season INTEGER NOT NULL DEFAULT 0,
+        latest_released_episode INTEGER NOT NULL DEFAULT 0,
+        season_released_episodes INTEGER NOT NULL DEFAULT 0,
+        season_total_episodes INTEGER NOT NULL DEFAULT 0,
+        watched_episode INTEGER NOT NULL DEFAULT 0,
+        read_watermark INTEGER NOT NULL DEFAULT 0,
+        last_notified_episode INTEGER NOT NULL DEFAULT 0,
+        last_notified_at INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT '',
+        next_air_at INTEGER NOT NULL DEFAULT 0,
+        next_check_at INTEGER NOT NULL DEFAULT 0,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
+        latest_episode_name TEXT NOT NULL DEFAULT '',
+        latest_episode_target TEXT NOT NULL DEFAULT '',
+        metadata_updated_at INTEGER NOT NULL DEFAULT 0,
+        last_checked_at INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        notify_enabled INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(series_key, season)
+      );
+    ''');
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_following_next_check '
+      'ON following(next_check_at ASC);',
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 追番（Phase 9 P2-1）
+  // -------------------------------------------------------------------------
+
+  List<Following> followings() => _db
+      .select('SELECT * FROM following ORDER BY updated_at DESC;')
+      .map(_followingFromRow)
+      .toList();
+
+  Following? following(String seriesKey, int season) {
+    final rows = _db.select(
+      'SELECT * FROM following WHERE series_key=? AND season=?;',
+      [seriesKey, season],
+    );
+    return rows.isEmpty ? null : _followingFromRow(rows.first);
+  }
+
+  Following? followingByVod(String siteKey, String vodId) {
+    final rows = _db.select(
+      'SELECT * FROM following WHERE site_key=? AND vod_id=? '
+      'ORDER BY season ASC LIMIT 1;',
+      [siteKey, vodId],
+    );
+    return rows.isEmpty ? null : _followingFromRow(rows.first);
+  }
+
+  void upsertFollowing(Following item) {
+    _db.execute(
+      'INSERT INTO following('
+      'series_key, season, site_key, vod_id, vod_name, vod_pic, flag, '
+      'source_flag, tracked_season, latest_released_season, '
+      'latest_released_episode, season_released_episodes, '
+      'season_total_episodes, watched_episode, read_watermark, '
+      'last_notified_episode, last_notified_at, status, next_air_at, '
+      'next_check_at, failure_count, last_error, metadata_updated_at, '
+      'last_checked_at, enabled, notify_enabled, created_at, updated_at, '
+      'latest_episode_name, latest_episode_target'
+      ') VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+      'ON CONFLICT(series_key, season) DO UPDATE SET '
+      'site_key=excluded.site_key, vod_id=excluded.vod_id, '
+      'vod_name=excluded.vod_name, vod_pic=excluded.vod_pic, '
+      'flag=excluded.flag, source_flag=excluded.source_flag, '
+      'tracked_season=excluded.tracked_season, '
+      'latest_released_season=excluded.latest_released_season, '
+      'latest_released_episode=excluded.latest_released_episode, '
+      'season_released_episodes=excluded.season_released_episodes, '
+      'season_total_episodes=excluded.season_total_episodes, '
+      'watched_episode=excluded.watched_episode, '
+      'read_watermark=excluded.read_watermark, '
+      'last_notified_episode=excluded.last_notified_episode, '
+      'last_notified_at=excluded.last_notified_at, status=excluded.status, '
+      'next_air_at=excluded.next_air_at, next_check_at=excluded.next_check_at, '
+      'failure_count=excluded.failure_count, last_error=excluded.last_error, '
+      'metadata_updated_at=excluded.metadata_updated_at, '
+      'last_checked_at=excluded.last_checked_at, enabled=excluded.enabled, '
+      'notify_enabled=excluded.notify_enabled, created_at=excluded.created_at, '
+      'updated_at=excluded.updated_at;',
+      [
+        item.seriesKey,
+        item.season,
+        item.siteKey,
+        item.vodId,
+        item.vodName,
+        item.vodPic,
+        item.flag,
+        item.sourceFlag,
+        item.trackedSeason,
+        item.latestReleasedSeason,
+        item.latestReleasedEpisode,
+        item.seasonReleasedEpisodes,
+        item.seasonTotalEpisodes,
+        item.watchedEpisode,
+        item.readWatermarkEpisode,
+        item.lastNotifiedEpisode,
+        item.lastNotifiedAtMs,
+        item.status,
+        item.nextAirAtMs,
+        item.nextCheckAtMs,
+        item.failureCount,
+        item.lastError,
+        item.metadataUpdatedAtMs,
+        item.lastCheckedAtMs,
+        item.enabled ? 1 : 0,
+        item.notifyEnabled ? 1 : 0,
+        item.createdAtMs,
+        item.updatedAtMs,
+        item.latestEpisodeName,
+        item.latestEpisodeTarget,
+      ],
+    );
+  }
+
+  void deleteFollowing(String seriesKey, int season) {
+    _db.execute(
+      'DELETE FROM following WHERE series_key=? AND season=?;',
+      [seriesKey, season],
+    );
+  }
+
+  int followingCount() =>
+      _db.select('SELECT COUNT(*) AS c FROM following;').first['c'] as int;
+
+  static Following _followingFromRow(Row row) => Following(
+    seriesKey: row['series_key'] as String,
+    season: row['season'] as int,
+    siteKey: row['site_key'] as String,
+    vodId: row['vod_id'] as String,
+    vodName: row['vod_name'] as String,
+    vodPic: row['vod_pic'] as String?,
+    flag: row['flag'] as String? ?? '',
+    sourceFlag: row['source_flag'] as String? ?? '',
+    trackedSeason: row['tracked_season'] as int? ?? 0,
+    latestReleasedSeason: row['latest_released_season'] as int? ?? 0,
+    latestReleasedEpisode: row['latest_released_episode'] as int? ?? 0,
+    seasonReleasedEpisodes: row['season_released_episodes'] as int? ?? 0,
+    seasonTotalEpisodes: row['season_total_episodes'] as int? ?? 0,
+    watchedEpisode: row['watched_episode'] as int? ?? 0,
+    readWatermarkEpisode: row['read_watermark'] as int? ?? 0,
+    lastNotifiedEpisode: row['last_notified_episode'] as int? ?? 0,
+    lastNotifiedAtMs: row['last_notified_at'] as int? ?? 0,
+    status: FollowingStatus.normalize(row['status'] as String?),
+    nextAirAtMs: row['next_air_at'] as int? ?? 0,
+    nextCheckAtMs: row['next_check_at'] as int? ?? 0,
+    failureCount: row['failure_count'] as int? ?? 0,
+    lastError: row['last_error'] as String? ?? '',
+    metadataUpdatedAtMs: row['metadata_updated_at'] as int? ?? 0,
+    lastCheckedAtMs: row['last_checked_at'] as int? ?? 0,
+    latestEpisodeName: row['latest_episode_name'] as String? ?? '',
+    latestEpisodeTarget: row['latest_episode_target'] as String? ?? '',
+    enabled: (row['enabled'] as int? ?? 1) != 0,
+    notifyEnabled: (row['notify_enabled'] as int? ?? 1) != 0,
+    createdAtMs: row['created_at'] as int? ?? 0,
+    updatedAtMs: row['updated_at'] as int? ?? 0,
+  );
+
   void dispose() => _db.close();
+
+  /// 生成一致性快照（SQLite `VACUUM INTO`）。
+  ///
+  /// 直接复制正在写入的 `.sqlite3` 可能拿到半个事务；`VACUUM INTO`
+  /// 由 SQLite 自己保证快照一致。目标文件必须不存在，这里先删。
+  void backupTo(String path) {
+    final target = File(path);
+    if (target.existsSync()) target.deleteSync();
+    final escaped = path.replaceAll("'", "''");
+    _db.execute("VACUUM INTO '$escaped';");
+  }
 
   // -------------------------------------------------------------------------
   // 配置
@@ -1175,6 +1445,11 @@ class AppDatabase {
       'tmdb_season_bindings',
       'tmdb_route_bindings',
       'tmdb_season_progress',
+      'skip_segments',
+      'subtitle_match',
+      'danmaku_match',
+      'injected_sites',
+      'following',
     ]) {
       result[table] =
           _db.select('SELECT COUNT(*) AS c FROM $table;').first['c'] as int;
@@ -1610,6 +1885,205 @@ class AppDatabase {
     );
     return rows.isEmpty ? null : rows.first['value'] as String?;
   }
+
+  // -------------------------------------------------------------------------
+  // Phase 9 · 站点注入（`README.md` P1-2）
+  // -------------------------------------------------------------------------
+
+  List<InjectedSiteEntry> injectedSites() {
+    return _db
+        .select('SELECT * FROM injected_sites ORDER BY updated_at DESC;')
+        .map((row) {
+          try {
+            return InjectedSiteEntry.fromRow(row);
+          } catch (_) {
+            return null;
+          }
+        })
+        .whereType<InjectedSiteEntry>()
+        .toList();
+  }
+
+  void upsertInjectedSite(InjectedSiteEntry entry) {
+    _db.execute(
+      'INSERT INTO injected_sites(key, name, type, enabled, json, updated_at) '
+      'VALUES(?,?,?,?,?,?) '
+      'ON CONFLICT(key) DO UPDATE SET name=excluded.name, type=excluded.type, '
+      'enabled=excluded.enabled, json=excluded.json, '
+      'updated_at=excluded.updated_at;',
+      [
+        entry.key,
+        entry.site.name,
+        entry.site.type,
+        entry.enabled ? 1 : 0,
+        jsonEncode(entry.site.toJson()),
+        entry.updatedAt,
+      ],
+    );
+  }
+
+  void deleteInjectedSite(String key) {
+    _db.execute('DELETE FROM injected_sites WHERE key=?;', [key]);
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 9 · 片头片尾标记 / 字幕与弹幕匹配记忆（`docs/phase9/design/01`–`02`）
+  // -------------------------------------------------------------------------
+
+  /// 读取某部影片的片头/片尾标记；没有记录时返回空。
+  SkipSegments skipSegmentsFor({
+    required String siteKey,
+    required String vodId,
+  }) {
+    final rows = _db.select(
+      'SELECT opening_ms, ending_ms FROM skip_segments '
+      'WHERE site_key=? AND vod_id=? LIMIT 1;',
+      [siteKey, vodId],
+    );
+    if (rows.isEmpty) return const SkipSegments.none();
+    final row = rows.first;
+    return SkipSegments.fromMs(
+      openingMs: row['opening_ms'],
+      endingMs: row['ending_ms'],
+    );
+  }
+
+  /// 写入/覆盖片头片尾标记。传 null 表示清除该侧标记。
+  void upsertSkipSegments({
+    required String siteKey,
+    required String vodId,
+    int? introEndMs,
+    int? outroStartMs,
+    int? updatedAt,
+  }) {
+    final intro = _positiveOrNull(introEndMs);
+    final outro = _positiveOrNull(outroStartMs);
+    if (intro == null && outro == null) {
+      deleteSkipSegments(siteKey: siteKey, vodId: vodId);
+      return;
+    }
+    _db.execute(
+      'INSERT INTO skip_segments(site_key, vod_id, opening_ms, ending_ms, updated_at) '
+      'VALUES(?,?,?,?,?) '
+      'ON CONFLICT(site_key, vod_id) DO UPDATE SET '
+      'opening_ms=excluded.opening_ms, ending_ms=excluded.ending_ms, '
+      'updated_at=excluded.updated_at;',
+      [
+        siteKey,
+        vodId,
+        intro,
+        outro,
+        updatedAt ?? DateTime.now().millisecondsSinceEpoch,
+      ],
+    );
+  }
+
+  /// 删除某部影片的标记。
+  void deleteSkipSegments({required String siteKey, required String vodId}) {
+    _db.execute(
+      'DELETE FROM skip_segments WHERE site_key=? AND vod_id=?;',
+      [siteKey, vodId],
+    );
+  }
+
+  /// 读写字幕匹配记忆（键：站点 + 影片 + 集名）。
+  SubtitleMatchRecord? subtitleMatchFor({
+    required String siteKey,
+    required String vodId,
+    required String episodeName,
+  }) {
+    final rows = _db.select(
+      'SELECT * FROM subtitle_match WHERE site_key=? AND vod_id=? '
+      'AND episode_name=? LIMIT 1;',
+      [siteKey, vodId, episodeName],
+    );
+    return rows.isEmpty ? null : SubtitleMatchRecord.fromRow(rows.first);
+  }
+
+  void upsertSubtitleMatch(SubtitleMatchRecord record) {
+    _db.execute(
+      'INSERT INTO subtitle_match(site_key, vod_id, episode_name, provider_id, '
+      'asset_id, title, language, url, updated_at) VALUES(?,?,?,?,?,?,?,?,?) '
+      'ON CONFLICT(site_key, vod_id, episode_name) DO UPDATE SET '
+      'provider_id=excluded.provider_id, asset_id=excluded.asset_id, '
+      'title=excluded.title, language=excluded.language, url=excluded.url, '
+      'updated_at=excluded.updated_at;',
+      [
+        record.siteKey,
+        record.vodId,
+        record.episodeName,
+        record.providerId,
+        record.assetId,
+        record.title,
+        record.language,
+        record.url,
+        record.updatedAt,
+      ],
+    );
+  }
+
+  void deleteSubtitleMatch({
+    required String siteKey,
+    required String vodId,
+    required String episodeName,
+  }) {
+    _db.execute(
+      'DELETE FROM subtitle_match WHERE site_key=? AND vod_id=? '
+      'AND episode_name=?;',
+      [siteKey, vodId, episodeName],
+    );
+  }
+
+  /// 读写弹幕匹配记忆。
+  DanmakuMatchRecord? danmakuMatchFor({
+    required String siteKey,
+    required String vodId,
+    required String episodeName,
+  }) {
+    final rows = _db.select(
+      'SELECT * FROM danmaku_match WHERE site_key=? AND vod_id=? '
+      'AND episode_name=? LIMIT 1;',
+      [siteKey, vodId, episodeName],
+    );
+    return rows.isEmpty ? null : DanmakuMatchRecord.fromRow(rows.first);
+  }
+
+  void upsertDanmakuMatch(DanmakuMatchRecord record) {
+    _db.execute(
+      'INSERT INTO danmaku_match(site_key, vod_id, episode_name, provider_id, '
+      'entry_id, title, episode, url, updated_at) VALUES(?,?,?,?,?,?,?,?,?) '
+      'ON CONFLICT(site_key, vod_id, episode_name) DO UPDATE SET '
+      'provider_id=excluded.provider_id, entry_id=excluded.entry_id, '
+      'title=excluded.title, episode=excluded.episode, url=excluded.url, '
+      'updated_at=excluded.updated_at;',
+      [
+        record.siteKey,
+        record.vodId,
+        record.episodeName,
+        record.providerId,
+        record.entryId,
+        record.title,
+        record.episode,
+        record.url,
+        record.updatedAt,
+      ],
+    );
+  }
+
+  void deleteDanmakuMatch({
+    required String siteKey,
+    required String vodId,
+    required String episodeName,
+  }) {
+    _db.execute(
+      'DELETE FROM danmaku_match WHERE site_key=? AND vod_id=? '
+      'AND episode_name=?;',
+      [siteKey, vodId, episodeName],
+    );
+  }
+
+  static int? _positiveOrNull(int? value) =>
+      value == null || value <= 0 ? null : value;
 
   /// 删除数据目录后重建：关闭并重新打开同一路径由调用方负责。
   bool get isHealthy {

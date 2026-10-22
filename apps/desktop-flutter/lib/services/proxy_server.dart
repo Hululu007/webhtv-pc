@@ -18,6 +18,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data' show BytesBuilder;
 
+import '../core/ad_rules.dart';
 import '../core/proxy_policy.dart';
 import 'log_service.dart';
 
@@ -53,6 +54,16 @@ class LocalProxyServer {
 
   final LogService log;
   final ProxyTargetPolicy policy;
+
+  /// 生效中的广告规则；由 `AppState` 在配置切换时注入。
+  ///
+  /// 默认空集：没有配置规则时行为与 Phase 3–8 完全一致。
+  AdRuleSet adRules = const AdRuleSet.empty();
+
+  /// 配置切换后更新规则（代理运行中也可安全替换）。
+  void setAdRules(AdRuleSet rules) {
+    adRules = rules;
+  }
   final ProxySessionManager sessions;
   final HttpClient _upstream;
   final Duration requestTimeout;
@@ -129,6 +140,22 @@ class LocalProxyServer {
     } catch (_) {
       return null;
     }
+  }
+
+  /// 兼容旧版本把本地代理地址写进历史记录的情况（Phase 2 修复的续播缺陷）。
+  ///
+  /// 历史 `episode_id` 里存过 `http://127.0.0.1:<port>/p/<token>/<base64>`：
+  /// token 已失效，但路径最后一段仍包含原始站点目标，可以无损恢复。
+  /// 放在服务层是因为它依赖 [LocalProxyServer] 的路径/解码约定；
+  /// `ui/library_pages.dart` 通过 `export` 继续对外提供同名函数。
+  static String restoreHistoryPlaybackTarget(String episodeId) {
+    final uri = Uri.tryParse(episodeId);
+    if (uri != null && uri.path.startsWith(pathPrefix)) {
+      final encoded = uri.pathSegments.isEmpty ? '' : uri.pathSegments.last;
+      final decoded = decodeTarget(encoded);
+      if (decoded != null) return decoded.toString();
+    }
+    return episodeId;
   }
 
   Future<void> _handleSafely(HttpRequest request) async {
@@ -227,6 +254,12 @@ class LocalProxyServer {
       if (!staticDecision.allowed) {
         denyReason = staticDecision.reason;
         denyCode = staticDecision.code;
+        break;
+      }
+      // 广告主机：在 DNS 解析前拒绝（避免无谓解析，也避免把广告请求发出去）。
+      if (adRules.isAdHost(current.host)) {
+        denyReason = '命中广告规则：${current.host}';
+        denyCode = 403;
         break;
       }
       // 每次连接前重新解析并复核全部地址，防 DNS 重绑定（§11.3.1）。
@@ -389,8 +422,13 @@ class LocalProxyServer {
     if (isPlaylist) {
       // 清单必须整体读取后重写，保证子清单/分片 URL 走同一会话（§11.4）。
       final body = await _readAll(upstream);
+      final cleaned = cleanHlsPlaylist(
+        text: utf8.decode(body, allowMalformed: true),
+        playlistUri: target,
+        rules: adRules,
+      );
       final rewritten = HlsPlaylistRewriter.rewrite(
-        utf8.decode(body, allowMalformed: true),
+        cleaned.text,
         target,
         (child) => _proxify(session, child),
       );
@@ -411,7 +449,9 @@ class LocalProxyServer {
         bytes: bytes.length,
         elapsed: stopwatch.elapsed,
         range: range,
-        note: 'hls-rewrite',
+        note: cleaned.changed
+            ? 'hls-rewrite ad-block(-${cleaned.removedSegments})'
+            : 'hls-rewrite',
       );
       return;
     }
@@ -635,3 +675,8 @@ class LocalProxyServer {
     return buffer.toString();
   }
 }
+
+/// 顶层别名：历史页/播放恢复都从服务层取这个函数（`library_pages.dart`
+/// 通过 `export` 继续对外暴露同名符号，老测试不用改 import）。
+String restoreHistoryPlaybackTarget(String episodeId) =>
+    LocalProxyServer.restoreHistoryPlaybackTarget(episodeId);

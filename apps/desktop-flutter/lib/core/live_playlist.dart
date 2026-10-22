@@ -18,6 +18,7 @@ library;
 import 'dart:convert';
 
 import 'app_error.dart';
+import 'live_catchup.dart';
 import 'protocol.dart';
 
 // ---------------------------------------------------------------------------
@@ -99,6 +100,7 @@ class _DraftChannel {
   String? epgId;
   final String group;
   final List<String> urls = [];
+  CatchupSpec catchup = CatchupSpec.none;
   final Map<String, String> header = {};
   final Map<String, String> extras = {};
 
@@ -110,6 +112,7 @@ class _DraftChannel {
     urls: List.unmodifiable(urls),
     group: group,
     header: HeaderMap(Map<String, Object?>.from(header)),
+    catchup: catchup,
     extra: Map.unmodifiable(extras),
   );
 }
@@ -242,6 +245,8 @@ LivePlaylist _parseM3u(String sourceName, String text, int rawLines) {
       if (attributes['tvg-name'] != null) {
         channel.extras['tvgName'] = attributes['tvg-name']!;
       }
+      final catchup = CatchupSpec.fromAttributes(attributes);
+      if (!catchup.isEmpty) channel.catchup = catchup;
       if (attributes['http-user-agent'] != null) {
         channel.extras['ua'] = attributes['http-user-agent']!;
       }
@@ -427,6 +432,29 @@ LivePlaylist _parseJson(String sourceName, String text, int rawLines) {
         final value = asNonEmptyString(channelMap[key]);
         if (value != null) channel.extras[key] = value;
       }
+      // JSON 直播源的回看参数：既接受嵌套对象，也接受扁平字段。
+      final nested = CatchupSpec.fromJson(channelMap['catchup']);
+      final flat = CatchupSpec(
+        type:
+            asNonEmptyString(channelMap['catchupType']) ??
+            asNonEmptyString(channelMap['catchup-type']) ??
+            '',
+        days:
+            asNonEmptyString(channelMap['catchupDays']) ??
+            asNonEmptyString(channelMap['tvg-rec']) ??
+            '',
+        source:
+            asNonEmptyString(channelMap['catchupSource']) ??
+            asNonEmptyString(channelMap['catchup-source']) ??
+            '',
+        replace:
+            asNonEmptyString(channelMap['catchupReplace']) ??
+            asNonEmptyString(channelMap['catchup-replace']) ??
+            '',
+      );
+      channel.catchup = !nested.isEmpty
+          ? nested
+          : (!flat.isEmpty ? flat : CatchupSpec.none);
       draft.channels.add(channel);
     }
     groups.add(draft);

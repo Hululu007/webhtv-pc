@@ -509,4 +509,40 @@ void main() {
       }
     }
   });
+
+  testWidgets('高级设置入口可进入并渲染 Phase 9 区块', (tester) async {
+    await pumpSettings(tester);
+    final entry = find.byKey(const ValueKey('settings-advanced-open'));
+    expect(entry, findsOneWidget, reason: '设置页必须有高级设置入口');
+    await tester.scrollUntilVisible(
+      entry,
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(entry);
+    await settle(tester);
+
+    for (final key in const [
+      'settings-live-source-fallback',
+      'settings-live-change-line',
+      'settings-ad-block',
+      'settings-parse-failover',
+      'settings-site-health-sort',
+      'settings-group-rules',
+      'settings-danmaku-auto-search',
+      'settings-subtitle-open',
+      'settings-injected-sites-open',
+      'settings-pan-check-open',
+      'settings-ai-assist-open',
+      'settings-outbound-proxy-enabled',
+      'settings-player-options',
+      'settings-backup-open',
+    ]) {
+      expect(
+        find.byKey(ValueKey(key)),
+        findsOneWidget,
+        reason: '高级设置缺少区块：$key',
+      );
+    }
+  });
 }

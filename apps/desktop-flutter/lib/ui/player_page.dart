@@ -14,17 +14,27 @@ import 'package:window_manager/window_manager.dart';
 
 import '../core/app_error.dart';
 import '../core/danmaku.dart';
+import '../core/danmaku_match.dart';
+import '../core/lut.dart';
 import '../core/osd_config.dart';
 import '../core/osd_diagnostics.dart';
 import '../core/playback.dart';
 import '../core/playback_diagnostics.dart';
+import '../core/playback_repeat.dart';
 import '../core/player_buttons.dart';
+import '../core/player_options.dart';
+import '../core/player_tracks.dart';
 import '../core/protocol.dart';
+import '../core/skip_segments.dart';
+import '../core/sleep_timer.dart';
 import '../core/subtitle.dart';
+import '../core/subtitle_provider.dart';
 import '../core/tmdb_playback.dart';
 import '../core/tmdb_season.dart';
+import '../services/danmaku_library_service.dart';
 import '../services/danmaku_service.dart';
 import '../services/live_danmaku_session.dart';
+import '../services/subtitle_match_service.dart';
 import '../state/app_state.dart';
 import 'app.dart';
 import 'common.dart';
@@ -258,10 +268,15 @@ class PlayerPage extends StatefulWidget {
     required this.state,
     required this.request,
     this.danmakuLoader,
+    this.onLiveSourceFallback,
   });
 
   final AppState state;
   final PlaybackRequest request;
+
+  /// 直播源级回退（Phase 9）：当前源所有线路都失败时，向调用方要下一个
+  /// 同名频道的播放请求；返回 null 表示没有可回退的源。
+  final Future<PlaybackRequest?> Function()? onLiveSourceFallback;
 
   /// 弹幕加载器；测试可注入替身，默认自建 [DanmakuService]。
   final DanmakuLoader? danmakuLoader;
@@ -283,6 +298,33 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   ///
   /// 一次连播未完成时忽略后续所有控制器通知，避免「一次播完连跳多集」。
   bool _advanceInFlight = false;
+
+  // ------------------------------------------------- Phase 9 播放增强
+
+  /// 播放参数（缓冲/硬解/自动连播/失败回退/片头片尾开关/LUT）。
+  PlayerOptions _options = const PlayerOptions.defaults();
+
+  /// 本片的片头/片尾标记。
+  SkipSegments _skipSegments = const SkipSegments.none();
+
+  /// 本集是否已经自动跳过片头/片尾（每集各一次）。
+  bool _introSkipped = false;
+  bool _outroSkipped = false;
+
+  /// 是否已允许自动跳过。
+  ///
+  /// 加载/续播期间必须先完成 seek 再判定，否则会「先跳片头、再被续播拉回」。
+  bool _skipArmed = false;
+
+  /// 循环模式（会话级，不落盘）。
+  PlaybackRepeat _repeat = PlaybackRepeat.off;
+
+  /// 本次播放是否已经尝试过「跨源回退」，避免多源之间来回跳。
+  bool _sourceFallbackTried = false;
+
+  /// 定时关闭（会话级）。
+  SleepTimerPlan _sleepTimer = const SleepTimerPlan.idle();
+  Timer? _sleepTicker;
 
   /// 最近一次字幕错误提示是否已展示，避免每次 setState 重复弹提示。
   String? _lastShownSubtitleError;
@@ -360,6 +402,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       }
     }
     _danmakuLoader = widget.danmakuLoader ?? DanmakuService();
+    _danmakuStyle = widget.state.danmakuStyle;
+    _options = widget.state.playerOptions;
+    _skipSegments = widget.state.skipSegmentsFor(
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+    );
     _controller = PlayerController()..addListener(_onControllerChanged);
     windowManager.addListener(this);
     _osdNow = debugOsdClockOverride ?? DateTime.now();
@@ -382,7 +430,128 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     // duration/buffer/volume/… 每秒多次）只要 `isCompleted` 仍为 true 就会
     // 再排一个 `_onCompleted()`。于是「唤醒后点继续播放」这种纯重建动作
     // 也会立即跳下一集。
+    _maybeAutoSkip();
     _maybeAdvanceOnGenuineEnd();
+  }
+
+  /// 自动跳过片头/片尾（`docs/phase9/design/01` §3）。
+  ///
+  /// 只读控制器状态，不重建播放器；`_skipArmed` 保证续播 seek 完成之前不判定。
+  void _maybeAutoSkip() {
+    if (!_skipArmed || _loadError != null) return;
+    final duration = _controller.duration;
+    if (duration <= Duration.zero) return;
+    final decision = _skipSegments.decide(
+      positionMs: _controller.position.inMilliseconds,
+      durationMs: duration.inMilliseconds,
+      autoIntro: _options.autoSkipIntro,
+      autoOutro: _options.autoSkipOutro,
+      introDone: _introSkipped,
+      outroDone: _outroSkipped,
+    );
+    if (!decision.shouldSeek) return;
+    if (decision.action == SkipAction.intro) {
+      _introSkipped = true;
+    } else if (decision.action == SkipAction.outro) {
+      _outroSkipped = true;
+    }
+    widget.state.log.info(
+      '自动跳过 ${decision.action.name} target=${decision.targetMs}ms '
+      'episode=${_request.episodeName}',
+      scope: 'player',
+    );
+    unawaited(_controller.seek(Duration(milliseconds: decision.targetMs)));
+  }
+
+  /// 手动跳过片头/片尾（不依赖开关；未标记时如实提示）。
+  Future<void> _manualSkip(SkipAction action) async {
+    final duration = _controller.duration;
+    final segments = _skipSegments.normalizedFor(duration.inMilliseconds);
+    final target = action == SkipAction.intro
+        ? segments.introEndMs
+        : segments.outroStartMs;
+    if (target == null) {
+      _showPlayerMessage(action == SkipAction.intro ? '本集未标记片头' : '本集未标记片尾');
+      return;
+    }
+    if (action == SkipAction.intro) {
+      _introSkipped = true;
+    } else {
+      _outroSkipped = true;
+    }
+    await _controller.seek(
+      Duration(milliseconds: action == SkipAction.intro ? target : duration.inMilliseconds),
+    );
+    widget.state.log.info(
+      '手动跳过 ${action.name} target=$target ms',
+      scope: 'player',
+    );
+  }
+
+  /// 标记当前进度为片头/片尾。
+  Future<void> _markSkipSegment(SkipAction action) async {
+    final position = _controller.position.inMilliseconds;
+    if (position <= 0) {
+      _showPlayerMessage('当前位置为 0，无法标记');
+      return;
+    }
+    final next = action == SkipAction.intro
+        ? _skipSegments.copyWith(introEndMs: position)
+        : _skipSegments.copyWith(outroStartMs: position);
+    final saved = await widget.state.saveSkipSegments(
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+      introEndMs: next.introEndMs,
+      outroStartMs: next.outroStartMs,
+    );
+    if (!mounted) return;
+    if (!saved) {
+      _showPlayerMessage('保存标记失败（数据库不可用）');
+      return;
+    }
+    setState(() {
+      _skipSegments = next;
+      _introSkipped = false;
+      _outroSkipped = false;
+    });
+    _showPlayerMessage(
+      action == SkipAction.intro
+          ? '已标记片头：${_formatMs(position)}'
+          : '已标记片尾：${_formatMs(position)}',
+    );
+  }
+
+  /// 清除本片标记。
+  Future<void> _clearSkipSegments() async {
+    final saved = await widget.state.saveSkipSegments(
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+    );
+    if (!mounted) return;
+    if (!saved) {
+      _showPlayerMessage('清除标记失败（数据库不可用）');
+      return;
+    }
+    setState(() {
+      _skipSegments = const SkipSegments.none();
+      _introSkipped = false;
+      _outroSkipped = false;
+    });
+    _showPlayerMessage('已清除本片的片头/片尾标记');
+  }
+
+  String _formatMs(int value) {
+    final total = value ~/ 1000;
+    final minutes = (total ~/ 60).toString().padLeft(2, '0');
+    final seconds = (total % 60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
+  }
+
+  void _showPlayerMessage(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text), duration: const Duration(seconds: 3)),
+    );
   }
 
   /// 连播闸门：单次守卫 + 真播完判定（`design/03` §4.1）。
@@ -396,21 +565,115 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     if (_advanceInFlight) return;
     if (!_controller.isCompleted) return;
     if (!_isGenuineEnd()) return;
+
+    final episodes = _episodesCache.isNotEmpty ? _episodesCache : _episodes;
+    final decision = decidePlaybackAdvance(
+      repeat: _repeat,
+      autoNext: _options.autoNext,
+      currentIndex: _request.episodeIndex,
+      episodeCount: episodes.length,
+      genuineEnd: true,
+    );
+
+    if (decision.action == PlaybackAdvanceAction.stop) {
+      // 「本集结束」定时到点：停在当前画面，不前进。
+      if (_sleepTimer.shouldStopOnEpisodeEnd()) {
+        _stopBySleepTimer();
+      }
+      return;
+    }
+
     _advanceInFlight = true;
     unawaited(
-      _playNext().whenComplete(() {
+      _performAdvance(decision).whenComplete(() {
         _advanceInFlight = false;
         // 无论连播成功还是失败，都必须复位 `completed`（`design/03` §4.1 D1）。
         //
         // 两个典型残留场景：
-        // - **末集**：`_playNext()` 因 `next < 0` 直接返回，`_completed` 仍为 true，
-        //   下一次重建会再跑一遍闸门（虽然结果一样，但会刷日志、且若用户此时
-        //   手动切回中间某集就会误跳）；
+        // - **末集**：`_performAdvance()` 因下标无效直接返回，`_completed` 仍为
+        //   true，下一次重建会再跑一遍闸门（虽然结果一样，但会刷日志、且若用户
+        //   此时手动切回中间某集就会误跳）；
         // - **下一集加载失败**：失败路径已自己清过（`_load()` 的失败分支），
         //   这里是幂等兼底。
         if (mounted) _controller.clearCompleted();
       }),
     );
+  }
+
+  /// 执行连播决策（Phase 9：循环模式 > 自动连播开关）。
+  Future<void> _performAdvance(PlaybackAdvance decision) async {
+    if (decision.action == PlaybackAdvanceAction.replay) {
+      await _replayCurrent();
+      return;
+    }
+    final suggested = decision.nextIndex;
+    if (suggested == null) return;
+    final episodes = _episodesCache.isNotEmpty ? _episodesCache : _episodes;
+    final index = _resolveAdvanceIndex(suggested, episodes);
+    if (index < 0 || index >= episodes.length) return;
+    await _openTarget(
+      episodes[index],
+      flag: _request.flag,
+      episodeIndex: index,
+    );
+  }
+
+  /// TMDB 季度边界：自动连播不跨季（沿用 `TmdbAutoPlay.nextIndex`）。
+  ///
+  /// 没有季度身份时直接采用循环/连播给出的下标（含 `all` 的回到首集）。
+  int _resolveAdvanceIndex(int suggested, List<VodEpisode> episodes) {
+    final identity = _request.tmdb;
+    if (identity == null || !identity.hasSeason) return suggested;
+    return TmdbAutoPlay.nextIndex(
+      episodes: episodes,
+      currentIndex: _request.episodeIndex,
+      availableSeasons: [identity.seasonNumber],
+      selectedSeason: identity.seasonNumber,
+    );
+  }
+
+  /// 单集循环：回到开头重播（不重建播放器）。
+  Future<void> _replayCurrent() async {
+    _skipArmed = false;
+    _introSkipped = true; // 重播不再跳片头，否则会陷入「跳一次又重播」的循环。
+    _outroSkipped = false;
+    await _controller.seek(Duration.zero);
+    await _controller.play();
+    _skipArmed = true;
+    _controller.clearCompleted();
+    widget.state.log.info(
+      '单集循环重播 episode=${_request.episodeName}',
+      scope: 'player',
+    );
+  }
+
+  /// 开启/替换定时关闭。`idle` 表示取消。
+  void _applySleepTimer(SleepTimerPlan plan) {
+    _sleepTicker?.cancel();
+    _sleepTicker = null;
+    setState(() => _sleepTimer = plan);
+    if (plan.idle) return;
+    if (plan.mode == SleepTimerMode.duration) {
+      _sleepTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted) return;
+        if (_sleepTimer.isExpired(DateTime.now())) {
+          _stopBySleepTimer();
+        }
+      });
+    }
+    widget.state.log.info('定时关闭 ${plan.summary}', scope: 'player');
+  }
+
+  /// 定时到点：暂停并清除计划（只触发一次）。
+  void _stopBySleepTimer() {
+    _sleepTicker?.cancel();
+    _sleepTicker = null;
+    final wasActive = !_sleepTimer.idle;
+    if (!wasActive) return;
+    setState(() => _sleepTimer = const SleepTimerPlan.idle());
+    unawaited(_controller.pause());
+    widget.state.log.info('定时关闭生效，已暂停', scope: 'player');
+    _showPlayerMessage('定时关闭已生效');
   }
 
   /// 「真播完」判定（`design/03` §4.1 D2、P5）。
@@ -432,6 +695,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     // 若加载失败而不回滚，续播上下文（原集 + 原进度）就已丢失，
     // 用户看到的是「上一集失败 → 已经切到下一集」。
     final intent = _request;
+    _skipArmed = false;
+    _introSkipped = false;
+    _outroSkipped = false;
     setState(() => _loadError = null);
     final outcome = await _controller.openWithRetry(
       _request.url,
@@ -453,7 +719,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     }
     if (!outcome.succeeded) {
       // 直播：当前线路失败时按顺序自动切到下一个线路（§13.3 播放失败可切线路）。
-      if (_request.directUrl && await _fallbackLiveLine()) return;
+      // Phase 9：`changeLine` 关闭时不再自动换线（失败直接报错）。
+      if (_request.directUrl &&
+          widget.state.liveSettings.changeLine &&
+          await _fallbackLiveLine()) {
+        return;
+      }
       // 失败路径的收尾（`design/03` §4.3）：
       // 1. 回滚 `_request` 到本次加载前的意图（保住续播上下文）；
       // 2. 清除残留的 `completed`，否则重建会再次触发连播（D1）；
@@ -468,6 +739,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       _controller.clearCompleted();
       return;
     }
+    // Phase 9：注入 mpv 播放参数与 LUT。失败不阻断播放，只提示能力不可用。
+    await _applyPlaybackEnhancements();
     // 字幕（§10.3）：装配外挂字幕候选并自动启用默认/强制字幕。
     // 字幕失败不得阻断播放，因此整段吞掉错误，只落日志与提示。
     await _configureSubtitles();
@@ -485,7 +758,46 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         scope: 'player',
       );
     }
+    // 续播 seek 完成之后才允许自动跳片头/片尾（design/01 §3.1）。
+    _skipArmed = true;
+    _maybeAutoSkip();
     _startProgressSaver();
+  }
+
+  /// 应用播放参数与 LUT（Phase 9）。
+  ///
+  /// 两者都走 mpv 属性注入；平台不是 NativePlayer 或属性被拒绝时只提示一次，
+  /// 不把失败升级成播放失败（`docs/phase9/design/01` §5）。
+  Future<void> _applyPlaybackEnhancements() async {
+    _options = widget.state.playerOptions;
+    final applied = await _controller.applyPlayerOptions(_options);
+    if (!applied) {
+      widget.state.log.warning(
+        '播放参数未生效（当前平台不是 NativePlayer）',
+        scope: 'player',
+      );
+    }
+    final lut = _options.lutPath.trim();
+    if (lut.isEmpty) return;
+    try {
+      final text = await File(lut).readAsString();
+      final parsed = parseCube(text, path: lut);
+      if (!parsed.ok) {
+        widget.state.log.warning(
+          'LUT 解析失败 ${parsed.error} path=$lut',
+          scope: 'player',
+        );
+        _showPlayerMessage('LUT 不可用：${parsed.error}');
+        return;
+      }
+      final ok = await _controller.applyLut(lut);
+      if (!ok) {
+        _showPlayerMessage('当前播放内核不支持 LUT');
+      }
+    } catch (error) {
+      widget.state.log.warning('LUT 加载失败 $error path=$lut', scope: 'player');
+      _showPlayerMessage('LUT 加载失败：$error');
+    }
   }
 
   /// 直播线路回退（§13.3）：按顺序尝试当前频道剩余的线路。
@@ -500,6 +812,22 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         '直播全部线路均失败 channel=${_request.episodeName} tried=${lines.length}',
         scope: 'live',
       );
+      // 源级回退（Phase 9）：只在当前源用尽、且调用方提供了回退入口时尝试一次。
+      final fallback = widget.onLiveSourceFallback;
+      if (fallback != null && !_sourceFallbackTried) {
+        _sourceFallbackTried = true;
+        final nextRequest = await fallback();
+        if (nextRequest != null && mounted) {
+          widget.state.log.info(
+            '已切换直播源 channel=${nextRequest.episodeName} '
+            'source=${nextRequest.siteKey}',
+            scope: 'live',
+          );
+          setState(() => _request = nextRequest);
+          await _load();
+          return true;
+        }
+      }
       return false;
     }
     widget.state.log.info(
@@ -528,7 +856,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   /// 任何失败都只记日志/提示，绝不影响视频播放（§10.4）。
   Future<void> _configureSubtitles() async {
     final subtitles = _request.subtitles;
-    if (subtitles.isEmpty) return;
+    if (subtitles.isEmpty) {
+      await _autoMatchSubtitle();
+      return;
+    }
     _controller.setExternalSubtitles(
       subtitles,
       onDiscard: (sub, reason) => widget.state.log.warning(
@@ -557,6 +888,226 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     }
   }
 
+  /// 构造字幕查询（标题优先用片名，季集优先用 TMDB 身份）。
+  SubtitleQuery _subtitleQuery() {
+    final identity = _request.tmdb;
+    final hasSeason = identity != null && identity.hasSeason;
+    final rawEpisode = int.tryParse(
+      RegExp(r'\d+').firstMatch(_request.episodeName)?.group(0) ?? '',
+    );
+    return SubtitleQuery(
+      title: _request.vodName.trim().isEmpty
+          ? _request.title
+          : _request.vodName,
+      season: hasSeason ? identity.seasonNumber : null,
+      episode: hasSeason ? rawEpisode : rawEpisode,
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+      episodeName: _request.episodeName,
+    );
+  }
+
+  /// 播放结果没有字幕时，按设置自动匹配（`design/02` §1.3）。
+  Future<void> _autoMatchSubtitle() async {
+    final settings = widget.state.subtitleSettings;
+    if (!settings.autoMatch || !settings.hasAnyProvider) return;
+    final query = _subtitleQuery();
+    final memory = widget.state.subtitleMatchFor(
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+      episodeName: _request.episodeName,
+    );
+    if (memory != null) {
+      final applied = await _applySubtitleCandidate(
+        memory.toCandidate(),
+        remember: false,
+      );
+      if (applied) {
+        widget.state.log.info(
+          '字幕记忆命中 provider=${memory.providerId} title=${memory.title}',
+          scope: 'subtitle',
+        );
+      }
+      return;
+    }
+    final service = SubtitleMatchService(log: widget.state.log);
+    final best = await service.autoMatch(query: query, settings: settings);
+    if (best == null) return;
+    await _applySubtitleCandidate(best, remember: true);
+  }
+
+  /// 加载候选并选中；失败只提示，不影响播放。
+  Future<bool> _applySubtitleCandidate(
+    SubtitleCandidate candidate, {
+    required bool remember,
+  }) async {
+    final info = SubtitleInfo(
+      url: candidate.url,
+      name: candidate.title,
+      lang: candidate.language,
+      format: candidate.format,
+      flag: SubtitleInfo.selectionFlagDefault,
+    );
+    _controller.setExternalSubtitles(
+      [info],
+      onDiscard: (sub, reason) => widget.state.log.warning(
+        '字幕候选被丢弃 name=${sub.name} reason=$reason',
+        scope: 'subtitle',
+      ),
+    );
+    if (_controller.externalOptions.isEmpty) {
+      _showSubtitleError('字幕候选格式不受支持');
+      return false;
+    }
+    final ok = await _controller.selectSubtitle(
+      _controller.externalOptions.first,
+      headers: _request.subtitleHeaders,
+    );
+    final error = _controller.subtitleError;
+    if (!ok) {
+      widget.state.log.warning('字幕加载失败 $error', scope: 'subtitle');
+      if (error != null) _showSubtitleError(error);
+      return false;
+    }
+    if (remember) {
+      await widget.state.rememberSubtitleMatch(
+        SubtitleMatchRecord.fromCandidate(
+          siteKey: _request.siteKey,
+          vodId: _request.vodId,
+          episodeName: _request.episodeName,
+          candidate: candidate,
+        ),
+      );
+    }
+    widget.state.log.info(
+      '字幕已启用 provider=${candidate.providerId} title=${candidate.title} '
+      'lang=${candidate.language}',
+      scope: 'subtitle',
+    );
+    return true;
+  }
+
+  /// 手动搜索字幕：关键词 → 候选列表 → 选中并记忆。
+  Future<void> _showSubtitleSearch() async {
+    final settings = widget.state.subtitleSettings;
+    if (!settings.hasAnyProvider) {
+      _showPlayerMessage('未配置字幕源：请先在设置页填写字幕目录或 HTTP 源');
+      return;
+    }
+    final query = _subtitleQuery();
+    final controller = TextEditingController(text: query.title);
+    final keyword = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('搜索字幕'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '剧名 / 关键词'),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('搜索'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (keyword == null || !mounted) return;
+    final text = keyword.trim();
+    if (text.isEmpty) return;
+
+    setState(() {});
+    final service = SubtitleMatchService(log: widget.state.log);
+    final results = await service.search(
+      query: SubtitleQuery(
+        title: text,
+        season: query.season,
+        episode: query.episode,
+        siteKey: query.siteKey,
+        vodId: query.vodId,
+        episodeName: query.episodeName,
+      ),
+      settings: settings,
+    );
+    if (!mounted) return;
+    if (results.isEmpty) {
+      _showPlayerMessage('没有找到字幕（可换关键词或检查字幕源）');
+      return;
+    }
+    final selected = await showModalBottomSheet<SubtitleCandidate>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('搜索结果'),
+              titleTextStyle: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            for (final candidate in results)
+              ListTile(
+                title: Text(candidate.title),
+                subtitle: Text(
+                  '${candidate.providerId} · ${candidate.language.isEmpty ? "未知语言" : candidate.language} '
+                  '· ${candidate.score.toStringAsFixed(2)}',
+                ),
+                onTap: () => Navigator.of(context).pop(candidate),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+    await _applySubtitleCandidate(selected, remember: true);
+  }
+
+  /// 选择本地字幕文件：路径输入 → 加载并记忆。
+  Future<void> _showLocalSubtitlePicker() async {
+    final controller = TextEditingController();
+    final path = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('本地字幕文件'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: r'C:\subtitles\movie.srt'),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('加载'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final trimmed = path?.trim() ?? '';
+    if (trimmed.isEmpty || !mounted) return;
+    final candidate = SubtitleCandidate(
+      providerId: 'local',
+      assetId: trimmed,
+      title: trimmed.split(Platform.pathSeparator).last,
+      language: '',
+      format: '',
+      url: trimmed,
+    );
+    await _applySubtitleCandidate(candidate, remember: true);
+  }
+
   /// 字幕失败提示：不阻断播放，只用 SnackBar 告知（§10.4）。
   void _showSubtitleError(String message) {
     if (!mounted || _lastShownSubtitleError == message) return;
@@ -578,7 +1129,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   /// 任何失败都只记日志/提示，绝不影响视频播放（§10.4 同语义）。
   Future<void> _configureDanmaku() async {
     final sources = _request.danmaku;
-    if (sources.isEmpty) return;
+    if (sources.isEmpty) {
+      await _autoSearchDanmaku();
+      return;
+    }
     // 优先用户显式选择的源，其次第一个源（静态或直播均可）。
     var selected = sources.firstWhere(
       (source) => source.selected,
@@ -589,6 +1143,153 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       return;
     }
     await _loadDanmakuSource(selected);
+  }
+
+  /// 构造弹幕库查询。
+  DanmakuQuery _danmakuQuery() => DanmakuQuery(
+    title: _request.vodName.trim().isEmpty
+        ? _request.title
+        : _request.vodName,
+    episode: _request.episodeName,
+    siteKey: _request.siteKey,
+    vodId: _request.vodId,
+    episodeName: _request.episodeName,
+  );
+
+  /// 播放结果没有弹幕时按设置搜索弹幕库（`design/02` §2.3）。
+  Future<void> _autoSearchDanmaku() async {
+    final settings = widget.state.danmakuSettings;
+    if (!settings.isEnabled) return;
+    final query = _danmakuQuery();
+    final memory = widget.state.danmakuMatchFor(
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+      episodeName: _request.episodeName,
+    );
+    if (memory != null) {
+      await _loadDanmakuSource(
+        DanmakuSource(
+          url: memory.url,
+          name: memory.title,
+          source: memory.providerId,
+        ),
+      );
+      return;
+    }
+    final service = DanmakuLibraryService();
+    final entries = await service.search(
+      apiUrl: settings.apiUrl,
+      title: query.title,
+      episode: query.episode,
+    );
+    final best = pickDanmakuEntry(entries: entries, query: query);
+    if (best == null) return;
+    await _loadDanmakuSource(
+      DanmakuSource(url: best.url, name: best.title, source: best.providerId),
+    );
+    await widget.state.rememberDanmakuMatch(
+      DanmakuMatchRecord.fromEntry(
+        siteKey: _request.siteKey,
+        vodId: _request.vodId,
+        episodeName: _request.episodeName,
+        entry: best,
+      ),
+    );
+    widget.state.log.info(
+      '弹幕自动匹配 provider=${best.providerId} title=${best.title} '
+      'episode=${best.episode} score=${best.score.toStringAsFixed(2)}',
+      scope: 'danmaku',
+    );
+  }
+
+  /// 手动搜索弹幕：关键词 → 候选列表 → 加载并记忆。
+  Future<void> _showDanmakuSearch() async {
+    final settings = widget.state.danmakuSettings;
+    if (!settings.hasLibrary) {
+      _showPlayerMessage('未配置弹幕库地址：请先在设置页填写');
+      return;
+    }
+    final query = _danmakuQuery();
+    final controller = TextEditingController(text: query.title);
+    final keyword = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('搜索弹幕'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '剧名 / 关键词'),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('搜索'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final text = keyword?.trim() ?? '';
+    if (text.isEmpty || !mounted) return;
+
+    final service = DanmakuLibraryService();
+    final entries = await service.search(
+      apiUrl: settings.apiUrl,
+      title: text,
+      episode: query.episode,
+    );
+    if (!mounted) return;
+    if (entries.isEmpty) {
+      _showPlayerMessage('没有找到弹幕（可换关键词或检查弹幕库）');
+      return;
+    }
+    final ranked = rankDanmakuEntries(entries: entries, query: query);
+    final selected = await showModalBottomSheet<DanmakuLibraryEntry>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('搜索结果'),
+              titleTextStyle: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            for (final entry in ranked)
+              ListTile(
+                title: Text(entry.title),
+                subtitle: Text(
+                  '${entry.providerId} · ${entry.episode.isEmpty ? "未标注集" : entry.episode} '
+                  '${entry.count > 0 ? "· ${entry.count} 条" : ""} '
+                  '· ${entry.score.toStringAsFixed(2)}',
+                ),
+                onTap: () => Navigator.of(context).pop(entry),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+    await _loadDanmakuSource(
+      DanmakuSource(
+        url: selected.url,
+        name: selected.title,
+        source: selected.providerId,
+      ),
+    );
+    await widget.state.rememberDanmakuMatch(
+      DanmakuMatchRecord.fromEntry(
+        siteKey: _request.siteKey,
+        vodId: _request.vodId,
+        episodeName: _request.episodeName,
+        entry: selected,
+      ),
+    );
   }
 
   /// 连接直播弹幕（§13.1「直播弹幕」）。
@@ -751,16 +1452,17 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
 
   /// 弹幕总开关（§13.3「弹幕可开启和关闭」）。
   void _toggleDanmaku() {
-    _danmakuStyle = _danmakuStyle.copyWith(enabled: !_danmakuStyle.enabled);
+    final next = _danmakuStyle.copyWith(enabled: !_danmakuStyle.enabled);
+    _applyDanmakuStyle(next);
     widget.state.log.info(
-      '弹幕 ${_danmakuStyle.enabled ? "开启" : "关闭"} '
+      '弹幕 ${next.enabled ? "开启" : "关闭"} '
       'items=${_danmakuItems.length}',
       scope: 'danmaku',
     );
-    if (mounted) setState(() {});
   }
 
-  /// 弹幕设置菜单（§17.5）：透明度 / 字号 / 滚动 / 顶部 / 底部。
+  /// 弹幕设置菜单（§17.5）：开关 / 透明度 / 字号 / 速度 / 行数 / 区域 /
+  /// 描边 / 时间偏移 / 类型显隐 / 库搜索。
   Future<void> _showDanmakuSettings() async {
     final action = await showModalBottomSheet<String>(
       context: context,
@@ -794,6 +1496,40 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
               },
             ),
             _settingTile(
+              '速度 ${(_danmakuStyle.scrollDurationMs / 1000).toStringAsFixed(0)}s',
+              subtitle: '滚动弹幕穿过画面的时长（越小越快）',
+              onTap: () async {
+                Navigator.of(context).pop('duration');
+              },
+            ),
+            _settingTile(
+              '行数 ${_danmakuStyle.maxTracks == 0 ? "不限" : _danmakuStyle.maxTracks}',
+              subtitle: '最多同时占用的弹幕轨道数',
+              onTap: () async {
+                Navigator.of(context).pop('tracks');
+              },
+            ),
+            _settingTile(
+              '区域 ${(_danmakuStyle.areaRatio * 100).round()}%',
+              subtitle: '滚动弹幕最多占用的画面高度',
+              onTap: () async {
+                Navigator.of(context).pop('area');
+              },
+            ),
+            _settingTile(
+              '描边 ${_strokeLabel(_danmakuStyle.strokeWidth)}',
+              onTap: () async {
+                Navigator.of(context).pop('stroke');
+              },
+            ),
+            _settingTile(
+              '时间偏移 ${_offsetLabel(_danmakuStyle.timeOffsetMs)}',
+              subtitle: '正数＝弹幕整体延后出现',
+              onTap: () async {
+                Navigator.of(context).pop('offset');
+              },
+            ),
+            _settingTile(
               '滚动弹幕',
               subtitle: _danmakuStyle.showScroll ? '显示' : '隐藏',
               onTap: () async {
@@ -815,6 +1551,15 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
               },
             ),
             _settingTile(
+              '搜索弹幕…',
+              subtitle: widget.state.danmakuSettings.hasLibrary
+                  ? '按标题在弹幕库中搜索'
+                  : '未配置弹幕库地址',
+              onTap: () async {
+                Navigator.of(context).pop('search');
+              },
+            ),
+            _settingTile(
               '重新加载弹幕',
               onTap: () async {
                 Navigator.of(context).pop('reload');
@@ -830,31 +1575,75 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     );
     if (action == null) return;
     switch (action) {
+      case 'search':
+        await _showDanmakuSearch();
       case 'toggle':
         _toggleDanmaku();
       case 'opacity':
-        _danmakuStyle = _danmakuStyle.copyWith(
-          opacity: _nextStep(_danmakuStyle.opacity, 0.1, 0.3, 1.0),
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(
+            opacity: _nextStep(_danmakuStyle.opacity, 0.1, 0.3, 1.0),
+          ),
         );
-        if (mounted) setState(() {});
       case 'scale':
-        _danmakuStyle = _danmakuStyle.copyWith(
-          textScale: _nextStep(_danmakuStyle.textScale, 0.25, 0.5, 2.0),
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(
+            textScale: _nextStep(_danmakuStyle.textScale, 0.25, 0.5, 2.0),
+          ),
         );
-        if (mounted) setState(() {});
+      case 'duration':
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(
+            scrollDurationMs: _nextOption(
+              _danmakuStyle.scrollDurationMs,
+              const [4000, 6000, 8000, 10000, 12000],
+            ),
+          ),
+        );
+      case 'tracks':
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(
+            maxTracks: _nextOption(
+              _danmakuStyle.maxTracks,
+              const [0, 3, 5, 8],
+            ),
+          ),
+        );
+      case 'area':
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(
+            areaRatio: _nextOption(
+              _danmakuStyle.areaRatio,
+              const [0.3, 0.45, 0.6, 0.75],
+            ),
+          ),
+        );
+      case 'stroke':
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(
+            strokeWidth: _nextOption(
+              _danmakuStyle.strokeWidth,
+              const [0.0, 1.2, 2.0],
+            ),
+          ),
+        );
+      case 'offset':
+        final next = _danmakuStyle.timeOffsetMs + 1000;
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(timeOffsetMs: next > 5000 ? -5000 : next),
+        );
       case 'scroll':
-        _danmakuStyle = _danmakuStyle.copyWith(
-          showScroll: !_danmakuStyle.showScroll,
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(showScroll: !_danmakuStyle.showScroll),
         );
-        if (mounted) setState(() {});
       case 'top':
-        _danmakuStyle = _danmakuStyle.copyWith(showTop: !_danmakuStyle.showTop);
-        if (mounted) setState(() {});
-      case 'bottom':
-        _danmakuStyle = _danmakuStyle.copyWith(
-          showBottom: !_danmakuStyle.showBottom,
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(showTop: !_danmakuStyle.showTop),
         );
-        if (mounted) setState(() {});
+      case 'bottom':
+        _applyDanmakuStyle(
+          _danmakuStyle.copyWith(showBottom: !_danmakuStyle.showBottom),
+        );
       case 'reload':
         // 重新拉取时绕过缓存，否则“重新加载”会命中旧结果。
         DanmakuSource? source;
@@ -867,6 +1656,39 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         source ??= _request.danmaku.isEmpty ? null : _request.danmaku.first;
         if (source != null) await _loadDanmakuSource(source);
     }
+  }
+
+  /// 应用并持久化弹幕显示样式。
+  ///
+  /// 写盘失败只记日志：当前会话的显示效果已经生效，不因为磁盘问题回滚。
+  void _applyDanmakuStyle(DanmakuStyle next) {
+    if (!mounted) return;
+    setState(() => _danmakuStyle = next);
+    unawaited(
+      widget.state.setDanmakuStyle(next).then((ok) {
+        if (!ok) {
+          widget.state.log.warning('保存弹幕显示设置失败', scope: 'player');
+        }
+      }),
+    );
+  }
+
+  String _strokeLabel(double width) {
+    if (width <= 0) return '关';
+    return width >= 2.0 ? '粗' : '细';
+  }
+
+  String _offsetLabel(int offsetMs) {
+    if (offsetMs == 0) return '0s';
+    final seconds = offsetMs ~/ 1000;
+    return '${seconds > 0 ? '+' : ''}${seconds}s';
+  }
+
+  /// 在固定选项里循环取下一个（找不到当前值时回到第一项）。
+  T _nextOption<T>(T current, List<T> options) {
+    final index = options.indexOf(current);
+    if (index < 0) return options.first;
+    return options[(index + 1) % options.length];
   }
 
   /// 步进到下一个可选值（循环）。
@@ -889,14 +1711,246 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   );
 
   /// 字幕菜单：外挂 / 内嵌 / 关闭（§13.3「字幕可开启和关闭」）。
-  Future<void> _showSubtitleMenu() async {
-    final options = _controller.subtitleOptions;
-    if (options.length <= 1) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('当前视频没有可用字幕轨')));
+  // --------------------------------------------------- Phase 9 播放面板
+
+  /// 音轨/视频轨选择。单轨时只提示，不弹一个点不出东西的菜单。
+  Future<void> _showTrackMenu(PlayerTrackKind kind) async {
+    final options = kind == PlayerTrackKind.audio
+        ? _controller.audioTrackOptions
+        : _controller.videoTrackOptions;
+    if (options.isEmpty) {
+      _showPlayerMessage('引擎尚未上报${kind.label}');
       return;
     }
-    final selected = await showModalBottomSheet<SubtitleOption>(
+    if (!hasSwitchableTracks(options)) {
+      _showPlayerMessage('当前只有一条${kind.label}，无需切换');
+      return;
+    }
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            ListTile(
+              title: Text('选择${kind.label}'),
+              titleTextStyle: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            for (final option in options)
+              ListTile(
+                leading: Icon(
+                  option.selected ? Icons.radio_button_checked : Icons.radio_button_off,
+                  size: 20,
+                ),
+                title: Text(option.label),
+                subtitle: option.isDefault ? const Text('引擎默认') : null,
+                onTap: () => Navigator.of(context).pop(option.id),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+    final ok = kind == PlayerTrackKind.audio
+        ? await _controller.selectAudioTrack(selected)
+        : await _controller.selectVideoTrack(selected);
+    if (!ok) {
+      _showPlayerMessage('${kind.label}切换失败');
+      return;
+    }
+    widget.state.log.info('切换${kind.label} id=$selected', scope: 'player');
+    setState(() {});
+  }
+
+  /// 循环与定时关闭。
+  Future<void> _showPlaybackModeSheet() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('循环'),
+              titleTextStyle: TextStyle(fontWeight: FontWeight.w600),
+            ),
+            for (final mode in PlaybackRepeat.values)
+              ListTile(
+                leading: Icon(
+                  _repeat == mode ? Icons.radio_button_checked : Icons.radio_button_off,
+                  size: 20,
+                ),
+                title: Text(mode.label),
+                onTap: () => Navigator.of(context).pop('repeat:${mode.id}'),
+              ),
+            const Divider(height: 1),
+            const ListTile(
+              title: Text('定时关闭'),
+              titleTextStyle: TextStyle(fontWeight: FontWeight.w600),
+              subtitle: Text('退出播放器即取消，不会跨重启生效'),
+            ),
+            for (final minutes in kSleepTimerMinutes)
+              ListTile(
+                title: Text('$minutes 分钟后'),
+                onTap: () => Navigator.of(context).pop('sleep:$minutes'),
+              ),
+            ListTile(
+              title: const Text('本集结束后'),
+              onTap: () => Navigator.of(context).pop('sleep:end'),
+            ),
+            ListTile(
+              title: Text(
+                _sleepTimer.idle ? '取消定时（当前未开启）' : '取消定时（${_sleepTimer.summary}）',
+              ),
+              enabled: !_sleepTimer.idle,
+              onTap: () => Navigator.of(context).pop('sleep:off'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+    if (action.startsWith('repeat:')) {
+      final mode = PlaybackRepeat.fromId(action.substring('repeat:'.length));
+      setState(() => _repeat = mode);
+      widget.state.log.info('循环模式 ${mode.id}', scope: 'player');
+      return;
+    }
+    if (action == 'sleep:end') {
+      _applySleepTimer(const SleepTimerPlan.untilEpisodeEnd());
+      return;
+    }
+    if (action == 'sleep:off') {
+      _applySleepTimer(const SleepTimerPlan.idle());
+      return;
+    }
+    final minutes = int.tryParse(action.substring('sleep:'.length));
+    if (minutes != null) {
+      _applySleepTimer(
+        SleepTimerPlan.forDuration(Duration(minutes: minutes)),
+      );
+    }
+  }
+
+  /// LUT 选择/清除。
+  Future<void> _showLutSettings() async {
+    final current = _options.lutPath;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('LUT 滤镜'),
+              titleTextStyle: TextStyle(fontWeight: FontWeight.w600),
+              subtitle: Text('只支持 3D .cube；由 mpv 的 lut3d 滤镜应用'),
+            ),
+            ListTile(
+              title: const Text('当前'),
+              subtitle: Text(current.isEmpty ? '未启用' : current),
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_open_outlined),
+              title: const Text('输入 .cube 路径…'),
+              onTap: () => Navigator.of(context).pop('pick'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.clear),
+              title: const Text('清除 LUT'),
+              enabled: current.isNotEmpty,
+              onTap: () => Navigator.of(context).pop('clear'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+    if (action == 'clear') {
+      await _applyLutPath('');
+      return;
+    }
+    if (action != 'pick') return;
+    final controller = TextEditingController(text: current);
+    final path = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('LUT 文件路径'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: r'C:\luts\movie.cube'),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('应用'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (path == null || !mounted) return;
+    await _applyLutPath(path.trim());
+  }
+
+  /// 解析并应用 LUT；失败时保持原设置不变。
+  Future<void> _applyLutPath(String path) async {
+    if (path.isEmpty) {
+      final applied = await _controller.applyLut(null);
+      if (!applied) {
+        _showPlayerMessage('当前播放内核不支持 LUT');
+        return;
+      }
+      await _persistOptions(_options.copyWith(lutPath: ''));
+      if (mounted) setState(() {});
+      return;
+    }
+    try {
+      final text = await File(path).readAsString();
+      final parsed = parseCube(text, path: path);
+      if (!parsed.ok) {
+        _showPlayerMessage('LUT 不可用：${parsed.error}');
+        return;
+      }
+      final applied = await _controller.applyLut(path);
+      if (!applied) {
+        _showPlayerMessage('当前播放内核不支持 LUT');
+        return;
+      }
+      await _persistOptions(_options.copyWith(lutPath: path));
+      if (mounted) setState(() {});
+      _showPlayerMessage('已应用 LUT：${parsed.preset!.name}');
+    } catch (error) {
+      _showPlayerMessage('LUT 读取失败：$error');
+    }
+  }
+
+  Future<void> _persistOptions(PlayerOptions options) async {
+    _options = options.normalized();
+    await widget.state.setPlayerOptions(_options);
+  }
+
+  Future<void> _toggleAutoSkip({required bool intro}) async {
+    final next = intro
+        ? _options.copyWith(autoSkipIntro: !_options.autoSkipIntro)
+        : _options.copyWith(autoSkipOutro: !_options.autoSkipOutro);
+    await _persistOptions(next);
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  Future<void> _showSubtitleMenu() async {
+    final options = _controller.subtitleOptions;
+    final selected = await showModalBottomSheet<Object>(
       context: context,
       showDragHandle: true,
       builder: (context) => SafeArea(
@@ -925,11 +1979,36 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                     : null,
                 onTap: () => Navigator.of(context).pop(option),
               ),
+            if (options.isEmpty)
+              const ListTile(
+                title: Text('当前视频没有字幕轨'),
+                subtitle: Text('可以搜索字幕或选择本地文件'),
+              ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.search),
+              title: const Text('搜索字幕…'),
+              onTap: () => Navigator.of(context).pop('search'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_open_outlined),
+              title: const Text('选择本地字幕文件…'),
+              onTap: () => Navigator.of(context).pop('local'),
+            ),
           ],
         ),
       ),
     );
-    if (selected == null) return;
+    if (selected == null || !mounted) return;
+    if (selected == 'search') {
+      await _showSubtitleSearch();
+      return;
+    }
+    if (selected == 'local') {
+      await _showLocalSubtitlePicker();
+      return;
+    }
+    if (selected is! SubtitleOption) return;
     _controller.clearSubtitleError();
     final ok = await _controller.selectSubtitle(
       selected,
@@ -1013,6 +2092,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     _persistProgress();
     // 直播弹幕会话是网络资源，必须显式关闭（§20 资源释放）。
     unawaited(_teardownLiveSession('dispose'));
+    _sleepTicker?.cancel();
+    _sleepTicker = null;
     _controller.removeListener(_onControllerChanged);
     _controller.dispose();
     super.dispose();
@@ -1311,6 +2392,19 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       toggleFullscreen: _toggleFullscreen,
       exitFullscreen: _exitFullscreen,
     );
+    // Phase 9：Alt+[ / Alt+] 手动跳过片头/片尾（避免占用已有的 [ / ]）。
+    shortcuts[const SingleActivator(
+      LogicalKeyboardKey.bracketLeft,
+      alt: true,
+    )] = () {
+      unawaited(_manualSkip(SkipAction.intro));
+    };
+    shortcuts[const SingleActivator(
+      LogicalKeyboardKey.bracketRight,
+      alt: true,
+    )] = () {
+      unawaited(_manualSkip(SkipAction.outro));
+    };
 
     if (_controller.isCompleted) {
       // 连播**不**在这里触发（`design/03` §4.1 D1）：
@@ -1572,6 +2666,14 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                 _showSubtitleStyleSettings();
               case _PlayerMenuAction.danmakuSettings:
                 _showDanmakuSettings();
+              case _PlayerMenuAction.trackAudio:
+                _showTrackMenu(PlayerTrackKind.audio);
+              case _PlayerMenuAction.trackVideo:
+                _showTrackMenu(PlayerTrackKind.video);
+              case _PlayerMenuAction.playbackMode:
+                _showPlaybackModeSheet();
+              case _PlayerMenuAction.lut:
+                _showLutSettings();
               case _PlayerMenuAction.videoFit:
                 _showVideoFitSettings();
               case _PlayerMenuAction.mediaInfo:
@@ -1592,6 +2694,26 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
               _PlayerMenuAction.danmakuSettings,
               Icons.comment_outlined,
               '弹幕设置',
+            ),
+            _menuItem(
+              _PlayerMenuAction.trackAudio,
+              Icons.graphic_eq,
+              '音轨',
+            ),
+            _menuItem(
+              _PlayerMenuAction.trackVideo,
+              Icons.video_settings_outlined,
+              '视频轨',
+            ),
+            _menuItem(
+              _PlayerMenuAction.playbackMode,
+              Icons.repeat,
+              '循环与定时',
+            ),
+            _menuItem(
+              _PlayerMenuAction.lut,
+              Icons.tune,
+              'LUT 滤镜',
             ),
             _menuItem(
               _PlayerMenuAction.videoFit,
@@ -2017,6 +3139,15 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
               _controller.seekBy(const Duration(seconds: 10));
             },
           ),
+          PlayerMenuItem(
+            id: 'playback_mode',
+            label: '循环与定时…',
+            icon: Icons.repeat,
+            onSelect: () {
+              _closeContextMenu();
+              _showPlaybackModeSheet();
+            },
+          ),
         ],
       ),
       PlayerMenuSection(
@@ -2078,6 +3209,24 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             },
           ),
           PlayerMenuItem(
+            id: 'audio_track',
+            label: '音轨',
+            icon: Icons.graphic_eq,
+            onSelect: () {
+              _closeContextMenu();
+              _showTrackMenu(PlayerTrackKind.audio);
+            },
+          ),
+          PlayerMenuItem(
+            id: 'video_track',
+            label: '视频轨',
+            icon: Icons.video_settings_outlined,
+            onSelect: () {
+              _closeContextMenu();
+              _showTrackMenu(PlayerTrackKind.video);
+            },
+          ),
+          PlayerMenuItem(
             id: 'danmaku',
             label: _danmakuStyle.enabled ? '关闭弹幕' : '开启弹幕',
             icon: _danmakuStyle.enabled
@@ -2118,6 +3267,15 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             ],
           ),
           PlayerMenuItem(
+            id: 'lut',
+            label: 'LUT 滤镜…',
+            icon: Icons.tune,
+            onSelect: () {
+              _closeContextMenu();
+              _showLutSettings();
+            },
+          ),
+          PlayerMenuItem(
             id: 'buttons',
             label: '控制栏按钮…',
             icon: Icons.tune,
@@ -2128,6 +3286,73 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                   builder: (_) => PlayerButtonConfigPage(state: widget.state),
                 ),
               );
+            },
+          ),
+        ],
+      ),
+      PlayerMenuSection(
+        title: '片头片尾',
+        items: [
+          PlayerMenuItem(
+            id: 'auto_skip_intro',
+            label: '自动跳过片头',
+            icon: Icons.fast_forward_outlined,
+            selected: _options.autoSkipIntro,
+            onSelect: () => _toggleAutoSkip(intro: true),
+          ),
+          PlayerMenuItem(
+            id: 'auto_skip_outro',
+            label: '自动跳过片尾',
+            icon: Icons.fast_forward,
+            selected: _options.autoSkipOutro,
+            onSelect: () => _toggleAutoSkip(intro: false),
+          ),
+          PlayerMenuItem(
+            id: 'skip_intro',
+            label: '跳过片头',
+            icon: Icons.skip_next_outlined,
+            enabled: _skipSegments.hasIntro,
+            onSelect: () {
+              _closeContextMenu();
+              unawaited(_manualSkip(SkipAction.intro));
+            },
+          ),
+          PlayerMenuItem(
+            id: 'skip_outro',
+            label: '跳过片尾',
+            icon: Icons.skip_next,
+            enabled: _skipSegments.hasOutro,
+            onSelect: () {
+              _closeContextMenu();
+              unawaited(_manualSkip(SkipAction.outro));
+            },
+          ),
+          PlayerMenuItem(
+            id: 'mark_intro',
+            label: '标记片头为当前位置',
+            icon: Icons.flag_outlined,
+            onSelect: () {
+              _closeContextMenu();
+              unawaited(_markSkipSegment(SkipAction.intro));
+            },
+          ),
+          PlayerMenuItem(
+            id: 'mark_outro',
+            label: '标记片尾为当前位置',
+            icon: Icons.flag,
+            onSelect: () {
+              _closeContextMenu();
+              unawaited(_markSkipSegment(SkipAction.outro));
+            },
+          ),
+          PlayerMenuItem(
+            id: 'clear_skip',
+            label: '清除本片标记',
+            icon: Icons.clear,
+            enabled: _skipSegments.active,
+            onSelect: () {
+              _closeContextMenu();
+              unawaited(_clearSkipSegments());
             },
           ),
         ],
@@ -2546,6 +3771,10 @@ String _osdLabelOf(String id) {
 enum _PlayerMenuAction {
   subtitleStyle,
   danmakuSettings,
+  trackAudio,
+  trackVideo,
+  playbackMode,
+  lut,
   videoFit,
   mediaInfo,
   diagnostics,

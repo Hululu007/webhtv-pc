@@ -14,77 +14,10 @@ library;
 import 'package:flutter/material.dart';
 
 import '../core/danmaku.dart';
+import '../core/danmaku_style.dart';
 
-/// 弹幕显示设置（§17.5 弹幕可调项）。
-class DanmakuStyle {
-  const DanmakuStyle({
-    this.enabled = true,
-    this.opacity = 0.9,
-    this.textScale = 1.0,
-    this.showScroll = true,
-    this.showTop = true,
-    this.showBottom = true,
-    this.strokeWidth = 1.2,
-  });
-
-  /// 总开关。
-  final bool enabled;
-
-  /// 整体不透明度（0..1）。
-  final double opacity;
-
-  /// 字号缩放（相对弹幕自带字号）。
-  final double textScale;
-
-  final bool showScroll;
-  final bool showTop;
-  final bool showBottom;
-
-  /// 描边宽度（保证浅色弹幕在亮画面上也能看清）。
-  final double strokeWidth;
-
-  DanmakuStyle copyWith({
-    bool? enabled,
-    double? opacity,
-    double? textScale,
-    bool? showScroll,
-    bool? showTop,
-    bool? showBottom,
-    double? strokeWidth,
-  }) {
-    return DanmakuStyle(
-      enabled: enabled ?? this.enabled,
-      opacity: (opacity ?? this.opacity).clamp(0.1, 1.0),
-      textScale: (textScale ?? this.textScale).clamp(0.5, 2.5),
-      showScroll: showScroll ?? this.showScroll,
-      showTop: showTop ?? this.showTop,
-      showBottom: showBottom ?? this.showBottom,
-      strokeWidth: strokeWidth ?? this.strokeWidth,
-    );
-  }
-
-  @override
-  bool operator ==(Object other) =>
-      other is DanmakuStyle &&
-      other.enabled == enabled &&
-      other.opacity == opacity &&
-      other.textScale == textScale &&
-      other.showScroll == showScroll &&
-      other.showTop == showTop &&
-      other.showBottom == showBottom &&
-      other.strokeWidth == strokeWidth;
-
-  @override
-  int get hashCode => Object.hash(
-    enabled,
-    opacity,
-    textScale,
-    showScroll,
-    showTop,
-    showBottom,
-    strokeWidth,
-  );
-}
+// 兼容旧引用：Phase 3–8 的代码/测试一直从本文件取 `DanmakuStyle`。
+export '../core/danmaku_style.dart';
 
 /// 按 [style] 过滤出允许显示的弹幕类型。
 List<DanmakuItem> filterDanmakuItems(
@@ -114,8 +47,6 @@ class DanmakuOverlay extends StatelessWidget {
     required this.style,
     this.liveItems = const [],
     this.liveNowMs,
-    this.scrollDuration = const Duration(milliseconds: 8000),
-    this.fixedDuration = const Duration(milliseconds: 4000),
   });
 
   /// 全部静态弹幕（按时间轴驱动：位置 = [position]）。
@@ -134,8 +65,6 @@ class DanmakuOverlay extends StatelessWidget {
   final int? liveNowMs;
 
   final DanmakuStyle style;
-  final Duration scrollDuration;
-  final Duration fixedDuration;
 
   @override
   Widget build(BuildContext context) {
@@ -150,19 +79,21 @@ class DanmakuOverlay extends StatelessWidget {
           if (width <= 0 || height <= 0) return const SizedBox.shrink();
 
           final visible = <VisibleDanmaku>[];
-          // 静态弹幕：按播放位置驱动。
+          // 静态弹幕：按播放位置驱动（时间偏移直接作用在查询位置上）。
           final filtered = filterDanmakuItems(items, style);
           visible.addAll(
             DanmakuTrackAllocator.visibleAt(
               items: filtered,
-              positionMs: position.inMilliseconds,
+              positionMs: style.offsetPositionMs(position.inMilliseconds),
               enabled: style.enabled,
-              scrollDurationMs: scrollDuration.inMilliseconds,
-              fixedDurationMs: fixedDuration.inMilliseconds,
+              scrollDurationMs: style.scrollDurationMs,
+              fixedDurationMs: style.fixedDurationMs,
               width: width,
               height: height,
               trackHeight: danmakuTrackHeight * style.textScale,
               gap: danmakuTrackGap,
+              maxTracksRatio: style.areaRatio,
+              maxTracks: style.maxTracks,
             ),
           );
 
@@ -171,14 +102,16 @@ class DanmakuOverlay extends StatelessWidget {
           if (liveItems.isNotEmpty && nowMs > 0) {
             final liveVisible = DanmakuTrackAllocator.visibleAt(
               items: filterDanmakuItems(liveItems, style),
-              positionMs: nowMs,
+              positionMs: style.offsetPositionMs(nowMs),
               enabled: style.enabled,
-              scrollDurationMs: scrollDuration.inMilliseconds,
-              fixedDurationMs: fixedDuration.inMilliseconds,
+              scrollDurationMs: style.scrollDurationMs,
+              fixedDurationMs: style.fixedDurationMs,
               width: width,
               height: height,
               trackHeight: danmakuTrackHeight * style.textScale,
               gap: danmakuTrackGap,
+              maxTracksRatio: style.areaRatio,
+              maxTracks: style.maxTracks,
             );
             visible.addAll(liveVisible);
           }
@@ -189,8 +122,8 @@ class DanmakuOverlay extends StatelessWidget {
             painter: DanmakuPainter(
               visible: visible,
               style: style,
-              scrollDurationMs: scrollDuration.inMilliseconds,
-              fixedDurationMs: fixedDuration.inMilliseconds,
+              scrollDurationMs: style.scrollDurationMs,
+              fixedDurationMs: style.fixedDurationMs,
             ),
           );
         },

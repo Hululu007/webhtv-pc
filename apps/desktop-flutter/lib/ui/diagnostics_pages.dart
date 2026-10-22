@@ -14,6 +14,7 @@ import '../state/sync_state.dart';
 import 'ai_settings_page.dart';
 import 'app.dart';
 import 'common.dart';
+import 'advanced_settings_page.dart';
 import 'config_pages.dart';
 import 'player_button_config_page.dart';
 import 'scroll_behavior.dart';
@@ -357,6 +358,31 @@ class SettingsPage extends StatelessWidget {
         Text(
           '调整底部控制栏的按钮顺序与显示状态。',
           style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const Divider(height: 32),
+        const Divider(height: 32),
+        // Phase 9：高级设置（直播/广告/解析/弹幕/字幕/播放参数/站点注入）。
+        //
+        // 独立成页而不是继续堆在这里：设置页是长表单，既有测试用固定视口且
+        // 不带 `ensureVisible`（`docs/phase8/design/05` §5）。收进独立页后
+        // 既有入口位置不变。
+        Text('高级设置', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        const Text(
+          '直播回退、广告过滤、解析失败切换、站点排序、弹幕源、字幕源、'
+          '播放参数与站点注入。',
+          key: ValueKey('settings-advanced-summary'),
+        ),
+        const SizedBox(height: 12),
+        FilledButton.tonalIcon(
+          key: const ValueKey('settings-advanced-open'),
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => AdvancedSettingsPage(state: state),
+            ),
+          ),
+          icon: const Icon(Icons.tune),
+          label: const Text('打开高级设置'),
         ),
       ],
     );

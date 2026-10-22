@@ -25,6 +25,9 @@ dependencies:
   web_socket_channel: ^3.0.3
   xml: ^7.0.1
   crypto: ^3.0.7
+  # 本地备份 zip（Phase 9 · P2-7）。此前由 flutter_test 链传递依赖；显式声明
+  # 避免未来传递链变化导致编译失败。
+  archive: ^4.3.0
   path: ^1.9.1
   path_provider: ^2.1.5
   brotli: ^0.6.0

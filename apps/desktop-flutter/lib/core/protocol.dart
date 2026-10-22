@@ -6,6 +6,8 @@ library;
 
 import 'dart:convert';
 
+import 'live_catchup.dart';
+
 // ---------------------------------------------------------------------------
 // JSON 取值工具：配置文件与站点数据大量使用字符串/数字混用字段（TVBox 生态
 // 常见），因此统一做宽松归一化，避免因类型差异导致整份配置导入失败。
@@ -226,6 +228,7 @@ class LiveSource {
     this.proxy,
     this.referer,
     this.userAgent,
+    this.catchup = CatchupSpec.none,
     Map<String, Object?> extra = const {},
   }) : extra = Map.unmodifiable(extra);
 
@@ -239,6 +242,9 @@ class LiveSource {
   final String? proxy;
   final String? referer;
   final String? userAgent;
+
+  /// 源级回看默认参数（频道未声明时继承）。
+  final CatchupSpec catchup;
 
   /// 未识别字段在导入后原样保留。
   final Map<String, Object?> extra;
@@ -255,6 +261,7 @@ class LiveSource {
       proxy: asNonEmptyString(map['proxy']),
       referer: asNonEmptyString(map['referer']),
       userAgent: asNonEmptyString(map['userAgent']),
+      catchup: CatchupSpec.fromJson(map['catchup']),
       extra: {
         for (final entry in map.entries)
           if (!{
@@ -265,6 +272,7 @@ class LiveSource {
             'proxy',
             'referer',
             'userAgent',
+            'catchup',
           }.contains(entry.key))
             entry.key: entry.value,
       },
@@ -280,6 +288,7 @@ class LiveSource {
     if (proxy != null) 'proxy': proxy,
     if (referer != null) 'referer': referer,
     if (userAgent != null) 'userAgent': userAgent,
+    if (!catchup.isEmpty) 'catchup': catchup.toJson(),
   };
 }
 
@@ -306,6 +315,7 @@ class LiveChannel {
     List<String> urls = const [],
     this.group = '未分组',
     HeaderMap? header,
+    this.catchup = CatchupSpec.none,
     Map<String, Object?> extra = const {},
   }) : urls = List.unmodifiable(urls),
        header = header ?? HeaderMap(),
@@ -325,6 +335,9 @@ class LiveChannel {
   /// 频道级请求头（来自 `#EXTVLCOPT`/`url|header`/JSON `header`）。
   final HeaderMap header;
 
+  /// 频道级回看参数；空表示该频道不支持回看。
+  final CatchupSpec catchup;
+
   final Map<String, Object?> extra;
 
   static LiveChannel fromJson(Object? value) {
@@ -337,6 +350,7 @@ class LiveChannel {
       urls: asList(map['urls']).map((item) => asString(item) ?? '').toList(),
       group: asNonEmptyString(map['group']) ?? '未分组',
       header: HeaderMap(asMap(map['header'])),
+      catchup: CatchupSpec.fromJson(map['catchup']),
       extra: {
         for (final entry in map.entries)
           if (!{
@@ -347,6 +361,7 @@ class LiveChannel {
             'urls',
             'group',
             'header',
+            'catchup',
           }.contains(entry.key))
             entry.key: entry.value,
       },
@@ -362,6 +377,7 @@ class LiveChannel {
     if (urls.isNotEmpty) 'urls': urls,
     'group': group,
     if (header.isNotEmpty) 'header': header.toJson(),
+    if (!catchup.isEmpty) 'catchup': catchup.toJson(),
   };
 }
 

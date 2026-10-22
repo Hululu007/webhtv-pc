@@ -9,34 +9,28 @@
 /// `┆`、圆点后缀 `•`/`·`）在本机实测的 170 个站点里零命中，先不做。
 library;
 
+import 'site_group_rules.dart';
+
 /// 从站点名抽取的全部分组（保序、去重）。无标记时返回空表。
 ///
 /// 例：`木偶[盘]` → `['盘']`；`在线之家[采][盘]` → `['采', '盘']`；
 /// `1234影视` → `[]`。
-List<String> siteGroupsOf(String name) {
-  final text = name.trim();
-  if (text.isEmpty) return const [];
-  final groups = <String>[];
-  void add(String? value) {
-    final tag = value?.trim() ?? '';
-    if (tag.isEmpty || groups.contains(tag)) return;
-    groups.add(tag);
-  }
-
-  // 规则 1：方括号标签 `[盘]` / `[采]`（可以有多个）。
-  for (final match in _bracket.allMatches(text)) {
-    add(match.group(1));
-  }
-  // 规则 2：竖线后缀 `影视 | 高清`（取末尾一段）。
-  add(_pipe.firstMatch(text)?.group(1));
-  return groups;
+List<String> siteGroupsOf(String name, {List<SiteGroupRule>? rules}) {
+  return siteGroupsWithRules(
+    name,
+    rules: rules ?? builtinSiteGroupRules,
+  );
 }
 
 /// 站点是否命中分组过滤。[group] 为空表示「全部」。
-bool siteInGroup(String name, String group) {
+bool siteInGroup(
+  String name,
+  String group, {
+  List<SiteGroupRule>? rules,
+}) {
   final tag = group.trim();
   if (tag.isEmpty) return true;
-  return siteGroupsOf(name).contains(tag);
+  return siteGroupsOf(name, rules: rules).contains(tag);
 }
 
 /// 站点是否命中搜索关键字（名称或 key，大小写不敏感）。
@@ -52,9 +46,3 @@ bool siteMatchesQuery({
   if (q.isEmpty) return true;
   return name.toLowerCase().contains(q) || key.toLowerCase().contains(q);
 }
-
-/// 方括号标签：`[盘]`。
-final RegExp _bracket = RegExp(r'\[([^\]]+)\]');
-
-/// 竖线后缀：`影视 | 高清` 取 `高清`。
-final RegExp _pipe = RegExp(r'[|｜]\s*([^|｜]+?)\s*$');

@@ -13,7 +13,10 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import 'dart:io';
 
+import '../core/lut.dart';
 import '../core/playback_diagnostics.dart';
+import '../core/player_options.dart';
+import '../core/player_tracks.dart';
 import '../core/protocol.dart';
 import '../core/subtitle.dart';
 import '../services/subtitle_service.dart';
@@ -213,6 +216,109 @@ class PlayerController extends ChangeNotifier {
     }
     return _tracks.audio.where((track) => track.id != 'auto' && track.id != 'no').firstOrNull;
   }
+
+  /// 音轨菜单（Phase 9）。空表表示引擎尚未上报轨道。
+  List<PlayerTrackOption> get audioTrackOptions => buildPlayerTrackOptions(
+    kind: PlayerTrackKind.audio,
+    tracks: _tracks.audio.map(
+      (track) => PlayerTrackInfo(
+        id: track.id,
+        title: track.title ?? '',
+        language: track.language ?? '',
+        isDefault: track.isDefault ?? false,
+      ),
+    ),
+    selectedId: _player.state.track.audio.id,
+  );
+
+  /// 视频轨菜单（Phase 9）。
+  List<PlayerTrackOption> get videoTrackOptions => buildPlayerTrackOptions(
+    kind: PlayerTrackKind.video,
+    tracks: _tracks.video.map(
+      (track) => PlayerTrackInfo(
+        id: track.id,
+        title: track.title ?? '',
+        language: track.language ?? '',
+        isDefault: track.isDefault ?? false,
+      ),
+    ),
+    selectedId: _player.state.track.video.id,
+  );
+
+  /// 是否值得显示音轨/视频轨入口。
+  bool get hasSwitchableAudioTracks => hasSwitchableTracks(audioTrackOptions);
+  bool get hasSwitchableVideoTracks => hasSwitchableTracks(videoTrackOptions);
+
+  /// 切换音轨。`auto` 回到引擎默认；失败只记错误，不打断播放。
+  Future<bool> selectAudioTrack(String id) async {
+    final target = id.trim();
+    if (target.isEmpty) return false;
+    try {
+      if (target == 'auto') {
+        await _player.setAudioTrack(AudioTrack.auto());
+      } else if (target == 'no') {
+        await _player.setAudioTrack(AudioTrack.no());
+      } else {
+        final source = _tracks.audio.firstWhere(
+          (track) => track.id == target,
+          orElse: () => const AudioTrack('', null, null),
+        );
+        if (source.id.isEmpty) return false;
+        await _player.setAudioTrack(source);
+      }
+      return true;
+    } catch (error) {
+      _lastEngineError = '$error';
+      return false;
+    }
+  }
+
+  /// 切换视频轨。语义与音轨一致。
+  Future<bool> selectVideoTrack(String id) async {
+    final target = id.trim();
+    if (target.isEmpty) return false;
+    try {
+      if (target == 'auto') {
+        await _player.setVideoTrack(VideoTrack.auto());
+      } else if (target == 'no') {
+        await _player.setVideoTrack(VideoTrack.no());
+      } else {
+        final source = _tracks.video.firstWhere(
+          (track) => track.id == target,
+          orElse: () => const VideoTrack('', null, null),
+        );
+        if (source.id.isEmpty) return false;
+        await _player.setVideoTrack(source);
+      }
+      return true;
+    } catch (error) {
+      _lastEngineError = '$error';
+      return false;
+    }
+  }
+
+  /// 注入 mpv 属性。返回 false 表示当前平台不是 NativePlayer 或属性被拒绝。
+  Future<bool> applyMpvProperties(Map<String, String> properties) async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return false;
+    try {
+      for (final entry in properties.entries) {
+        await platform.setProperty(entry.key, entry.value);
+      }
+      return true;
+    } catch (error) {
+      _lastEngineError = '$error';
+      return false;
+    }
+  }
+
+  /// 应用播放参数（Phase 9）。失败不阻断播放，只留错误文本。
+  Future<bool> applyPlayerOptions(PlayerOptions options) =>
+      applyMpvProperties(options.mpvProperties);
+
+  /// 应用/清除 LUT。空路径表示清除。
+  Future<bool> applyLut(String? path) =>
+      applyMpvProperties({'vf': buildLutVfArgument(path)});
 
   /// 最近一次播放的诊断快照（§23）。未开始播放时为 null。
   PlaybackDiagnostics? get diagnostics => _diagnostics;

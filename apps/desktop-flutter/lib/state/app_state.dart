@@ -16,6 +16,7 @@ import 'package:path/path.dart' as p;
 
 import 'package:sqlite3/sqlite3.dart' show Row;
 
+import '../core/ad_rules.dart';
 import '../core/android_sync.dart';
 import '../core/ai_config.dart';
 import '../core/app_error.dart';
@@ -23,16 +24,38 @@ import '../core/cat_http.dart';
 import '../core/cat_source.dart';
 import '../core/config_loader.dart';
 import '../core/config_parser.dart';
+import '../core/danmaku_match.dart';
+import '../core/danmaku_settings.dart';
+import '../core/danmaku_style.dart';
+import '../core/doh.dart';
+import '../core/doh_settings.dart';
+import '../core/following.dart';
+import '../core/session_recovery.dart';
+import '../core/backup_manifest.dart';
+import '../services/backup_service.dart';
+import '../services/doh_resolver.dart';
+import '../services/following_service.dart';
+import '../services/session_recovery_store.dart';
 import '../core/history_view.dart';
+import '../core/live_settings.dart';
 import '../core/http_api.dart';
 import '../core/osd_config.dart';
 import '../core/playback.dart';
 import '../core/playback_diagnostics.dart';
 import '../core/player_buttons.dart';
+import '../core/outbound_proxy.dart';
+import '../core/parse_failover.dart';
+import '../core/player_options.dart';
 import '../core/protocol.dart';
 import '../core/proxy_policy.dart';
 import '../core/realtime_sync.dart';
 import '../core/site_group.dart';
+import '../core/site_injection.dart';
+import '../core/site_group_rules.dart';
+import '../core/site_order.dart';
+import '../core/skip_segments.dart';
+import '../core/subtitle_provider.dart';
+import '../core/subtitle_settings.dart';
 import '../core/tmdb_config.dart';
 import '../core/tmdb_identity.dart';
 import '../core/tmdb_playback.dart';
@@ -43,8 +66,10 @@ import '../services/android_playback_bridge.dart';
 import '../services/android_read_client.dart';
 import '../services/cat_bundle.dart';
 import '../services/cat_runtime.dart';
+import '../services/direct_spider_registrar.dart';
 import '../services/epg_service.dart';
 import '../services/log_service.dart';
+import '../services/outbound_proxy.dart';
 import '../services/live_service.dart';
 import '../services/proxy_server.dart';
 import '../services/realtime_sync_engine.dart';
@@ -179,7 +204,13 @@ class AppState extends ChangeNotifier implements SyncStateHost {
        _injectedSyncServerFactory = syncServerFactory,
        _injectedReadClient = androidReadClient,
        _injectedSearchSuggestService = searchSuggestService {
-    if (httpClient != null) _httpClient = HttpApiClient(client: httpClient);
+    if (httpClient != null) {
+      // 记住注入的客户端：`bootstrap()` 里的 `_applyOutboundProxy()` 过去会无条件
+      // 重建 `_httpClient`，把测试注入的捕获客户端丢掉，导致真实 400。
+      // 出站代理未生效时必须保留它；生效时才按代理设置重建。
+      _injectedHttpClient = httpClient;
+      _httpClient = HttpApiClient(client: httpClient);
+    }
     final cacheDir = this.paths.cacheDir;
     _supervisor = SpiderHostSupervisor(
       workRoot: p.join(cacheDir, 'sidecars'),
@@ -258,6 +289,33 @@ class AppState extends ChangeNotifier implements SyncStateHost {
 
   late final ConfigImportService _importService;
   late HttpApiClient _httpClient = HttpApiClient();
+
+  /// 构造时注入的原始 HTTP 客户端（测试/诊断）。见 `_applyOutboundProxy`。
+  http.Client? _injectedHttpClient;
+
+  /// 生效中的 DoH 解析器（Phase 9 P2-8）；未启用时为 null。
+  DohResolver? _dohResolver;
+
+  /// 出站传输（代理 + DoH + hosts）的输入签名，用于避免重复重建。
+  String? _httpStackSignature;
+
+  /// 隐身模式只提示一次，避免每次进度上报都写日志。
+  bool _incognitoNoticeLogged = false;
+
+  /// 会话恢复存储（Phase 9 P2-8）；bootstrap 时创建。
+  SessionRecoveryStore? _sessionRecovery;
+
+  /// 上一次未正常退出留下的标记；用户处理前一直保留。
+  SessionMarker? _pendingRecovery;
+
+  /// 播放上下文的写盘节流（毫秒纪元 + 上一条集标识）。
+  int _recoveryWrittenAtMs = 0;
+  String _recoveryEpisodeKey = '';
+
+  /// 追番检查服务与调度定时器（Phase 9 P2-1）。
+  FollowingService? _followingService;
+  Timer? _followingTimer;
+  Timer? _followingKickTimer;
   final CatHttpClient _catHttpClient = CatHttpClient();
   late final SpiderRouter _router;
   late final AndroidPlaybackBridge _androidPlaybackBridge;
@@ -302,6 +360,30 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   ProxySession? _proxySession;
 
   AppDatabase? _database;
+
+  /// 直连 js/py 站点自动注册器（Phase 9 P1-7）。每次调用新建，内部无状态。
+  DirectSpiderRegistrar _directRegistrar() => DirectSpiderRegistrar(
+    root: _spiderRegistry.root,
+    registry: _spiderRegistry,
+    log: log,
+  );
+
+  /// 扫描配置里的直连 js/py 站点并注册（幂等；哈希一致不重复下载）。
+  Future<int> registerDirectSpiders() async {
+    final config = effectiveConfig;
+    if (config == null) return 0;
+    final result = await _directRegistrar().materialize(config);
+    _router.setDirectSpiders(result);
+    _attachSiteService();
+    notifyListeners();
+    return result.length;
+  }
+
+  /// 注入站点（`README.md` P1-2）：与配置记录分开存放，读取时合并。
+  List<InjectedSiteEntry> _injectedSites = const [];
+
+  /// 合并后的配置缓存；配置或注入变化时置空。
+  AppConfig? _effectiveConfigCache;
   ConfigRecord? _activeRecord;
   AppConfig? _config;
   SiteService? _siteService;
@@ -408,7 +490,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   // 模块边界（`docs/phase4/design/04` §2）：UI 不直接发 TMDB 请求，全部经此处。
   // TMDB 配置落在 `<configDir>/settings.json`（`03` §5.3），**不进配置 JSON**。
 
-  late final TmdbConfigStore _tmdbConfigStore;
+  late TmdbConfigStore _tmdbConfigStore;
 
   /// AI 配置（`docs/phase6/design/04` §4）。
   ///
@@ -416,7 +498,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// `late final`：在 `bootstrap` 里装配；未 bootstrap 时访问会抛
   /// `LateInitializationError`——与 TMDB 一致（单测走 `attachAiConfigStore`
   /// 或 `bootstrap`）。
-  late final AiConfigStore _aiConfigStore;
+  late AiConfigStore _aiConfigStore;
 
   /// UI 偏好（最近使用的站点）。在 [bootstrap] 里装配。
   ///
@@ -635,6 +717,577 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     return ok;
   }
 
+  /// 生效的播放参数（Phase 9）。
+  ///
+  /// `_uiPreferences` 为 null（未 bootstrap）时返回默认值，不让播放器失败。
+  PlayerOptions get playerOptions =>
+      _uiPreferences?.playerOptions ?? const PlayerOptions.defaults();
+
+  /// 生效的弹幕显示样式（Phase 9 P0-7）。
+  DanmakuStyle get danmakuStyle =>
+      _uiPreferences?.danmakuStyle ?? DanmakuStyle.defaults;
+
+  /// 生效的直播设置（Phase 9）。
+  LiveSettings get liveSettings =>
+      _uiPreferences?.liveSettings ?? const LiveSettings.defaults();
+
+  /// 生效的字幕源设置（Phase 9）。
+  SubtitleSettings get subtitleSettings =>
+      _uiPreferences?.subtitleSettings ?? SubtitleSettings();
+
+  /// 生效的站点排序偏好（Phase 9）。
+  SiteOrderSettings get siteOrder =>
+      _uiPreferences?.siteOrder ?? const SiteOrderSettings.defaults();
+
+  Future<void> _registerDirectSpidersQuietly() async {
+    try {
+      final config = effectiveConfig;
+      if (config == null) return;
+      final hasDirect = config.sites.any((site) => directSpiderKind(site) != null);
+      if (!hasDirect) {
+        _router.setDirectSpiders(const {});
+        return;
+      }
+      final result = await _directRegistrar().materialize(config);
+      _router.setDirectSpiders(result);
+      // 站点可用性变了：重算列表（不重建路由缓存之外的状态）。
+      notifyListeners();
+    } catch (error) {
+      log.warning('直连站源注册失败：$error', scope: 'spider');
+    }
+  }
+
+  /// 生效的出站代理设置（Phase 9 P1-9）。
+  OutboundProxySettings get outboundProxy =>
+      _uiPreferences?.outboundProxy ?? const OutboundProxySettings.defaults();
+
+  /// 持久化出站代理设置，并按新设置重建 HTTP 客户端。
+  Future<bool> setOutboundProxy(OutboundProxySettings settings) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberOutboundProxy(settings);
+    _applyOutboundProxy();
+    // 站点服务持有上一代客户端：必须重建，否则新设置不生效。
+    _attachSiteService();
+    notifyListeners();
+    return ok;
+  }
+
+  void _applyOutboundProxy() {
+    final settings = outboundProxy;
+    final preferences = _uiPreferences?.dohSettings ?? DohSettings.defaults;
+    final config = _config;
+    final endpoints = DohEndpoint.parseList(config?.doh);
+    final hostMap = DohHostMap.parse(config?.hosts);
+    // 内容也进签名：只比数量时，改了 hosts 的值不会触发重建。
+    final endpointSignature = endpoints.map((e) => e.url).join(',');
+    final hostSignature = hostMap.entries.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join(',');
+    // 输入没变就不重建：`_attachSiteService` 每次配置装配都会调用本方法，
+    // 不设签名会反复关闭/新建客户端与解析器。
+    final signature = [
+      settings.enabled,
+      settings.defaultProxyUrl,
+      settings.validRules.length,
+      preferences.enabled,
+      preferences.url,
+      preferences.cacheMinutes,
+      endpointSignature,
+      hostSignature,
+      _injectedHttpClient != null,
+    ].join('|');
+    if (signature == _httpStackSignature) return;
+    _httpStackSignature = signature;
+
+    _disposeDohResolver();
+    final resolver = _buildDohResolver();
+    _dohResolver = resolver;
+    final injected = _injectedHttpClient;
+    final clientRebuilt =
+        settings.isEffective || (resolver?.isUsable ?? false);
+    if (!clientRebuilt && injected != null) {
+      // 测试注入的客户端优先：不能因为一次 bootstrap 就换成真实 HttpClient。
+      // 不调用 close()，否则会把注入的客户端一并关掉。
+      _httpClient = HttpApiClient(client: injected);
+    } else if (!clientRebuilt) {
+      _httpClient.close();
+      _httpClient = HttpApiClient();
+    } else {
+      _httpClient.close();
+      _httpClient = HttpApiClient(
+        client: createOutboundHttpClient(settings, doh: resolver),
+      );
+    }
+    log.info(
+      '出站传输：代理=${settings.isEffective ? "开启" : "关闭"} '
+      'DoH=${resolver?.isActive == true ? "开启" : "关闭"} '
+      'hosts=${hostMap.entries.length} endpoints=${endpoints.length}',
+      scope: 'proxy',
+    );
+  }
+
+  /// 构造 DoH 解析器：配置提供端点与 hosts，偏好提供开关/自定义端点/缓存时长。
+  DohResolver? _buildDohResolver() {
+    final preferences = _uiPreferences;
+    final config = _config;
+    final settings = preferences?.dohSettings ?? DohSettings.defaults;
+    final endpoints = DohEndpoint.parseList(config?.doh);
+    final hostMap = DohHostMap.parse(config?.hosts);
+    if (!settings.enabled && hostMap.isEmpty) return null;
+    if (settings.enabled &&
+        !settings.hasCustomUrl &&
+        endpoints.isEmpty &&
+        hostMap.isEmpty) {
+      return null;
+    }
+    return DohResolver(
+      settings: settings,
+      endpoints: endpoints,
+      hostMap: hostMap,
+      cachePath: p.join(paths.cacheDir, 'doh_cache.json'),
+      log: log,
+    );
+  }
+
+  void _disposeDohResolver() {
+    _dohResolver?.close();
+    _dohResolver = null;
+  }
+
+  /// 生效的 DoH 设置（Phase 9 P2-8）。
+  DohSettings get dohSettings =>
+      _uiPreferences?.dohSettings ?? DohSettings.defaults;
+
+  /// 生效的 DoH 解析器；未启用时为 null。
+  DohResolver? get dohResolver => _dohResolver;
+
+  /// 持久化 DoH 设置并重建 HTTP 客户端/站点服务。
+  Future<bool> setDohSettings(DohSettings settings) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberDohSettings(settings);
+    _applyOutboundProxy();
+    _attachSiteService();
+    notifyListeners();
+    return ok;
+  }
+
+  /// 隐身模式（Phase 9 P2-8）：不写播放历史与搜索记录。
+  bool get incognito => _uiPreferences?.incognito ?? false;
+
+  /// 持久化隐身模式。
+  Future<bool> setIncognito(bool value) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberIncognito(value);
+    notifyListeners();
+    return ok;
+  }
+
+  // ------------------------------------------------------------ 崩溃恢复 P2-8
+
+  /// 上一次未正常退出的标记；用户点「继续/忽略」前一直保留。
+  SessionMarker? get pendingRecovery => _pendingRecovery;
+
+  /// 崩溃日志（最近一段，有界）；没有则为 null。
+  String? get recoveryCrashLog => _sessionRecovery?.readCrashLog();
+
+  SessionRecoveryStore? get sessionRecovery => _sessionRecovery;
+
+  /// 用户已处理崩溃提示（继续播放或忽略）：删除标记。
+  Future<void> dismissRecovery() async {
+    _sessionRecovery?.acknowledgeRecovery();
+    if (_pendingRecovery == null) return;
+    _pendingRecovery = null;
+    notifyListeners();
+  }
+
+  /// 正常退出路径：删除会话标记（同步写，进程可能马上结束）。
+  void endSessionCleanly() {
+    _sessionRecovery?.endSessionCleanly();
+  }
+
+  /// 记录崩溃时的播放上下文：只存标识与进度，**不存 URL/Header**。
+  ///
+  /// 节流：同一条集 5 秒内不重复写盘（播放器每秒都会上报进度）。
+  void _recordRecoveryPlayback({
+    required String siteKey,
+    required Vod vod,
+    required String flag,
+    required String episodeName,
+    required String episodeId,
+    required Duration position,
+    required Duration duration,
+  }) {
+    final store = _sessionRecovery;
+    if (store == null) return;
+    final key = '$siteKey|${vod.vodId}|$episodeId';
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (key == _recoveryEpisodeKey && nowMs - _recoveryWrittenAtMs < 5000) {
+      return;
+    }
+    _recoveryEpisodeKey = key;
+    _recoveryWrittenAtMs = nowMs;
+    store.updatePlayback(
+      SessionPlaybackContext(
+        siteKey: siteKey,
+        vodId: vod.vodId,
+        vodName: vod.vodName,
+        flag: flag,
+        episodeName: episodeName,
+        episodeId: episodeId,
+        positionMs: position.inMilliseconds,
+        durationMs: duration.inMilliseconds,
+        updatedAtMs: nowMs,
+      ),
+      appVersion: appVersion,
+    );
+  }
+
+  /// 生效的站点分组规则（Phase 9 P1-5）。
+  SiteGroupSettings get siteGroupSettings =>
+      _uiPreferences?.siteGroupSettings ?? const SiteGroupSettings.defaults();
+
+  /// 持久化站点分组规则。
+  Future<bool> setSiteGroupSettings(SiteGroupSettings settings) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberSiteGroupSettings(settings);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 广告过滤总开关（默认开启；配置没有规则时无效果）。
+  bool get adBlockEnabled => _uiPreferences?.adBlockEnabled ?? true;
+
+  /// 持久化广告过滤开关，并立即更新代理规则。
+  Future<bool> setAdBlockEnabled(bool enabled) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberAdBlockEnabled(enabled);
+    _applyAdRulesToProxy();
+    // 直连 js/py 站点：每次配置装配后异步注册（不阻塞首页；失败只记日志）。
+    unawaited(_registerDirectSpidersQuietly());
+    notifyListeners();
+    return ok;
+  }
+
+  /// 合并了注入站点的配置；没有注入时就是原配置对象。
+  ///
+  /// 注意：**不是** `_config`。任何需要“用户配置 + 注入”的地方都用它；
+  /// 写回配置记录时必须用 [_config]，否则会把注入固化进用户配置。
+  AppConfig? get effectiveConfig {
+    final config = _config;
+    if (config == null) return null;
+    if (_injectedSites.isEmpty) return config;
+    return _effectiveConfigCache ??= mergeInjectedSites(config, _injectedSites);
+  }
+
+  /// 当前注入站点（供设置页展示）。
+  List<InjectedSiteEntry> get injectedSites =>
+      List<InjectedSiteEntry>.unmodifiable(_injectedSites);
+
+  /// 从粘贴文本识别并保存注入站点；返回新增/更新的条数。
+  Future<int> addInjectedSites(String text) async {
+    final db = _database;
+    if (db == null) return 0;
+    final sites = parseInjectedSites(text);
+    if (sites.isEmpty) return 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final site in sites) {
+      db.upsertInjectedSite(
+        InjectedSiteEntry(site: site, updatedAt: now),
+      );
+    }
+    _reloadInjectedSites();
+    log.info('站点注入：写入 ${sites.length} 个站点', scope: 'config');
+    return sites.length;
+  }
+
+  /// 启用/停用一条注入站点。
+  Future<bool> setInjectedSiteEnabled(String key, bool enabled) async {
+    final db = _database;
+    if (db == null) return false;
+    final existing = _injectedSites.where((entry) => entry.key == key).toList();
+    if (existing.isEmpty) return false;
+    db.upsertInjectedSite(
+      existing.first.copyWith(
+        enabled: enabled,
+        updatedAt: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+    _reloadInjectedSites();
+    return true;
+  }
+
+  /// 删除一条注入站点（不影响用户配置里的同名站点）。
+  Future<bool> removeInjectedSite(String key) async {
+    final db = _database;
+    if (db == null) return false;
+    db.deleteInjectedSite(key);
+    _reloadInjectedSites();
+    return true;
+  }
+
+  void _reloadInjectedSites() {
+    final db = _database;
+    if (db != null) {
+      try {
+        _injectedSites = db.injectedSites();
+      } catch (error) {
+        log.warning('重新读取注入站点失败：$error', scope: 'config');
+      }
+    }
+    _effectiveConfigCache = null;
+    _attachSiteService();
+    notifyListeners();
+  }
+
+  void _applyAdRulesToProxy() {
+    final config = _config;
+    _proxy.setAdRules(
+      config == null || !adBlockEnabled
+          ? const AdRuleSet.empty()
+          : AdRuleSet.fromConfig(config),
+    );
+  }
+
+  /// 生效的解析接口失败切换设置（Phase 9）。
+  ParseFailoverSettings get parseFailoverSettings =>
+      _uiPreferences?.parseFailover ??
+      const ParseFailoverSettings.defaults();
+
+  /// 持久化解析接口失败切换设置。
+  Future<bool> setParseFailoverSettings(ParseFailoverSettings settings) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberParseFailover(settings.normalized());
+    notifyListeners();
+    return ok;
+  }
+
+  /// 持久化站点排序偏好。
+  Future<bool> setSiteOrder(SiteOrderSettings settings) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberSiteOrder(settings);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 站点健康分：成功次数 / 总次数；没有样本的站点不出现在表里。
+  Map<String, double> siteHealthScores() {
+    final db = _database;
+    if (db == null) return const {};
+    final scores = <String, double>{};
+    for (final health in db.siteHealth()) {
+      final ok =
+          health.homeOk + health.categoryOk + health.detailOk + health.playOk;
+      final total = health.homeTotal +
+          health.categoryTotal +
+          health.detailTotal +
+          health.playTotal;
+      if (total <= 0) continue;
+      scores[health.siteKey] = ok / total;
+    }
+    return scores;
+  }
+
+  /// 生效的弹幕库设置（Phase 9）。
+  DanmakuSettings get danmakuSettings =>
+      _uiPreferences?.danmakuSettings ?? const DanmakuSettings.defaults();
+
+  /// 持久化弹幕库设置。
+  Future<bool> setDanmakuSettings(DanmakuSettings settings) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberDanmakuSettings(settings);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 持久化字幕源设置。
+  Future<bool> setSubtitleSettings(SubtitleSettings settings) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberSubtitleSettings(settings);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 持久化直播设置。
+  Future<bool> setLiveSettings(LiveSettings settings) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberLiveSettings(settings);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 持久化播放参数。写盘失败不影响当前会话，但都通知 UI 重建。
+  Future<bool> setPlayerOptions(PlayerOptions options) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberPlayerOptions(options);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 持久化弹幕显示样式（Phase 9 P0-7）。写盘失败不影响当前会话。
+  Future<bool> setDanmakuStyle(DanmakuStyle style) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberDanmakuStyle(style);
+    notifyListeners();
+    return ok;
+  }
+
+  // ---------------------------------------------------------------- 片头片尾
+
+  /// 某部影片的片头/片尾标记（Phase 9）。
+  SkipSegments skipSegmentsFor({
+    required String siteKey,
+    required String vodId,
+  }) {
+    final db = _database;
+    if (db == null) return const SkipSegments.none();
+    try {
+      return db.skipSegmentsFor(siteKey: siteKey, vodId: vodId);
+    } catch (error) {
+      log.warning('读取片头片尾失败：$error', scope: 'player');
+      return const SkipSegments.none();
+    }
+  }
+
+  /// 写入片头/片尾标记；null 表示清除该侧。
+  Future<bool> saveSkipSegments({
+    required String siteKey,
+    required String vodId,
+    int? introEndMs,
+    int? outroStartMs,
+  }) async {
+    final db = _database;
+    if (db == null) return false;
+    try {
+      db.upsertSkipSegments(
+        siteKey: siteKey,
+        vodId: vodId,
+        introEndMs: introEndMs,
+        outroStartMs: outroStartMs,
+      );
+      notifyListeners();
+      return true;
+    } catch (error) {
+      log.error('保存片头片尾失败：$error', scope: 'player');
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------- 字幕/弹幕记忆
+
+  SubtitleMatchRecord? subtitleMatchFor({
+    required String siteKey,
+    required String vodId,
+    required String episodeName,
+  }) {
+    final db = _database;
+    if (db == null) return null;
+    try {
+      return db.subtitleMatchFor(
+        siteKey: siteKey,
+        vodId: vodId,
+        episodeName: episodeName,
+      );
+    } catch (error) {
+      log.warning('读取字幕记忆失败：$error', scope: 'subtitle');
+      return null;
+    }
+  }
+
+  Future<bool> rememberSubtitleMatch(SubtitleMatchRecord record) async {
+    final db = _database;
+    if (db == null) return false;
+    try {
+      db.upsertSubtitleMatch(record);
+      return true;
+    } catch (error) {
+      log.error('保存字幕记忆失败：$error', scope: 'subtitle');
+      return false;
+    }
+  }
+
+  Future<bool> forgetSubtitleMatch({
+    required String siteKey,
+    required String vodId,
+    required String episodeName,
+  }) async {
+    final db = _database;
+    if (db == null) return false;
+    try {
+      db.deleteSubtitleMatch(
+        siteKey: siteKey,
+        vodId: vodId,
+        episodeName: episodeName,
+      );
+      return true;
+    } catch (error) {
+      log.error('删除字幕记忆失败：$error', scope: 'subtitle');
+      return false;
+    }
+  }
+
+  DanmakuMatchRecord? danmakuMatchFor({
+    required String siteKey,
+    required String vodId,
+    required String episodeName,
+  }) {
+    final db = _database;
+    if (db == null) return null;
+    try {
+      return db.danmakuMatchFor(
+        siteKey: siteKey,
+        vodId: vodId,
+        episodeName: episodeName,
+      );
+    } catch (error) {
+      log.warning('读取弹幕记忆失败：$error', scope: 'danmaku');
+      return null;
+    }
+  }
+
+  Future<bool> rememberDanmakuMatch(DanmakuMatchRecord record) async {
+    final db = _database;
+    if (db == null) return false;
+    try {
+      db.upsertDanmakuMatch(record);
+      return true;
+    } catch (error) {
+      log.error('保存弹幕记忆失败：$error', scope: 'danmaku');
+      return false;
+    }
+  }
+
+  Future<bool> forgetDanmakuMatch({
+    required String siteKey,
+    required String vodId,
+    required String episodeName,
+  }) async {
+    final db = _database;
+    if (db == null) return false;
+    try {
+      db.deleteDanmakuMatch(
+        siteKey: siteKey,
+        vodId: vodId,
+        episodeName: episodeName,
+      );
+      return true;
+    } catch (error) {
+      log.error('删除弹幕记忆失败：$error', scope: 'danmaku');
+      return false;
+    }
+  }
+
   /// 主题模式（`dark` / `light` / `system`）。
   ///
   /// 这一层只暴露原始字符串、不暴露 Flutter 的 `ThemeMode`：状态层目前只依赖
@@ -700,7 +1353,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// 使用实例级 [SpiderRouter.classifySite] 而非静态 [SpiderRouter.classify],
   /// 才能对 `spider-local:` 站点给出真实可用性(§8.1、§9.7)。
   List<SiteListItem> get siteItems {
-    final config = _config;
+    final config = effectiveConfig;
     if (config == null) return const [];
     return config.sites
         .where((site) => !site.hide)
@@ -724,7 +1377,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     final seen = <String>[];
     for (final item in siteItems) {
       if (!item.site.searchable) continue;
-      for (final group in siteGroupsOf(item.site.name)) {
+      for (final group in siteGroupsOf(
+        item.site.name,
+        rules: siteGroupSettings.enabledRules,
+      )) {
         if (!seen.contains(group)) seen.add(group);
       }
     }
@@ -763,6 +1419,23 @@ class AppState extends ChangeNotifier implements SyncStateHost {
           scope: 'storage');
     }
 
+    // 崩溃恢复（Phase 9 P2-8）：读上一次会话标记，再写本次标记。
+    // 标记存在且 pid 不是自己 → 上次进程没有走正常退出路径。
+    final recovery = _sessionRecovery ??= SessionRecoveryStore(
+      dataDir: paths.dataDir,
+      log: log,
+    );
+    final previousSession = recovery.readMarker();
+    if (previousSession != null &&
+        previousSession.pid != SessionRecoveryStore.currentPid) {
+      _pendingRecovery = previousSession;
+      log.warning(
+        '检测到上次未正常退出：${describeRecoveredSession(previousSession, DateTime.now())}',
+        scope: 'recovery',
+      );
+    }
+    recovery.beginSession(appVersion: appVersion);
+
     // 安卓接入与同步设置（Phase 5）：读取失败不阻塞启动，退回默认（全关）。
     await syncState.load();
 
@@ -784,11 +1457,20 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     // 搜索历史与偏好同源：启动时从磁盘恢复（上游安卓每次进搜索页都读
     // `Setting.getKeyword()`；PC 端在 bootstrap 恢复一次，后续增删走 store）。
     _searchHistory = uiPreferences.searchKeywords;
+    // 出站代理：从设置恢复后立即重建 HTTP 客户端（未开启时等价于默认客户端）。
+    _applyOutboundProxy();
 
     final openResult = AppDatabase.open(paths.databasePath);
     _database = openResult.database;
     if (!openResult.succeeded) {
       log.error('数据库打开失败，降级为无历史模式：${openResult.error}');
+    }
+    if (_database != null) {
+      try {
+        _injectedSites = _database!.injectedSites();
+      } catch (error) {
+        log.warning('读取注入站点失败：$error', scope: 'config');
+      }
     }
 
     var platform = Platform.operatingSystem;
@@ -844,7 +1526,185 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     );
 
     _configPhase = hasConfig ? LoadPhase.ready : LoadPhase.idle;
+    // 追番调度：应用运行期间生效；关闭时不会创建定时器（测试也不会残留 Timer）。
+    _restartFollowingTimer();
     notifyListeners();
+  }
+
+  // ---------------------------------------------------------------- 备份/恢复
+
+  BackupService get backupService => BackupService(paths: paths, log: log);
+
+  /// 默认备份路径：`<data>/backups/webhtv-backup-<时间>.zip`。
+  String defaultBackupPath({DateTime? now}) => p.join(
+    paths.dataDir,
+    'backups',
+    defaultBackupFileName(now ?? DateTime.now()),
+  );
+
+  /// 生成备份（数据库用 `VACUUM INTO` 快照，避免复制到半个事务）。
+  Future<BackupCreateResult> createBackup({
+    String? outputPath,
+    DateTime? now,
+  }) {
+    final database = _database;
+    if (database == null) {
+      return Future.value(
+        const BackupCreateResult(
+          ok: false,
+          path: '',
+          message: '本地存储不可用，无法备份',
+        ),
+      );
+    }
+    return backupService.createBackup(
+      database: database,
+      outputPath: outputPath?.trim().isNotEmpty == true
+          ? outputPath!.trim()
+          : defaultBackupPath(now: now),
+      appVersion: appVersion,
+      now: now,
+    );
+  }
+
+  Future<BackupInspectionResult> inspectBackup(String path) =>
+      backupService.inspect(path);
+
+  /// 应用备份；成功返回 null，失败返回用户可读原因。
+  ///
+  /// 流程：校验 → 关闭数据库 → 写设置与库（失败回滚）→ 重新 bootstrap。
+  /// **校验在关闭数据库之前**：坏备份不会让当前会话先失去本地存储。
+  Future<String?> restoreBackup(String path) async {
+    final BackupContents contents;
+    try {
+      contents = await backupService.readForRestore(path);
+    } catch (error) {
+      log.warning('备份校验失败：$error', scope: 'backup');
+      return '备份校验失败：$error';
+    }
+
+    // 回滚副本：两个文件都可能被替换，任一写入失败要恢复原状。
+    final dbPath = paths.databasePath;
+    final settingsFile = File(paths.settingsPath);
+    final dbFile = File(dbPath);
+    final oldSettings = await settingsFile.exists()
+        ? await settingsFile.readAsBytes()
+        : null;
+    final oldDatabase = await dbFile.exists() ? await dbFile.readAsBytes() : null;
+
+    await _prepareForDataSwap();
+    try {
+      await _writeFileAtomic(settingsFile, contents.settingsBytes);
+      // 旧库的 WAL/SHM 必须删掉：它们属于旧库，留着会让新库读到旧事务。
+      for (final suffix in ['-wal', '-shm']) {
+        final sidecar = File('$dbPath$suffix');
+        if (await sidecar.exists()) await sidecar.delete();
+      }
+      await _writeFileAtomic(dbFile, contents.databaseBytes);
+    } catch (error) {
+      log.error('写入恢复文件失败，尝试回滚：$error', scope: 'backup');
+      try {
+        if (oldSettings != null) {
+          await _writeFileAtomic(settingsFile, oldSettings);
+        } else if (await settingsFile.exists()) {
+          await settingsFile.delete();
+        }
+        if (oldDatabase != null) {
+          await _writeFileAtomic(dbFile, oldDatabase);
+        } else if (await dbFile.exists()) {
+          await dbFile.delete();
+        }
+      } catch (rollbackError) {
+        log.error('回滚失败：$rollbackError', scope: 'backup');
+      }
+      await bootstrap();
+      notifyListeners();
+      return '写入恢复文件失败：$error';
+    }
+
+    await bootstrap();
+    notifyListeners();
+    log.info(
+      '备份恢复完成 ${describeBackupManifest(contents.manifest)}',
+      scope: 'backup',
+    );
+    _afterDataSwap();
+    return null;
+  }
+
+  /// 重置全部本地数据（设置 + 数据库），回到「未导入配置」状态。
+  Future<String?> resetAllData() async {
+    await _prepareForDataSwap();
+    try {
+      final dbPath = paths.databasePath;
+      for (final path in [
+        dbPath,
+        '$dbPath-wal',
+        '$dbPath-shm',
+        paths.settingsPath,
+      ]) {
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+      }
+    } catch (error) {
+      log.error('删除本地数据失败：$error', scope: 'backup');
+      await bootstrap();
+      notifyListeners();
+      return '删除本地数据失败：$error';
+    }
+    await bootstrap();
+    notifyListeners();
+    log.info('本地数据已重置（设置与数据库已删除）', scope: 'backup');
+    _afterDataSwap();
+    return null;
+  }
+
+  /// 数据交换后重建依赖配置的附属状态（代理广告规则、直连站源注册）。
+  void _afterDataSwap() {
+    _applyAdRulesToProxy();
+    if (_config != null) {
+      unawaited(_registerDirectSpidersQuietly());
+    }
+  }
+
+  /// 数据交换前清空所有引用旧库/旧配置的内存状态。
+  Future<void> _prepareForDataSwap() async {
+    _followingTimer?.cancel();
+    _followingKickTimer?.cancel();
+    _followingService = null;
+    _database?.dispose();
+    _database = null;
+    _configs = const [];
+    _activeRecord = null;
+    _config = null;
+    _siteService = null;
+    _selectedSite = null;
+    _injectedSites = const [];
+    _effectiveConfigCache = null;
+    _configPhase = LoadPhase.idle;
+    _contentPhase = LoadPhase.idle;
+    _detailPhase = LoadPhase.idle;
+    _lastError = null;
+    _homeResult = null;
+    _categoryResult = null;
+    _detailResult = null;
+    _detailError = null;
+    _categoryFilters = const {};
+    _resetCategoryPaging();
+    _resetTmdbServices();
+    _searchHistory = const [];
+    _lastDecision = null;
+    _router.setDirectSpiders(const {});
+    _applyAdRulesToProxy();
+    notifyListeners();
+  }
+
+  Future<void> _writeFileAtomic(File target, List<int> bytes) async {
+    await target.parent.create(recursive: true);
+    final temp = File('${target.path}.restore.tmp');
+    await temp.writeAsBytes(bytes, flush: true);
+    if (await target.exists()) await target.delete();
+    await temp.rename(target.path);
   }
 
   String _windowsArchitecture() {
@@ -1109,6 +1969,8 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     final seasonService = _tmdbSeasonService;
     final media = identity.identity;
     if (seasonService == null || media == null) return;
+    // 隐身模式：季度进度是历史的投影，同样不写。
+    if (incognito) return;
     try {
       seasonService.recordProgress(
         configId: tmdbConfigId,
@@ -1247,11 +2109,20 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   }
 
   void _attachSiteService() {
-    final config = _config;
+    // 配置/注入变化后重新合并（缓存只在同一次装配内有效）。
+    _effectiveConfigCache = null;
+    // 配置可能带来新的 `doh`/`hosts`：先刷新出站传输（内部有输入签名，未变不重建）。
+    _applyOutboundProxy();
+    final config = effectiveConfig;
     if (config == null) {
       _siteService = null;
+      _proxy.setAdRules(const AdRuleSet.empty());
       return;
     }
+    // 广告规则随配置生效；总开关关闭时注入空集（行为等价于未配置）。
+    _applyAdRulesToProxy();
+    // 直连 js/py 站点：每次配置装配后异步注册（不阻塞首页；失败只记日志）。
+    unawaited(_registerDirectSpidersQuietly());
     _siteService = SiteService(
       appConfig: config,
       playbackBridge: _androidPlaybackBridge,
@@ -1924,10 +2795,20 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       for (final item in siteItems)
         if (_inSearchScope(item.site, scopeSiteKey, scopeGroup)) item,
     ];
-    final sites = allItems
+    var sites = allItems
         .where((item) => item.availability.available && item.site.searchable)
         .map((item) => item.site)
         .toList();
+    // Phase 9 P1-3：健康排序只影响搜索顺序，不改变配置本身。
+    if (siteOrder.healthSort && sites.length > 1) {
+      final byKey = {for (final site in sites) site.key: site};
+      final ordered = orderSiteKeysByHealth(
+        keys: [for (final site in sites) site.key],
+        enabled: true,
+        scores: siteHealthScores(),
+      );
+      sites = [for (final key in ordered) byKey[key]!];
+    }
     final outcome = MultiSiteSearchOutcome(
       runId: runId,
       keyword: keyword,
@@ -1950,13 +2831,16 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     ].take(20).toList();
     // 持久化搜索历史（上游安卓 `RecordAdapter.add` 落 `Setting.putKeyword`）。
     // 写盘失败不影响当前会话；未 bootstrap（测试路径）时安静跳过。
-    unawaited(
-      _uiPreferences
-              ?.rememberSearchKeyword(keyword)
-              .then((_) => null)
-              .catchError((_) => null) ??
-          Future<void>.value(),
-    );
+    // 隐身模式下只在本次会话内存里保留，不落盘（P2-8）。
+    if (!incognito) {
+      unawaited(
+        _uiPreferences
+                ?.rememberSearchKeyword(keyword)
+                .then((_) => null)
+                .catchError((_) => null) ??
+            Future<void>.value(),
+      );
+    }
     notifyListeners();
 
     if (service == null || sites.isEmpty) {
@@ -1994,7 +2878,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
             SiteSearchEntry(
               siteKey: site.key,
               siteName: site.name,
-              groups: siteGroupsOf(site.name),
+              groups: siteGroupsOf(
+                site.name,
+                rules: siteGroupSettings.enabledRules,
+              ),
               result: value.value,
               latency: value.latency,
               fromCache: value.fromCache,
@@ -2010,7 +2897,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
             SiteSearchEntry(
               siteKey: site.key,
               siteName: site.name,
-              groups: siteGroupsOf(site.name),
+              groups: siteGroupsOf(
+                site.name,
+                rules: siteGroupSettings.enabledRules,
+              ),
               error: failure,
             ),
           );
@@ -2405,6 +3295,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         episodeTarget: episodeTarget,
         flag: flag,
         vodId: vodId,
+        parseFailover: parseFailoverSettings,
       );
       // 退出旧会话并接入本地代理：Header 注入与 Range 都经同一 token 校验（§9.6、§11.3.1）。
       revokeProxySession();
@@ -2437,6 +3328,8 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     final database = _database;
     final poster = posterUrl.trim();
     if (database == null || poster.isEmpty || item.vodPic == poster) return;
+    // 隐身模式不写历史，也不做历史回填。
+    if (incognito) return;
     try {
       database.upsertHistory(
         siteKey: item.siteKey,
@@ -2473,6 +3366,15 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     final database = _database;
     final effectiveSiteKey = siteKey ?? _selectedSite?.key ?? 'cli';
     if (database == null) return;
+    // 隐身模式（Phase 9 P2-8）：不写任何播放历史（对齐安卓
+    // `PlaybackProgressWriter` 的 `isIncognito` 闸门）。
+    if (incognito) {
+      if (!_incognitoNoticeLogged) {
+        _incognitoNoticeLogged = true;
+        log.info('隐身模式：本次会话不记录播放历史与搜索记录', scope: 'privacy');
+      }
+      return;
+    }
     try {
       database.upsertHistory(
         siteKey: effectiveSiteKey,
@@ -2484,6 +3386,16 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         episodeId: episodeId,
         positionMs: position.inMilliseconds,
         durationMs: duration.inMilliseconds,
+      );
+      // 崩溃恢复上下文（P2-8）：与历史同源，但只存标识与进度。
+      _recordRecoveryPlayback(
+        siteKey: effectiveSiteKey,
+        vod: vod,
+        flag: flag,
+        episodeName: episodeName,
+        episodeId: episodeId,
+        position: position,
+        duration: duration,
       );
     } catch (error) {
       log.warning('写入播放进度失败：$error', scope: 'history');
@@ -3029,9 +3941,169 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     notifyListeners();
   }
 
+  // ---------------------------------------------------------------- 追番 P2-1
+
+  FollowingSettings get followingSettings =>
+      _uiPreferences?.followingSettings ?? FollowingSettings.defaults;
+
+  /// 持久化追番设置并重启调度定时器。
+  Future<bool> setFollowingSettings(FollowingSettings settings) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberFollowingSettings(settings);
+    _restartFollowingTimer();
+    notifyListeners();
+    return ok;
+  }
+
+  FollowingService? get _following {
+    final database = _database;
+    if (database == null) return null;
+    return _followingService ??= FollowingService(
+      database: database,
+      resolveLines: _resolveFollowingLines,
+      log: log,
+    );
+  }
+
+  List<Following> get followings => _following?.all() ?? const [];
+
+  /// 有更新的追番数量（侧栏徽标 / 页面标题）。
+  int get followingUpdateCount =>
+      followings.where((item) => item.hasUpdate).length;
+
+  bool isFollowing({required String siteKey, required String vodId}) =>
+      _following?.byVod(siteKey, vodId) != null;
+
+  Following? followingForVod({
+    required String siteKey,
+    required String vodId,
+  }) => _following?.byVod(siteKey, vodId);
+
+  /// 从详情页追番；已存在时只更新线路/海报/标题。
+  Following? followFromDetail({
+    required Site site,
+    required Vod vod,
+    String flag = '',
+    String sourceFlag = '',
+    int releasedEpisode = 0,
+  }) {
+    final service = _following;
+    if (service == null) return null;
+    final item = service.add(
+      siteKey: site.key,
+      vodId: vod.vodId,
+      vodName: vod.vodName,
+      vodPic: vod.vodPic,
+      flag: flag,
+      sourceFlag: sourceFlag,
+      releasedEpisode: releasedEpisode,
+      notifyEnabled: followingSettings.notifyEnabled,
+    );
+    log.info(
+      '追番：${vod.vodName} site=${site.key} 已发布=$releasedEpisode',
+      scope: 'following',
+    );
+    notifyListeners();
+    return item;
+  }
+
+  Future<void> unfollowFollowing(Following item) async {
+    _following?.remove(item);
+    notifyListeners();
+  }
+
+  Future<void> markFollowingRead(Following item) async {
+    _following?.markRead(item);
+    notifyListeners();
+  }
+
+  /// 用户从追番页打开最新集后调用：集数视为已看、标记已读。
+  Future<void> markFollowingWatched(Following item) async {
+    _following?.markWatched(item);
+    notifyListeners();
+  }
+
+  Future<FollowingCheckOutcome?> checkFollowing(Following item) async {
+    final service = _following;
+    if (service == null) return null;
+    final outcome = await service.check(item);
+    notifyListeners();
+    return outcome;
+  }
+
+  Future<FollowingCheckSummary> checkAllFollowings({
+    bool onlyDue = false,
+  }) async {
+    final service = _following;
+    if (service == null) return FollowingCheckSummary.empty;
+    final summary = await service.checkAll(onlyDue: onlyDue);
+    if (summary.checked > 0) {
+      log.info(
+        '追番检查：checked=${summary.checked} changed=${summary.changed} '
+        'failed=${summary.failed}',
+        scope: 'following',
+      );
+    }
+    notifyListeners();
+    return summary;
+  }
+
+  /// 站点详情 → 线路集数（供 `FollowingService` 调用）。
+  Future<List<FollowingLineEpisodes>?> _resolveFollowingLines(
+    Following item,
+  ) async {
+    final config = effectiveConfig;
+    final service = _siteService;
+    if (config == null || service == null) return null;
+    final site = config.sites
+        .where((candidate) => candidate.key == item.siteKey)
+        .firstOrNull;
+    if (site == null) return null;
+    final result = await service.detail(site, item.vodId);
+    if (result.value.list.isEmpty) return null;
+    final vod = result.value.list.first;
+    return [
+      for (final line in playLinesOf(vod))
+        FollowingLineEpisodes(
+          flag: line.flag,
+          sourceFlag: line.sourceFlag ?? line.playbackFlag,
+          episodeCount: line.episodes.length,
+          latestEpisodeName: line.episodes.isEmpty
+              ? ''
+              : line.episodes.last.name,
+          latestEpisodeTarget: line.episodes.isEmpty
+              ? ''
+              : line.episodes.last.url,
+        ),
+    ];
+  }
+
+  /// 重启追番调度：应用运行期间按设置间隔检查到期条目。
+  ///
+  /// PC 没有后台服务/WorkManager，应用关闭后不会检查——这是与安卓的已知差异。
+  void _restartFollowingTimer() {
+    _followingTimer?.cancel();
+    _followingTimer = null;
+    _followingKickTimer?.cancel();
+    _followingKickTimer = null;
+    if (!followingSettings.enabled || _database == null) return;
+    final interval = Duration(minutes: followingSettings.intervalMinutes);
+    _followingTimer = Timer.periodic(interval, (_) {
+      unawaited(checkAllFollowings(onlyDue: true));
+    });
+    // 启动后延迟 10s 补一次到期检查，不阻塞首屏。
+    _followingKickTimer = Timer(const Duration(seconds: 10), () {
+      unawaited(checkAllFollowings(onlyDue: true));
+    });
+  }
+
   @override
   void dispose() {
     _detailRunId++;
+    _followingTimer?.cancel();
+    _followingKickTimer?.cancel();
+    _followingService = null;
     _router.dispose();
     _importService.close();
     _liveService?.close();

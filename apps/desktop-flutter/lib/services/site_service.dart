@@ -10,6 +10,7 @@ import 'dart:async';
 
 import '../core/app_error.dart';
 import '../core/http_api.dart';
+import '../core/parse_failover.dart';
 import '../core/parse_runtime.dart';
 import '../core/playback.dart';
 import '../core/protocol.dart';
@@ -319,6 +320,7 @@ class SiteService {
     String? flag,
     String? vodId,
     ParseService? parseService,
+    ParseFailoverSettings? parseFailover,
   }) async {
     final runtime = router.runtimeFor(site);
     final stopwatch = Stopwatch()..start();
@@ -375,6 +377,7 @@ class SiteService {
           parse: preliminary.parse,
           jx: preliminary.jx,
           parseService: parseService,
+          parseFailover: parseFailover,
           stopwatch: stopwatch,
         );
         return SiteCallResult(value: resolved, latency: stopwatch.elapsed);
@@ -431,6 +434,7 @@ class SiteService {
           parse: decision.parse,
           jx: decision.jx,
           parseService: parseService,
+          parseFailover: parseFailover,
           stopwatch: stopwatch,
         );
       }
@@ -522,16 +526,18 @@ class SiteService {
     int? parse,
     int? jx,
     ParseService? parseService,
+    ParseFailoverSettings? parseFailover,
     required Stopwatch stopwatch,
   }) async {
     final service = parseService ?? (parseService = ParseService());
     final selection = ParseRuntime.select(appConfig.parses, flag: flag);
-    final outcome = await service.run(
+    final outcome = await service.runWithFallback(
       selection: selection,
       entries: appConfig.parses,
       webUrl: target,
       flag: flag,
       source: (jx ?? 0) == 1 ? 'jx' : 'parse',
+      failover: parseFailover ?? const ParseFailoverSettings.defaults(),
     );
     // 解析结果应当是真实媒体地址（m3u8/mp4/dash…，§12.3「解析结果必须校验媒体
     // 类型」）。若解析器返回的是另一个待解析目标（对齐 Android

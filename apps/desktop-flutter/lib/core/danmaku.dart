@@ -521,6 +521,7 @@ class DanmakuTrackAllocator {
     this.trackHeight = 28,
     this.gap = 12,
     this.maxTracksRatio = 0.6,
+    this.maxTracks = 0,
   });
 
   /// 画面宽度（逻辑像素）。
@@ -538,15 +539,23 @@ class DanmakuTrackAllocator {
   /// 滚动弹幕最多占用画面的比例（避免遮挡整屏）。
   final double maxTracksRatio;
 
+  /// 最大轨道数（0 = 只受 [maxTracksRatio] 限制）。
+  ///
+  /// 与 Android `DanmakuSetting.getDisplayLines()` 对应：用户想「少几行」时
+  /// 直接限制条数，而不是再去调比例。
+  final int maxTracks;
+
   int get scrollTrackCount {
     final usable = height * maxTracksRatio;
     final count = (usable / trackHeight).floor();
-    return count < 1 ? 1 : count;
+    final bounded = count < 1 ? 1 : count;
+    return maxTracks > 0 && bounded > maxTracks ? maxTracks : bounded;
   }
 
   int get fixedTrackCount {
     final count = (height * 0.5 / trackHeight).floor();
-    return count < 1 ? 1 : count;
+    final bounded = count < 1 ? 1 : count;
+    return maxTracks > 0 && bounded > maxTracks ? maxTracks : bounded;
   }
 
   /// 为一条滚动弹幕分配轨道下标；找不到可用轨道时返回 null（丢弃）。
@@ -626,6 +635,8 @@ class DanmakuTrackAllocator {
     double height = 720,
     double trackHeight = 28,
     double gap = 12,
+    double maxTracksRatio = 0.6,
+    int maxTracks = 0,
   }) {
     if (!enabled || items.isEmpty) return const [];
     final allocator = DanmakuTrackAllocator(
@@ -633,6 +644,8 @@ class DanmakuTrackAllocator {
       height: height,
       trackHeight: trackHeight,
       gap: gap,
+      maxTracksRatio: maxTracksRatio,
+      maxTracks: maxTracks,
     );
 
     // 按开始时刻排定轨道（先排序，保证确定性）。

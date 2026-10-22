@@ -1686,6 +1686,42 @@ class _DetailPageState extends State<DetailPage> {
                   : Icons.bookmark_border,
             ),
           ),
+          Builder(
+            builder: (context) {
+              final site = state.selectedSite;
+              if (site == null) return const SizedBox.shrink();
+              final existing = state.followingForVod(
+                siteKey: site.key,
+                vodId: vod.vodId,
+              );
+              final followed = existing != null;
+              return IconButton(
+                key: const ValueKey('detail-follow'),
+                tooltip: followed ? '取消追番' : '追番',
+                onPressed: () {
+                  if (followed) {
+                    unawaited(state.unfollowFollowing(existing));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('已取消追番')),
+                    );
+                    return;
+                  }
+                  final line = lines.isEmpty ? null : _activeLine(lines);
+                  state.followFromDetail(
+                    site: site,
+                    vod: vod,
+                    flag: line?.flag ?? '',
+                    sourceFlag: line?.sourceFlag ?? line?.playbackFlag ?? '',
+                    releasedEpisode: line?.episodes.length ?? 0,
+                  );
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('已加入追番')),
+                  );
+                },
+                icon: Icon(followed ? Icons.star : Icons.star_border),
+              );
+            },
+          ),
           IconButton(
             tooltip: '刷新详情',
             onPressed: () => state.loadDetail(widget.vod),
