@@ -488,7 +488,8 @@ void main() {
       vodPlayUrl: '第1集\$http://x/e1#第2集\$http://x/e2',
     );
 
-    Future<void> pump(WidgetTester tester) async {
+    Future<void> pump(WidgetTester tester, {Vod? target}) async {
+      final movie = target ?? vod;
       tester.view.physicalSize = const Size(1400, 2000);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() {
@@ -496,7 +497,7 @@ void main() {
         tester.view.resetDevicePixelRatio();
       });
       await tester.pumpWidget(
-        MaterialApp(home: DetailPage(state: appState, vod: vod)),
+        MaterialApp(home: DetailPage(state: appState, vod: movie)),
       );
       await tester.pump();
       // **注入「本页详情已到达」**：否则 `state.detailResult` 为 null
@@ -507,7 +508,7 @@ void main() {
       // 「详情到达后用历史决定文案」路径——不注入就是在测另一条路。
       // 依据：`loadDetail` 在无站点服务时**提前返回**（`app_state.dart:2116`，
       // 早于 `_detailResult = null`），注入不会被页面自身请求清掉。
-      appState.seedDetailForTest(vod: vod);
+      appState.seedDetailForTest(vod: movie);
       await tester.pump();
     }
 
@@ -589,6 +590,54 @@ void main() {
         findsOneWidget,
         reason: '必须播历史命中的第2集，而不是硬编码的第 0 集（第1集）',
       );
+    });
+
+    testWidgets('桥接线路（显示名 ≠ 源线路名）→ 仍能续播', (tester) async {
+      // **这是本 bug 的唯一钉子。**
+      //
+      // 线上真实数据（用户库 webhtv-pc.sqlite3，行 id 42630）：
+      //   history.flag = '丫仙女'（站点源线路名）
+      //   history.episode_name = '11(8.1 GB)'
+      //   history.episode_id = '1@12387@0@10'（不是 URL，也不是 Android 同步的 SHA-256）
+      // 而详情页展示的线路叫 'uc'，两者靠 `vod.extra['bridge_playback_flags']`
+      // 映射（`playback.dart:69-79` 的 `parseVodPlayLines` 把它挂成
+      // `VodPlayLine.sourceFlag`，`protocol.dart:974` 的 `playbackFlag` 取它）。
+      //
+      // 修复前 `_heroPlayLabel` 用**展示名** 'uc' 去查历史，
+      // 而库里存的是**源名** '丫仙女'，`findHistory` 第 1 步 SQL 的
+      // `flag = ?` 精确比较永不命中；第 2 步（集名兜底）又因没传
+      // `episodeName` 直接 `return null`；于是 `resumePosition == null`
+      // → 文案回落成「播放第一集」。而 `matched` 仍是 true，
+      // 所以「上次看到这里」的角标是对的——正是截图里那种自相矛盾的表现。
+      //
+      // 下面的 fixture 刻意复刻这三点：显示名 'uc'、源名 '丫仙女'、
+      // 集入口是**不透明 id**（只能靠集名兜底命中）。
+      final bridged = Vod(
+        vodId: 'demo-1',
+        vodName: '剧集甲',
+        vodPlayFrom: 'uc',
+        vodPlayUrl: '1(8.09 GB)\$1@12385@0@8#11(8.1 GB)\$1@12386@0@9',
+        extra: const {
+          'bridge_playback_flags': {'uc': '丫仙女'},
+        },
+      );
+      appState.database!.upsertHistory(
+        siteKey: appState.selectedSite?.key ?? '',
+        vodId: 'demo-1',
+        vodName: '剧集甲',
+        flag: '丫仙女',
+        episodeName: '11(8.1 GB)',
+        episodeId: '1@12387@0@10',
+        positionMs: 30000,
+        durationMs: 100000,
+      );
+      await pump(tester, target: bridged);
+      expect(
+        find.text('继续播放 · 11(8.1 GB)'),
+        findsOneWidget,
+        reason: '历史 flag 存的是源线路名（丫仙女），查询必须用 playbackFlag 而不是展示名（uc）',
+      );
+      expect(find.byKey(const ValueKey('detail-hero-play')), findsOneWidget);
     });
   });
 

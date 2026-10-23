@@ -1422,13 +1422,47 @@ class _DetailPageState extends State<DetailPage> {
   /// §3.1 要避免的那种漂移。
   String _heroPlayLabel(List<VodPlayLine> lines, Vod vod) {
     final target = _resumeTarget(lines);
-    final resume = widget.state.resumePositionFor(
-      siteKey: widget.state.selectedSite?.key ?? '',
-      vodId: vod.vodId,
-      flag: target.flag,
-      episodeId: _history?.episodeId,
-    );
+    final resume = _resumePositionOf(vod, lines, target);
     return historyPlayLabel(target: target, resumePosition: resume);
+  }
+
+  /// 历史那一集的续播位置（`design/02` §3.1 的第二个条件）。
+  ///
+  /// **必须用与 [_play] 完全相同的身份去查**，否则就是「明明有播放记录却查不到」：
+  ///
+  /// - **线路**：`history.flag` 存的是**站点源线路名**，只能拿
+  ///   [VodPlayLine.playbackFlag]（`sourceFlag ?? flag`）去比。
+  ///   [HistoryResumeTarget.flag] 是**展示线路名**，桥接详情
+  ///   （`bridge_playback_flags`）里两者并不相等——用户实报的历史写在「丫仙女」、
+  ///   详情展示为「uc」：拿展示名查 `flag = ?` 永远落空，于是 `matched` 为真
+  ///   （「上次看到这里」标记是对的）而文案回落成「播放第一集」。
+  /// - **集**：`episodeId` 必须给 [VodEpisode.url]（站点入口，本地播放就是这样
+  ///   写入的），`episodeName` 也必须一并给——同步来的 `episode_id` 是安卓哈希，
+  ///   只能靠集名对上（同 [_play] 里那段注释）。
+  ///
+  /// 只认命中线路里的那一集：`episodeIndex` 是线路**原始下标**，越界时返回 null
+  /// （详情刷新期间 `lines` 与本行可能短暂不同步），而不是拿别的集去猜。
+  Duration? _resumePositionOf(
+    Vod vod,
+    List<VodPlayLine> lines,
+    HistoryResumeTarget target,
+  ) {
+    for (final line in lines) {
+      if (line.flag != target.flag) continue;
+      if (target.episodeIndex < 0 ||
+          target.episodeIndex >= line.episodes.length) {
+        return null;
+      }
+      final episode = line.episodes[target.episodeIndex];
+      return widget.state.resumePositionFor(
+        siteKey: widget.state.selectedSite?.key ?? '',
+        vodId: vod.vodId,
+        flag: line.playbackFlag,
+        episodeId: episode.url,
+        episodeName: episode.name,
+      );
+    }
+    return null;
   }
 
   /// 历史那一集在**渲染列表**里的下标（-1 = 无，`design/02` §6）。
