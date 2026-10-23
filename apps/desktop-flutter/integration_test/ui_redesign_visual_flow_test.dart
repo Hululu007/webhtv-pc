@@ -447,6 +447,21 @@ void main() {
         );
       }
 
+      // 复位到顶部再拍**首屏**。
+      //
+      // 上一档位结尾的 `drag(-700)` 会被下一档位的新 `ListView` 继承：
+      // `Scrollable` 把偏移量写进 `PageStorage`，换 widget 树也读回来。
+      // 实测后果是 r2x1 / r235x1 两张"首屏"其实各自被上移了 356px，
+      // 内容看上去贴顶（差点被误判成"内容带跨比例漂移"的产品缺陷）。
+      final scrollable = find.byType(Scrollable);
+      if (scrollable.evaluate().isNotEmpty) {
+        final position = tester.state<ScrollableState>(scrollable.first).position;
+        if (position.pixels != 0) {
+          position.jumpTo(0);
+          await tester.pumpAndSettle();
+        }
+      }
+
       await capture(
         tester,
         relativePath: '.impeccable/review/source-detail-${entry.key}.png',

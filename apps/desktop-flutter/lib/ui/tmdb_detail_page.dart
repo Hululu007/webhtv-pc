@@ -318,14 +318,7 @@ class _TmdbDetailPageState extends State<TmdbDetailPage> {
         // 纯 TMDB 页没有播放按钮（`04` §6.2）：动作改为「搜索站源」。
         episodeActionLabel: '搜索站源',
         episodeCards: _episodeCards,
-        // 信息表：**只留 hero 没说的字段**。
-        //
-        // 与源详情页同一条规则（见 `browse_pages.dart` 里那份更长的说明）：
-        // 类型/地区/年份/时长/季集/状态/评分都已在 hero 标签行里出现，
-        // 导演在 hero 简介里，重复展示只是让人读两遍。
-        infoRows: [
-          ('语言', data.languages.join(' / ')),
-        ],
+        // 信息表退场（2026-10-22 用户反馈）：`语言` 已进 hero 标签行。
         recommendations: _recommendations,
         videos: _videos,
         metadataBadge: '元数据季度 · 不可直接播放',

@@ -119,6 +119,9 @@ void main() {
 
     expect(find.byKey(const ValueKey('tmdb-detail-hero-overview')), findsOneWidget);
     expect(find.byKey(const ValueKey('detail-hero-play')), findsOneWidget);
+    // 简介直接完整显示，「查看简介」按钮已移除（2026-10-22 用户反馈）。
+    expect(find.byKey(const ValueKey('detail-hero-overview')), findsNothing);
+    expect(find.text('查看简介'), findsNothing);
     await scrollPastHero(tester);
 
     expect(find.textContaining('来自详情的简介'), findsWidgets);

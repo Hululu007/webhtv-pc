@@ -395,19 +395,27 @@ void main() {
     expect(stillDecoded, isTrue, reason: '剧照必须能真实加载：$stillUrl');
     evidence('still-decoded=$stillUrl');
 
-    // 5) 头部信息：海报 + 导演 + 评分 + 时长 + 季集数。
+    // 5) 头部信息：海报 + 语言标签 + 评分 + 时长 + 季集数。
+    //
+    // 2026-10-22 用户反馈「导演一行去掉，语言改到上面的标签去」：hero 不再
+    // 单独渲染导演行（导演仍在下方「制作团队」区块），语言改为标签芯片。
     expect(find.byKey(const ValueKey('tmdb-detail-title')), findsOneWidget);
     expect(find.byKey(const ValueKey('tmdb-detail-poster')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('tmdb-detail-director')),
+      findsNothing,
+      reason: 'hero 不再重复显示导演（导演仍在制作团队区块）',
+    );
+    expect(
+      find.byKey(const ValueKey('tmdb-detail-languages')),
       findsOneWidget,
-      reason: '头部必须显示导演',
+      reason: '语言必须作为标签出现在 hero 标签行',
     );
     expect(find.byKey(const ValueKey('tmdb-detail-rating')), findsOneWidget);
     expect(find.byKey(const ValueKey('tmdb-detail-runtime')), findsOneWidget);
     expect(find.byKey(const ValueKey('tmdb-detail-seasons')), findsOneWidget);
     expect(networkImageCount(tester), greaterThan(0), reason: '页面必须有网络图片');
-    evidence('header-poster-director-rating-runtime-seasons=present');
+    evidence('header-poster-languages-rating-runtime-seasons=present');
     // 截图 1：详情页顶部（动态背景 + 海报 + 导演 + 评分/时长/季集数）。
     // 先等背景停在第 0 张，使证据可复现（见 waitForBackdropIndex 注释）。
     await waitForBackdropIndex(tester, 0);

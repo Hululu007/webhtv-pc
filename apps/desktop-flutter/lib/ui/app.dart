@@ -1366,6 +1366,7 @@ class PosterImage extends StatelessWidget {
     this.width,
     this.height,
     this.fit = BoxFit.cover,
+    this.alignment = Alignment.center,
     this.cacheWidth,
     this.background = true,
   });
@@ -1374,6 +1375,19 @@ class PosterImage extends StatelessWidget {
   final double? width;
   final double? height;
   final BoxFit fit;
+
+  /// `BoxFit.cover` 裁切时保留图片的哪一块，默认居中。
+  ///
+  /// 只转发给 `Image.network` 的同名参数——**不会**引入外层 `Align`
+  /// （见 [build] 里那条「绝不能给 Container 加 alignment」的注释），
+  /// 因此不影响 cover 的铺满语义。
+  ///
+  /// 详情页背景轮播传 `Alignment.topCenter`：窗口比素材更高时（全屏 2.35:1
+  /// 对 16:9 素材）cover 会纵向裁掉约 24%，居中裁等于上下各切一半，人物头顶
+  /// 常被切到；改成顶部对齐后裁切全部落在底部——底部本来就被渐变遮罩压暗、
+  /// 被标题/简介盖住，观感损失最小（用户反馈 2026-10-23：「同一个海报背景
+  /// 全屏的时候被截取了不好看」）。
+  final Alignment alignment;
 
   /// 解码宽度上限（转发给 `Image.network` 的 `cacheWidth`）。
   ///
@@ -1421,6 +1435,7 @@ class PosterImage extends StatelessWidget {
               width: width,
               height: height,
               fit: fit,
+              alignment: alignment,
               cacheWidth: cacheWidth,
               loadingBuilder: (context, child, progress) => progress == null
                   ? child

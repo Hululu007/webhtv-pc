@@ -1074,23 +1074,6 @@ class _DetailPageState extends State<DetailPage> {
     await state.matchTmdbManual(item: item, sourceTitle: vod?.vodName);
   }
 
-  /// 打开季度绑定弹窗（`04` §5.2）。
-  Future<void> _openOverviewDialog(String text) async {
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('简介'),
-        content: SingleChildScrollView(child: SelectableText(text)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('关闭'),
-          ),
-        ],
-      ),
-    );
-  }
-
   Future<void> _openSeasonDialog() async {
     final state = widget.state;
     final tmdb = state.tmdb;
@@ -1767,51 +1750,33 @@ class _DetailPageState extends State<DetailPage> {
                   ),
                 // 动态背景头部（`04` §3.1 ①）：用 TMDB 海报/剧照当背景，
                 // 未匹配时回退到来源海报，保证头部不空白。
-                // 高度由组件按视口自适应（见 TmdbDetailHeader.resolveHeight）。
+                // 高度由组件按视口自适应：图片框取整屏，内容贴它的底部
+                // （= 视口底部，窗口与全屏一致；2026-10-23 内容带退场）。
                 TmdbDetailHeader(
                   // 图片由页面级背景负责（见本 body 的 Stack），头部只画内容。
                   paintImage: false,
                   data: headerData,
                   heroOverview: display.vodContent ?? tmdbData?.overview,
+                  // 只剩播放入口：简介已改为在 hero 内按剩余高度完整显示，
+                  // 「查看简介」按钮及其对话框按 2026-10-22 用户反馈移除。
                   heroActions: lines.isEmpty
                       ? null
-                      : Wrap(
-                          spacing: 10,
-                          runSpacing: 8,
-                          children: [
-                            FilledButton.icon(
-                              key: const ValueKey('detail-hero-play'),
-                              onPressed: () => _play(
-                                vod,
-                                _activeLine(lines),
-                                // 历史命中的那一集（`design/02` §3.2）。
-                                // `matched == false` 时它本来就是 0，
-                                // 正是「播放第一集」该有的行为，无需额外分支。
-                                //
-                                // 这里用的是**原始下标**（`VodPlayLine.episodes`
-                                // 的下标），而渲染下标经过季度过滤与倒序——
-                                // `_play` 要的正是原始下标（§3.3）。
-                                _resumeTarget(lines).episodeIndex,
-                              ),
-                              icon: const Icon(Icons.play_arrow),
-                              label: Text(_heroPlayLabel(lines, vod)),
-                            ),
-                            if ((display.vodContent ?? tmdbData?.overview ?? '')
-                                    .trim()
-                                    .length >
-                                220)
-                              TextButton.icon(
-                                key: const ValueKey('detail-hero-overview'),
-                                onPressed: () => _openOverviewDialog(
-                                  (display.vodContent ??
-                                          tmdbData?.overview ??
-                                          '')
-                                      .trim(),
-                                ),
-                                icon: const Icon(Icons.subject_outlined),
-                                label: const Text('查看简介'),
-                              ),
-                          ],
+                      : FilledButton.icon(
+                          key: const ValueKey('detail-hero-play'),
+                          onPressed: () => _play(
+                            vod,
+                            _activeLine(lines),
+                            // 历史命中的那一集（`design/02` §3.2）。
+                            // `matched == false` 时它本来就是 0，
+                            // 正是「播放第一集」该有的行为，无需额外分支。
+                            //
+                            // 这里用的是**原始下标**（`VodPlayLine.episodes`
+                            // 的下标），而渲染下标经过季度过滤与倒序——
+                            // `_play` 要的正是原始下标（§3.3）。
+                            _resumeTarget(lines).episodeIndex,
+                          ),
+                          icon: const Icon(Icons.play_arrow),
+                          label: Text(_heroPlayLabel(lines, vod)),
                         ),
                 ),
                 // 正文统一留 16 边距（hero 不加，才能左右铺满）。
@@ -1834,30 +1799,8 @@ class _DetailPageState extends State<DetailPage> {
                         onSelectSeason: _openSeasonDialog,
                         onRetry: () => state.reloadTmdb(),
                       ),
-                      const SizedBox(height: 12),
-                      // 信息表（`04` §3.1 ①）：对齐上游 `site/year/area/type/
-                      // director/actor` 的元信息行。**来源字段优先**，缺失处用 TMDB
-                      // 补位值（§3.2「仅补位不覆盖」），因此这里直接读补位后的 `display`
-                      // 与 `tmdbData`。
-                      TmdbInfoTable(
-                        rows: [
-                          // **只留 hero 没说的字段。**
-                          //
-                          // 原来 11 行里 8 行与 hero 标签行**逐字重复**
-                          // （类型/地区/年份/时长/季集/状态/评分），导演在 hero 简介里
-                          // 已有，演员在下方「演职人员」区块里还带头像。
-                          // 整块等于把同样的信息让人读两遍（用户反馈 2026-10-13）。
-                          //
-                          // 为什么不按原计划"并进 hero 标签行"：`_MetaChips` 有
-                          // **7 个上限**（`maxChips: 7`），而 hero 现在正好是 7 个
-                          // （TMDB 8.0 / 2026 / 47分钟 / 1季·30集 / 剧情 / China /
-                          // Returning Series）——再塞两条会把已有的挤掉，反而更差。
-                          //
-                          // `TmdbInfoTable` 会跳过空值行，所以字段缺失时这块整块消失。
-                          ('备注', display.vodRemarks),
-                          ('语言', tmdbData?.languages.join(' / ')),
-                        ],
-                      ),
+                      // 信息表已退场（2026-10-22 用户反馈）：`备注` 去掉，
+                      // `语言` 已进 hero 标签行，两行都不剩，空表不再渲染。
                       const SizedBox(height: 12),
                       // 季度选择器（`04` §4.1）：仅 tv 且已匹配时渲染。
                       TmdbSeasonSelector(
@@ -2273,46 +2216,6 @@ class _DetailPageState extends State<DetailPage> {
           },
         ),
       ),
-    );
-  }
-}
-
-/// 简介：默认 4 行 + 「展开 / 收起」（`04` §11 长文本要求）。
-class _ExpandableOverview extends StatefulWidget {
-  const _ExpandableOverview({required this.text});
-
-  final String text;
-
-  @override
-  State<_ExpandableOverview> createState() => _ExpandableOverviewState();
-}
-
-class _ExpandableOverviewState extends State<_ExpandableOverview> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Column(
-      key: const ValueKey('tmdb-overview'),
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          widget.text,
-          style: theme.textTheme.bodyMedium,
-          maxLines: _expanded ? null : 4,
-          overflow: _expanded ? null : TextOverflow.ellipsis,
-        ),
-        if (widget.text.length > 120)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton(
-              key: const ValueKey('tmdb-overview-toggle'),
-              onPressed: () => setState(() => _expanded = !_expanded),
-              child: Text(_expanded ? '收起' : '展开'),
-            ),
-          ),
-      ],
     );
   }
 }

@@ -40,6 +40,9 @@ TmdbDetailData _data() => TmdbDetailData.fromDetail(
     'production_countries': [
       {'iso_3166_1': 'CN', 'name': '中国'},
     ],
+    'spoken_languages': [
+      {'iso_639_1': 'zh', 'name': '普通话'},
+    ],
     'status': 'Returning Series',
     'images': {
       'posters': [
@@ -258,6 +261,14 @@ void main() {
         BoxFit.cover,
         reason: '必须 cover 铺满，左右不留空隙',
       );
+      // 裁切重心取顶部（用户反馈 2026-10-23：「同一个海报背景全屏的时候
+      // 被截取了不好看」）：窗口比素材更宽时，cover 的纵向裁切全部落在底部，
+      // 底部又被渐变遮罩压暗，人物头顶才不会被切掉。
+      expect(
+        tester.widget<Image>(images.first).alignment,
+        Alignment.topCenter,
+        reason: '背景 cover 必须顶部对齐，否则全屏宽窗口会切到人物头部',
+      );
     });
 
     testWidgets('无背景图时回退海报（不留白）', (tester) async {
@@ -279,7 +290,7 @@ void main() {
   });
 
   group('头部信息（用户反馈 2：海报 / 导演 / 其他信息）', () {
-    testWidgets('渲染海报、标题、导演、评分、时长、季集数、类型', (tester) async {
+    testWidgets('渲染海报、标题、语言标签、评分、时长、季集数、类型', (tester) async {
       await tester.pumpWidget(
         _host(
           SizedBox(
@@ -297,7 +308,13 @@ void main() {
         reason: '头部必须有海报',
       );
       expect(find.byKey(const ValueKey('tmdb-detail-title')), findsOneWidget);
-      expect(find.text('导演：示例导演'), findsOneWidget);
+      // 2026-10-22 用户反馈：导演行去掉、语言进标签行。
+      expect(find.text('导演：示例导演'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('tmdb-detail-languages')),
+        findsOneWidget,
+        reason: '语言必须以标签形式出现（TMDB spoken_languages）',
+      );
       expect(find.byKey(const ValueKey('tmdb-detail-rating')), findsOneWidget);
       expect(find.byKey(const ValueKey('tmdb-detail-year')), findsOneWidget);
       expect(find.byKey(const ValueKey('tmdb-detail-runtime')), findsOneWidget);
@@ -585,7 +602,7 @@ void main() {
       expect(find.byKey(const ValueKey('tmdb-photo-viewer')), findsNothing);
     });
 
-    testWidgets('窄窗口（900px）不溢出，头部仍渲染海报与导演', (tester) async {
+    testWidgets('窄窗口（900px）不溢出：海报仍在，导演行已移除，语言进标签', (tester) async {
       tester.view.physicalSize = const Size(900, 1200);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() {
@@ -604,10 +621,64 @@ void main() {
       );
       await tester.pump();
       expect(tester.takeException(), isNull, reason: '900px 宽不得溢出');
-      expect(find.byKey(const ValueKey('tmdb-detail-director')), findsOneWidget);
       expect(
         _posterUrlOf(tester, const ValueKey('tmdb-detail-poster')),
         isNotNull,
+      );
+      // 2026-10-22 用户反馈：导演行去掉、语言改到上面的标签行。
+      expect(
+        find.byKey(const ValueKey('tmdb-detail-director')),
+        findsNothing,
+        reason: 'hero 不再占用一行显示导演（导演仍在下方「制作团队」）',
+      );
+      expect(
+        find.byKey(const ValueKey('tmdb-detail-languages')),
+        findsOneWidget,
+        reason: '语言必须作为标签出现在 hero 标签行',
+      );
+    });
+
+    testWidgets('长简介按剩余高度展开：不溢出，且不再截断成 3 行', (tester) async {
+      tester.view.physicalSize = const Size(1200, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final longOverview = '这是一段用于验证完整显示的简介文本，' * 40;
+      final data = TmdbDetailData(
+        title: '长简介剧集',
+        overview: longOverview,
+        posterUrl: 'https://image.tmdb.org/t/p/w342/p.jpg',
+        rating: 8.4,
+        runtime: 45,
+        seasonCount: 1,
+        episodeCount: 12,
+        genres: const ['剧情'],
+        countries: const ['中国'],
+        languages: const ['普通话'],
+        status: 'Ended',
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: TmdbDetailHeader(data: data, heroOverview: longOverview),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull, reason: '长简介不得把 hero 撑出溢出');
+      final overview = tester.widget<Text>(
+        find.byKey(const ValueKey('tmdb-detail-hero-overview')),
+      );
+      expect(
+        overview.maxLines,
+        greaterThan(3),
+        reason: '简介行数必须由可用高度反推，而不是写死 3 行',
+      );
+      expect(
+        find.byKey(const ValueKey('detail-hero-overview')),
+        findsNothing,
+        reason: '「查看简介」按钮已移除',
       );
     });
   });
@@ -650,7 +721,6 @@ void main() {
       for (final key in const [
         'tmdb-backdrop-slideshow',
         'tmdb-detail-poster',
-        'tmdb-detail-director',
         'tmdb-info-table',
         'tmdb-section-seasons',
         'tmdb-section-episodes',

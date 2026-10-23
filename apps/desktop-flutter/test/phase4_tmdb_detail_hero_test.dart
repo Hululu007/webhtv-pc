@@ -108,18 +108,23 @@ void main() {
             '而且这直接决定原图能显示多大——3.07:1 的横带里 16:9 原图只能按高度适配，'
             '降成约 58% 宽，用 cover 则要纵向裁掉约 42%',
       );
-      // 图片变大**不能**把内容推下去：内容带仍是既有结论（约 54% 视口），
-      // 简介/播放入口仍在首屏。两者现在是分开的两个量。
-      final ctx = tester.element(slideshow);
-      expect(
-        TmdbDetailHeader.resolveHeight(ctx),
-        closeTo(height * 0.54, 0.1),
-        reason: '内容带高度必须保持不变（它才是「简介/播放入口多早可见」的决定量）',
+      // 内容**贴视口底部**（2026-10-23 用户反馈：「位置不对，预期应该是
+      // 靠近底部，包括全屏的时候」）。曾经有个独立的「内容带」（视口 80%），
+      // 内容停在 80% 处、下面还空着 20% 背景 —— 内容带已退场。
+      final content = tester.getRect(
+        find.byKey(const ValueKey('tmdb-detail-poster')),
       );
       expect(
-        rect.height,
-        greaterThan(TmdbDetailHeader.resolveHeight(ctx)),
-        reason: '图片框必须比内容带高——否则内容就会跟着被裁的那一版一起缩回去',
+        rect.bottom - content.bottom,
+        lessThan(80),
+        reason: '内容块必须贴视口底部（间隙只留给 44 的指示点安全区），'
+            '实测间隙 ${rect.bottom - content.bottom}',
+      );
+      // 内容在**首屏下部**：海报落在下半屏，而不是悬在上半屏。
+      expect(
+        content.top,
+        greaterThan(height * 0.45),
+        reason: '内容块应落在视口下半屏（当前海报顶边 ${content.top}）',
       );
     });
   });
@@ -198,7 +203,16 @@ void main() {
       expect(
         rect.height,
         closeTo(900, 0.1),
-        reason: '图片框为整个视口高度（全屏）；内容带仍是 54% 视口，两者已解耦',
+        reason: '图片框为整个视口高度（全屏），内容贴它的底部',
+      );
+      // 内容贴视口底部（2026-10-23 用户反馈），不是停在中间某个「内容带」。
+      final poster = tester.getRect(
+        find.byKey(const ValueKey('tmdb-detail-poster')),
+      );
+      expect(
+        rect.bottom - poster.bottom,
+        lessThan(80),
+        reason: '真实详情页里内容也必须贴底（实测间隙 ${rect.bottom - poster.bottom}）',
       );
     });
 
@@ -225,7 +239,7 @@ void main() {
       expect(
         heroRect.height,
         closeTo(900, 0.1),
-        reason: '图片框占满首屏（全屏）；内容带仍是 54% 视口',
+        reason: '图片框占满首屏（全屏），内容贴视口底部',
       );
 
       // 正文在 hero 之下。
@@ -239,8 +253,10 @@ void main() {
         const Offset(0, -900),
       );
       await tester.pump();
+      // 信息表已随 2026-10-22 反馈退场；用线路选择器作为「正文」的锚点。
+      final bodyAnchor = find.byKey(const ValueKey('tmdb-line-selector'));
       expect(
-        find.byType(TmdbInfoTable),
+        bodyAnchor,
         findsOneWidget,
         reason: '向下滚动后必须能看到正文（内容没有被全屏 hero 挤没）',
       );
@@ -249,7 +265,7 @@ void main() {
         find.byKey(const ValueKey('tmdb-detail-hero')),
       );
       expect(
-        tester.getRect(find.byType(TmdbInfoTable)).top,
+        tester.getRect(bodyAnchor).top,
         greaterThanOrEqualTo(heroAfter.bottom - 1),
         reason: '正文必须在 hero 之下，不能被 hero 盖住',
       );

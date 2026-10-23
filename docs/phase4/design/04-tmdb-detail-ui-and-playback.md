@@ -116,7 +116,7 @@ String flagKeyOf(VodPlayLine line, int index) => '${line.flag}#$index';
 | # | 要求 | 实现 | 门禁 |
 | --- | --- | --- | --- |
 | V1 | **动态背景**用剧集海报/剧照 | `TmdbBackdropSlideshow`：`backdrops` 优先、无则回退海报；5 秒一张、环形、单张不轮播；只在路由可见时计时 | `phase4_tmdb_detail_view_test.dart`（假时钟推进后换图）、`tmdb_detail_visual_flow_test.dart`（真实图片解码） |
-| V2 | 头部有**海报 / 导演 / 评分 / 时长 / 季集数 / 类型 / 地区** | `TmdbDetailData` + `_HeaderContent`；时长缺失时用已加载剧集的**众数时长**回退 | 同上 + `phase4_tmdb_detail_model_test.dart` |
+| V2 | 头部有**海报 / 评分 / 年份 / 时长 / 季集数 / 类型 / 地区 / 语言**（导演自 2026-10-22 起改由「制作团队」承载，hero 不再单独占一行） | `TmdbDetailData` + `_HeaderContent`；时长缺失时用已加载剧集的**众数时长**回退 | 同上 + `phase4_tmdb_detail_model_test.dart` |
 | V3 | **每集都有海报卡片**（剧照 + 集号 + 标题 + 日期），且**卡片是唯一选集入口** | `TmdbEpisodeStrip` + `TmdbEpisodeCards.build`：不补集、不丢集；无剧照时用本剧剧照池按序回退；**不再渲染文字版集按钮**（2026-10-08 用户反馈：二者取其一） | `tmdb_detail_flow_test.dart`（卡片数 + 文字按钮为 0）、`phase4_tmdb_detail_view_test.dart` |
 | V4 | 剧照**可点击** | `_PhotoWall` → `TmdbPhotoViewerDialog`（定位到被点击那张、左右翻页、`←/→/Esc`） | `phase4_tmdb_detail_view_test.dart`、`tmdb_detail_visual_flow_test.dart` |
 | V5 | 演职人员**可点击** | `_PeopleWall` → `TmdbPersonPage`（简介 / 照片 / 作品；作品可继续进入详情） | 同上 |
@@ -124,11 +124,20 @@ String flagKeyOf(VodPlayLine line, int index) => '${line.flag}#$index';
 | V7 | 单集详情 | `TmdbEpisodeSheet`：剧照 + 标题 + 日期 + 时长 + 评分 + 简介 + 动作 | `phase4_tmdb_detail_view_test.dart` |
 | V8 | **点击线路切换集数卡片** | `TmdbLineSelector`（对齐上游 `@id/flag`）+ 单线路单屏剧集区；换线路保留「季度意图」并自愈到该线路真有集的季度 | `tmdb_detail_flow_test` 步骤 7/7.5、`phase4_tmdb_detail_view_test.dart` |
 | V9 | 剧集区块头：正序/倒序 + 列表/网格 | `TmdbEpisodeHeader` + `TmdbEpisodeStrip.gridMode`（对齐上游 `episodeReverse` / `episodeViewMode` / `episodeGrid`） | 同上 |
-| V10 | 信息表：类型/地区/年份/时长/季集/状态/导演/演员/评分/备注/语言 | `TmdbInfoTable`（两列对齐，空值行自动跳过；对齐上游 `site/year/area/type/director/actor` 元信息行） | 同上 |
+| V10 | ~~信息表：类型/地区/年份/时长/季集/状态/导演/演员/评分/备注/语言~~ **2026-10-22 起在详情页退场**：`备注` 按反馈移除、`语言` 进 hero 标签行，两行都不剩，详情页不再渲染信息表；`TmdbInfoTable` 组件保留（仍被单测覆盖，供其它字段表场景复用） | `TmdbInfoTable`（两列对齐，空值行自动跳过；对齐上游 `site/year/area/type/director/actor` 元信息行） | 同上 |
 | V11 | 海报墙（与剧照区分） | `TmdbDetailSections` 的 `tmdb-section-posters`（对齐上游 `@id/tmdbPosters`） | `phase4_tmdb_detail_view_test.dart` |
 | V12 | **制作团队头像卡片**（导演/编剧/制片可点击） | `_CrewWall` 复用 `_PeopleWall`（对齐上游 `@id/tmdbCrew` + `adapter_tmdb_cast.xml`：头像 + 姓名 + 职务，可进人物页） | `phase4_tmdb_detail_view_test.dart`、`tmdb_detail_visual_flow_test.dart` |
 | V13 | **线路季度记忆**：切走再切回恢复该线路的季度 | `TmdbState._lineSeasonMemory`（`flag → season`，上限 64）+ `rememberedSeasonOfLine`；`selectSeason`/`selectLine`/解析完成三处写入 | `phase4_tmdb_state_test.dart`、`tmdb_detail_flow_test` 步骤 9 |
 | V14 | **多线路共用同一份 TMDB 数据** | `loadForVod` 判定「同一作品」后复用 `_detail`/`_cast`/`_creators`/`_photos`/`_recommendations`/`_videos`/`_seasonEpisodeCounts`；`loadDetail(reuseDetail:)` 零请求；`TmdbService.detail` 缓存键**双向**回退 | `phase4_tmdb_state_test.dart`「多线路共用」2 例 |
+
+**2026-10-22 首屏细化（影响 V2 / V10）**：用户对照两张详情页截图反馈——「移下来会不会更好？导演一行去掉空间留给简介，这么大一块地方简介都显示不全不太好，查看简介的按钮可以去掉尽可能的直接完整显示出来。备注去掉，语言改到上面的标签去吧」。对应改动：hero 内容带 54% → **80% 视口**（内容块落到首屏下部，原先空着的下半屏让给简介）；简介按内容带**剩余高度**反推行数、尽可能完整显示，「查看简介」按钮与对话框移除；hero 不再单独显示导演（导演仍由下方「制作团队」承载）；`语言` 成为 hero 标签，`备注` 移除，信息表整块退场。门禁：`phase4_tmdb_detail_hero_test.dart`（内容带 0.80 + 内容落在下半屏）、`phase4_tmdb_detail_view_test.dart`（导演行消失 / 语言标签 / 长简介不溢出）、`phase3_detail_page_test.dart`（「查看简介」按钮消失）、`tmdb_detail_visual_flow_test.dart`（真实窗口断言同步）。
+
+**2026-10-23 贴底与裁切重心（影响 V1 / V2 的落点约定）**：用户对着窗口与全屏截图再反馈——「位置不对，不及预期，预期应该是靠近底部，包括全屏的时候。还有同一个海报背景全屏的时候被截取了不好看」。两条改动：
+
+1. **内容块贴视口底部**。上一轮的 80% 是**内容带**的底、不是视口底，内容块下面还空着约 20% 背景（截图红框处）。**内容带整体退场**：删掉 `TmdbBackdropSlideshow.contentBand`、`_bandOffset`、`TmdbDetailHeader.resolveHeight`；内容层改为固定 `EdgeInsets.fromLTRB(24, 24, 24, 44)` + `Align(bottomLeft)`，图片框多大内容的落点就是它的底部（44 给轮播指示点让位）。窗口与全屏走同一条规则。
+2. **背景裁切重心取顶部**。窗口比素材更宽时（全屏 2.35:1 对 16:9 素材）`cover` 纵向裁约 24%，居中裁＝上下各切一半，人物头顶常被切到。`PosterImage` 新增 `alignment`（只转发给 `Image.network`，**不能**改成 `Container(alignment:)`——那会外包 `Align` 给松约束、`cover` 失效），背景轮播传 `Alignment.topCenter`：裁切全部落在下方，下方本来就被渐变遮罩压到不透明、被标题/简介盖住。
+
+门禁：`phase4_tmdb_detail_hero_test.dart`（内容块底边距视口底部 < 80px，假头部与**真实 DetailPage** 各一条）、`phase4_tmdb_detail_view_test.dart`（背景 `Image.alignment == Alignment.topCenter`，且仍只有一层 `cover`）。
 
 **单线路单屏（V8 的关键约束）**：线路条是**切换器**，页面只渲染**当前线路**的
 剧集区。早期实现把每条线路各渲染一屏卡片，多线路站点会把详情页拉成几屏长，

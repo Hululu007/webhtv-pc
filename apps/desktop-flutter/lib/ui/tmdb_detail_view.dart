@@ -53,7 +53,6 @@ class TmdbBackdropSlideshow extends StatefulWidget {
     super.key,
     required this.urls,
     this.height = 320,
-    this.contentBand,
     this.paintImage = true,
     this.scrim = TmdbBackdropScrim.hero,
     this.interval = TmdbBackdropRotation.interval,
@@ -72,14 +71,13 @@ class TmdbBackdropSlideshow extends StatefulWidget {
   /// 才能按宽度适配，得到 **1312x738 的完整原图、零裁切、几乎不放大**。
   final double height;
 
-  /// **内容带**的高度（标题/简介/按钮所占的那一块），默认与 [height] 相同。
+  /// 内容（标题/简介/按钮）**贴 [height] 的底部**，只有 `24` 的上内边距与
+  /// `44` 的底部内边距（给轮播指示点留位置）。
   ///
-  /// 为什么与图片框分开：内容不能跟着图片一起变高。
-  /// 早先为了让「简介、播放入口、线路更早进入首屏」，内容带被定在视口约 54%
-  /// （见 [TmdbDetailHeader.resolveHeight]）——那是**内容**的诉求，与图片该多大无关。
-  /// 混在一起时只能二选一：要么图片被裁，要么内容被推下去。拆开之后两者各自成立：
-  /// 图片铺满整屏，内容仍待在原来的高度位置（`phase4_tmdb_detail_hero_test` 锁着它）。
-  final double? contentBand;
+  /// 曾经有过一个独立的「内容带」（内容只占视口 80%，图片框仍整屏），结果是
+  /// 内容块停在视口 80% 处、**下面还空着 20% 背景**——用户 2026-10-23 反馈
+  /// 「位置不对，预期应该是靠近底部，包括全屏的时候」。内容带因此退场：
+  /// 图片框多大，内容的落点就是它的底部，两者不再各算各的。
 
   /// 是否绘制背景图本身（图片、遮罩、轮播指示点）。
   ///
@@ -162,13 +160,6 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
     });
   }
 
-  /// 图片框比内容带高出来的那一段（≥0）。
-  double get _bandOffset {
-    final band = widget.contentBand ?? widget.height;
-    final offset = widget.height - band;
-    return offset > 0 ? offset : 0;
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -220,7 +211,16 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
                     // 切掉。现在图片框是**整个视口**（见 [TmdbBackdropSlideshow.height]），
                     // 用户的 2.35:1 窗口下只裁约 24%、16:9 窗口下只裁约 7%。
                     // 同一个 `cover`，框比不同，观感完全不同。
-                    child: PosterImage(url: current, fit: BoxFit.cover),
+                    // 裁切重心取**顶部**：窗口比素材更宽（全屏 2.35:1 对 16:9
+                    // 素材）时 cover 纵向裁掉约 24%，居中裁＝上下各切一半，
+                    // 人物头顶常被切到（用户反馈 2026-10-23：「同一个海报背景
+                    // 全屏的时候被截取了不好看」）。顶部对齐后裁切全部落在下方，
+                    // 而下方本来就被渐变遮罩压到不透明、被标题/简介盖住。
+                    child: PosterImage(
+                      url: current,
+                      fit: BoxFit.cover,
+                      alignment: Alignment.topCenter,
+                    ),
                   ),
           ),
           // 渐变遮罩：保证文字在任何图片上都可读（不依赖图片亮度）。
@@ -256,17 +256,11 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
           ),
           if (widget.child != null)
             Padding(
-              // 内容贴在**内容带**的底部，而不是图片框的底部。
+              // 内容贴**图片框底部**（= 视口底部，窗口与全屏一致）。
               //
-              // 图片框现在是整屏高，内容带仍是约 54% 视口；两者之差就是这段底部
-              // 内边距——内容因此停在原来的高度，图片在它下面继续铺满整屏
-              // （用户要的「全屏」），且不影响「简介/播放入口更早可见」那条既有结论。
-              padding: EdgeInsets.fromLTRB(
-                24,
-                24,
-                24,
-                44 + _bandOffset,
-              ),
+              // 底部 44 是留给轮播指示点（`bottom: 16` + 6px 圆点）的安全区：
+              // 内容再往下压就会和那几个小圆点撞在一起。
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 44),
               // 内容贴底对齐：动态背景在上方露出更多画面，
               // 标题/海报靠近信息区，视觉上不会出现「背景里飘着一小块内容」。
               child: Align(
@@ -274,12 +268,12 @@ class _TmdbBackdropSlideshowState extends State<TmdbBackdropSlideshow> {
                 child: widget.child,
               ),
             ),
-            // 指示点放在**图片框底部**，不是内容带底部。
+            // 指示点放在**图片框底部**（= 视口右下角）。
             //
-            // 原来放在内容带底部（`_bandOffset + 12`）＝视口约 54% 处，
-            // 也就是**屏幕正中间**——用户反馈「跑马灯的小点点显示在中间区域
-            // 不好看」（2026-10-13）。图片框现在铺满整屏，底部是纯图片区，
-            // 指示点落在那儿才是常规位置。
+            // 历史：曾放在内容带底部＝屏幕正中间，用户反馈「跑马灯的小点点
+            // 显示在中间区域不好看」（2026-10-13）。图片框铺满整屏后，
+            // 底部才是常规位置；内容块也贴底，所以底部 44 的内边距就是
+            // 给它让出的空间。
             if (widget.paintImage &&
                 TmdbBackdropRotation.shouldRotate(urls.length))
               Positioned(
@@ -387,29 +381,12 @@ class TmdbDetailHeader extends StatelessWidget {
   /// 底层负责，头部只留内容。两处都画会重复解码，且同图不同框比会在交界处错位。
   final bool paintImage;
 
-  /// 背景高度；为 `null` 时按视口自适应（见 [resolveHeight]）。
+  /// 背景框高度；为 `null` 时取整屏视口。
+  ///
+  /// 只在「父级已经给了确定高度」时才需要传（例如内嵌到 `SizedBox` 里）。
+  /// 首屏 hero 一律留 `null`，让图片框 = 视口高度（用户反馈 2026-10-13：
+  /// 「我要的是全屏」）。
   final double? height;
-
-  /// **内容带**的高度：标题/简介/按钮所占的那一块（**仅按视口**）。
-  ///
-  /// 主流媒体库详情页把内容控制在首屏约一半，简介和播放入口可见，
-  /// 线路/分集不必被推到第二屏之后（用户反馈 2026-10-10 之后的既有结论，
-  /// `phase4_tmdb_detail_hero_test` 锁着）。
-  ///
-  /// **它不再是图片框的高度。** 早先二者是同一个值，于是「内容要多早出现」与
-  /// 「图片能显示多大」被迫二选一：内容带定在 54% 视口（1312x427 ≈ 3.07:1）时，
-  /// 16:9 的原图在 `BoxFit.contain` 下只能按高度适配、降成 759px 宽，
-  /// 用 `cover` 则要纵向裁掉约 42%（用户反馈 2026-10-13：「上面部分被截掉了」）。
-  /// 现在图片框取整屏（见 [TmdbBackdropSlideshow.height]），内容带保持此值，
-  /// 两条诉求各自成立。
-  ///
-  /// 注意：本函数**不知道父级约束**。若调用方把 header 放进有界高度（如
-  /// `SizedBox(height: 400)`，测试与内嵌场景会这么用），需由 [build] 里的
-  /// `LayoutBuilder` 再夹一道，否则内容会溢出（实测 `overflowed by 200 pixels`）。
-  static double resolveHeight(BuildContext context) {
-    final height = MediaQuery.sizeOf(context).height;
-    return (height * 0.54).clamp(360.0, 500.0);
-  }
 
   @override
   Widget build(BuildContext context) =>
@@ -425,11 +402,10 @@ class TmdbDetailHeader extends StatelessWidget {
           // 这同时是"原图能显示多大"的前提，见 [TmdbBackdropSlideshow.height]。
           final screen = MediaQuery.sizeOf(context).height;
           final available = constraints.maxHeight;
-          final frame = available.isFinite && available < screen
+          final target = height ?? screen;
+          final frame = available.isFinite && available < target
               ? available
-              : screen;
-          // 内容带 = 既有结论（约 54% 视口），且不能超过图片框。
-          final band = (height ?? resolveHeight(context)).clamp(0.0, frame);
+              : target;
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -438,7 +414,6 @@ class TmdbDetailHeader extends StatelessWidget {
                 urls: data.backdropUrls,
                 fallbackUrl: data.posterUrl,
                 height: frame,
-                contentBand: band,
                 paintImage: paintImage,
                 child: _HeaderContent(
                   data: data,
@@ -1293,33 +1268,49 @@ class _HeaderContent extends StatelessWidget {
               _MetaChips(
                 data: data,
                 metadataBadge: metadataBadge,
-                // 固定高度区域（动态背景 340px）内必须限制行数，否则窄窗口
-                // 下 chips 换行会把标题挤出可视区并触发 overflow。
-                maxChips: compact ? 4 : 7,
+                // chips 换行会挤占简介的高度：宽屏上限 8（新增语言后正好 8 个），
+                // 窄屏维持 5，避免把标题挤出内容带。
+                maxChips: compact ? 5 : 8,
               ),
-              if (data.directorLabel.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Text(
-                  '导演：${data.directorLabel}',
-                  key: const ValueKey('tmdb-detail-director'),
-                  style: theme.textTheme.bodyMedium,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
+              // 导演行已移除（2026-10-22 用户反馈：把这一行让给简介）。
+              // 导演信息不丢：下方「制作团队」区块带头像与「导演」职务；
+              // 来源侧的 vodDirector 与 TMDB 的导演仍由模型层保留。
               if ((overview ?? '').trim().isNotEmpty) ...[
                 const SizedBox(height: 10),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 760),
-                  child: Text(
-                    overview!.trim(),
-                    key: const ValueKey('tmdb-detail-hero-overview'),
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.colorScheme.onSurface.withValues(alpha: 0.9),
-                      height: 1.35,
+                Flexible(
+                  // 简介吃掉内容带里**剩余的全部高度**：行数由实际可用高度
+                  // 反推，而不是写死 3 行 + 「查看简介」按钮（2026-10-22
+                  // 用户反馈：这么大一块地方简介显示不全）。
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 760),
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        final style = theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurface.withValues(
+                            alpha: 0.9,
+                          ),
+                          height: 1.35,
+                        );
+                        // 行高口径必须与 Text 实际排版一致：TextScaler 作用在
+                        // 字号上，`height` 再乘到行高上。
+                        final scaledFont = MediaQuery.textScalerOf(
+                          context,
+                        ).scale(style?.fontSize ?? 14);
+                        final lineHeight = scaledFont * (style?.height ?? 1.35);
+                        final maxLines = constraints.maxHeight.isFinite
+                            ? (constraints.maxHeight / lineHeight)
+                                  .floor()
+                                  .clamp(1, 40)
+                            : 6;
+                        return Text(
+                          overview!.trim(),
+                          key: const ValueKey('tmdb-detail-hero-overview'),
+                          style: style,
+                          maxLines: maxLines,
+                          overflow: TextOverflow.ellipsis,
+                        );
+                      },
                     ),
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
               ],
@@ -1340,7 +1331,7 @@ class _HeaderContent extends StatelessWidget {
 }
 
 class _MetaChips extends StatelessWidget {
-  const _MetaChips({required this.data, this.metadataBadge, this.maxChips = 7});
+  const _MetaChips({required this.data, this.metadataBadge, this.maxChips = 8});
 
   final TmdbDetailData data;
   final String? metadataBadge;
@@ -1387,6 +1378,16 @@ class _MetaChips extends StatelessWidget {
         _Chip(
           keyValue: 'tmdb-detail-countries',
           label: data.countries.take(2).join(' / '),
+        ),
+      );
+    }
+    // 语言进标签行（2026-10-22 用户反馈：「语言改到上面的标签去吧」）。
+    // 来源是 TMDB `spoken_languages`；源详情页与纯 TMDB 页共用这份渲染。
+    if (data.languages.isNotEmpty) {
+      chips.add(
+        _Chip(
+          keyValue: 'tmdb-detail-languages',
+          label: data.languages.take(2).join(' / '),
         ),
       );
     }
