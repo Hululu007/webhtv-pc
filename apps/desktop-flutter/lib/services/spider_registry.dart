@@ -15,6 +15,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../core/ipc_protocol.dart';
+import 'jar_intake.dart';
 import 'log_service.dart';
 import 'spider_process.dart';
 
@@ -249,35 +250,19 @@ class CspJvmBinding {
     return false;
   }
 
-  /// jar 是否为 Android 站源（内含 `classes.dex`）。
+  /// 入口（jar **或类目录**）是否为 Android 站源（内含 `classes.dex`）。
   ///
-  /// 只做**目录项**检查，不加载任何类，因此对不可信 jar 也安全（§9.8）。
-  static bool isAndroidJar(String path) {
-    if (!path.toLowerCase().endsWith('.jar')) return false;
-    final file = File(path);
-    if (!file.existsSync()) return false;
-    try {
-      final bytes = file.readAsBytesSync();
-      // zip 目录项里的文件名字节串是明文，直接搜索 `classes.dex` 即可，
-      // 无需解压、不执行任何代码。
-      return _containsAscii(bytes, 'classes.dex');
-    } catch (_) {
-      return false;
-    }
-  }
-
-  static bool _containsAscii(List<int> haystack, String needle) {
-    final target = needle.codeUnits;
-    outer:
-    for (var i = 0; i + target.length <= haystack.length; i++) {
-      for (var j = 0; j < target.length; j++) {
-        if (haystack[i + j] != target[j]) continue outer;
-      }
-      return true;
-    }
-    return false;
-  }
-
+  /// 判定委托给 [JarIntake.hasAndroidDex]，原因：
+  ///
+  /// - 旧实现是裸字节子串搜索，普通桌面 jar 里**恰好出现** `classes.dex` 字样就会
+  ///   假阳（§12.6.2 缺陷①）；现在按 zip **条目名**精确判定；
+  /// - 旧实现在非 `.jar` 入口上直接 `return false`，而 [entryFor] 允许类目录入口，
+  ///   于是「含 dex 的类目录」被漏判（§12.6.2 缺陷②）；
+  /// - 站点页文案与设置页检测共用同一判定，避免两处结论不一致（缺陷③）。
+  ///
+  /// 只做**静态**检查（zip 目录项 / 文件树），不加载任何类、不解压条目内容，
+  /// 因此对不可信 jar 也安全（§9.8）。
+  static bool isAndroidJar(String path) => JarIntake.hasAndroidDex(path);
   static String _safe(String value) =>
       value.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
 }
@@ -350,10 +335,26 @@ class LocalSpiderCommand {
         return null;
       }
       // Python 命令统一由 host.py 决定具体解释器，避免宿主与 sidecar 猜测不一致；
-      // 这里用宿主自身的解释器探测逻辑（`py -3` 优先，其次 `python3`/`python`）。
-      final python = _pythonCommand();
+      // 这里用宿主自身的解释器探测逻辑（`py -3` 优先，其次 `python3`/`python`），
+      // 且每个候选都要 `--version` 验证通过才采用。
+      //
+      // CatVod 壳站点（自动注册时写了 loader.json，见 direct_spider_registrar.dart）
+      // 在**模块顶层**就 import requests / Crypto / lxml：只验 `--version` 会挑中一个
+      // 没有这些包的解释器，于是内层毁在 import 阶段、host.py 记一行 stderr 后 return 3，
+      // 用户只看到「SPIDER_CRASHED sidecar 意外退出（code=3）」。按目录标记改走依赖
+      // 感知的探测；普通 js/py 站点仍走原来的快路径。
+      final isCatVodShell =
+          File(p.join(spider.rootDir, 'loader.json')).existsSync();
+      final python = isCatVodShell
+          ? _pythonCommandForCatVod(log: log)
+          : _pythonCommand(log: log);
       if (python == null) {
-        log?.warning('未找到 Python 运行时，无法启动 sidecar', scope: 'spider');
+        log?.warning(
+          isCatVodShell
+              ? '未找到带 CatVod 依赖（requests/Crypto/lxml）的 Python 运行时，无法启动 sidecar'
+              : '未找到 Python 运行时，无法启动 sidecar',
+          scope: 'spider',
+        );
         return null;
       }
       return LocalSpiderCommand(
@@ -648,37 +649,101 @@ class LocalSpiderCommand {
     return null;
   }
 
-  /// 查找本机 Python。返回 null 表示未安装，UI 必须提示而不是静默跳过。
-  static SidecarCommand? _pythonCommand() {
-    final pathDirs = (Platform.environment['PATH'] ?? '').split(';');
-    final candidates = <String>[];
-    // `py.exe` 位于 Windows 系统目录之外的 Launcher 目录，但也在 PATH 中；
-    // 这里同时补充 SystemRoot，覆盖 PATH 被裁剪的情况。
-    final systemRoot = Platform.environment['SystemRoot'];
-    if (Platform.isWindows && systemRoot != null) {
-      candidates.add(p.join(systemRoot, 'py.exe'));
+  /// 查找本机 Python。返回 null 表示未安装（或候选全部启动失败），
+  /// UI 必须提示而不是静默跳过。
+  ///
+  /// 候选由 [SidecarRuntimeResolver.pythonCandidates] 统一给出，并逐个用
+  /// `--version` 验证：只看文件存在会把「launcher 指向已删除的解释器」
+  /// 当成可用，结果是 sidecar 一启动就 101 退出，日志里只剩「sidecar 崩溃」。
+  static bool _pythonProbed = false;
+  static SidecarCommand? _pythonResolved;
+
+  /// 清空 Python 解析缓存（测试与托管运行时准备完成后需要重解析）。
+  ///
+  /// 生产路径上只有「托管运行时刚建好、解释器集合变了」才需要调用；其余情况
+  /// 缓存与进程同生命周期。
+  static void invalidatePythonCache() {
+    _pythonProbed = false;
+    _pythonResolved = null;
+    _pythonCatVodProbed = false;
+    _pythonCatVodResolved = null;
+  }
+
+  static SidecarCommand? _pythonCommand({LogService? log}) {
+    // 缺陷（2026-10-24 实测）：分类站点列表会为每个站点调用本方法，而探测要真的
+    // 拉起子进程（每候选 60–120 ms）+ 扫 PATH。163 个站点里 83 个是 Python 站点，
+    // 一次 build 就要串行 spawn 83 次 ≈ 10 s，UI 每次重建都冻结。
+    // 解释器集合在一次进程生命周期内不会变，因此按进程缓存结果。
+    if (_pythonProbed) return _pythonResolved;
+    _pythonProbed = true;
+    final resolved = _pythonCommandUncached(log: log);
+    _pythonResolved = resolved;
+    return resolved;
+  }
+
+  /// 声明「优先使用的 Python 解释器」（托管运行时准备完成后调用）。
+  ///
+  /// 传 null 恢复默认候选链。只影响解析顺序，不做正确性判断：候选仍要
+  /// `--version` 验证通过才会被采用。
+  static void preferPythonExecutable(String? path) {
+    SidecarRuntimeResolver.preferPythonExecutable(path);
+    invalidatePythonCache();
+  }
+
+  static bool _pythonCatVodProbed = false;
+  static SidecarCommand? _pythonCatVodResolved;
+
+  /// 与 [_pythonCommand] 相同，但要求解释器**带齐 CatVod 依赖**。
+  ///
+  /// 缺陷（2026-10-25 实测）：只验 `--version` 会挑中一个没有 requests 的 3.14，
+  /// 于是 82 个 CatVod 壳站点全部在 `import requests` 阶段失败 → host.py return 3 →
+  /// 用户只看到「SPIDER_CRASHED sidecar 意外退出（code=3）」。这里让真实可达的
+  /// 解释器优先（本机 3.13 自带三依赖），并在托管运行时建好后再走 [_pythonCommand]。
+  ///
+  /// 缓存独立于 [_pythonCommand]：普通 js/py 站点不该为一个用不到的依赖清单
+  /// 付探测成本，两条路径的结论也不同。
+  static SidecarCommand? _pythonCommandForCatVod({LogService? log}) {
+    if (_pythonCatVodProbed) return _pythonCatVodResolved;
+    _pythonCatVodProbed = true;
+    final candidates = SidecarRuntimeResolver.pythonCandidates();
+    if (candidates.isEmpty) {
+      _pythonCatVodResolved = null;
+      return null;
     }
-    candidates.addAll(pathDirs.where((dir) => dir.trim().isNotEmpty).map(
-      (dir) => p.join(dir.trim(), 'py.exe'),
-    ));
-    for (final candidate in candidates) {
-      if (File(candidate).existsSync()) {
-        return SidecarCommand(executable: candidate, arguments: const ['-3']);
-      }
+    final usable = SidecarRuntimeResolver.firstUsablePython(
+      candidates,
+      probe: (command) => SidecarRuntimeResolver.pythonWorksForCatVod(command),
+    );
+    _pythonCatVodResolved = usable;
+    return usable;
+  }
+
+  static SidecarCommand? _pythonCommandUncached({LogService? log}) {
+    final candidates = SidecarRuntimeResolver.pythonCandidates();
+    if (candidates.isEmpty) {
+      log?.warning('未找到 Python 运行时，无法启动 sidecar', scope: 'spider');
+      return null;
     }
-    final fallbacks = Platform.isWindows
-        ? ['python3.exe', 'python.exe']
-        : ['python3', 'python'];
-    final dirs = platformSearchDirs();
-    for (final name in fallbacks) {
-      for (final dir in dirs) {
-        final candidate = p.join(dir, name);
-        if (File(candidate).existsSync()) {
-          return SidecarCommand(executable: candidate, arguments: const []);
+    final failures = <String>[];
+    final usable = SidecarRuntimeResolver.firstUsablePython(
+      candidates,
+      probe: (command) {
+        final ok = SidecarRuntimeResolver.pythonWorks(command);
+        if (!ok) {
+          failures.add(
+            '${command.executable} ${command.arguments.join(' ')}'.trim(),
+          );
         }
-      }
+        return ok;
+      },
+    );
+    if (usable == null) {
+      log?.warning(
+        'Python 候选全部不可用（${failures.join('；')}），无法启动 sidecar',
+        scope: 'spider',
+      );
     }
-    return null;
+    return usable;
   }
 
   static List<String> platformSearchDirs() {
@@ -750,8 +815,11 @@ String _locateSidecarHost(List<String> relative, String envVar) {
     // Platform.resolvedExecutable 在极端环境下可能不可用。
   }
 
+  // 向上查找的跳数必须覆盖发布布局：可执行文件在
+  // `build/windows/x64/runner/Release`，到仓库根需要 7 跳，原先的 6 跳会
+  // 在开发机上返回空串（日志表现为「sidecar 宿主不存在：（空）」）。
   var current = Directory.current;
-  for (var hop = 0; hop < 6; hop++) {
+  for (var hop = 0; hop < 10; hop++) {
     final candidate = p.joinAll([current.path, ...relative]);
     if (File(candidate).existsSync()) return candidate;
     final parent = current.parent;

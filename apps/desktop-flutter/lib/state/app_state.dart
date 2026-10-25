@@ -9,6 +9,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -66,12 +67,15 @@ import '../services/android_playback_bridge.dart';
 import '../services/android_read_client.dart';
 import '../services/cat_bundle.dart';
 import '../services/cat_runtime.dart';
+import '../services/csp_jar_probe.dart';
 import '../services/direct_spider_registrar.dart';
 import '../services/epg_service.dart';
+import '../services/jar_intake.dart';
 import '../services/log_service.dart';
 import '../services/outbound_proxy.dart';
 import '../services/live_service.dart';
 import '../services/proxy_server.dart';
+import '../services/python_runtime_provision.dart';
 import '../services/realtime_sync_engine.dart';
 import '../services/search_suggest_service.dart';
 import '../services/site_service.dart';
@@ -743,6 +747,129 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   SiteOrderSettings get siteOrder =>
       _uiPreferences?.siteOrder ?? const SiteOrderSettings.defaults();
 
+  /// 直连站源注册的进行中 Future（null 表示未发起或已作废）。
+  ///
+  /// 首屏抢跑缺陷（2026-10-24 实测）：[_attachSiteService] 先 unawaited 发起注册，
+  /// 紧接着就装配好 [_siteService]，首页在注册落定前就发 home。此时
+  /// classifySite 对 csp_PyProxy 这类站点会落到「PC Java Spider 未支持」，
+  /// 用户看到一次红横幅，而注册完成后**没有任何代码重放首页**。
+  /// 修复：注册发起时保存 Future，首页在这类站点上等它落定（等待是顺序问题，
+  /// 不是耗时问题——实测注册只要 116 ms 也照样抢跑）。
+  Future<void>? _directReady;
+
+  /// 等待直连站源注册的上限。超时后按现状继续（不得把真实崩溃伪装成等待）。
+  static const Duration _directReadyTimeout = Duration(seconds: 8);
+
+  bool _disposed = false;
+
+  /// 发起直连站源注册并保存 Future（幂等：已有进行中的注册沿用同一 Future）。
+  void _kickDirectRegistration() {
+    final pending = _directReady;
+    if (pending != null) {
+      unawaited(pending);
+      return;
+    }
+    final future = _registerDirectSpidersQuietly();
+    _directReady = future;
+    unawaited(future);
+  }
+
+  /// 等直连站源注册落定（仅当该站点确实依赖注册结果时调用）。
+  Future<void> _waitForDirectRegistration() async {
+    final pending = _directReady;
+    if (pending == null) return;
+    try {
+      await pending.timeout(_directReadyTimeout);
+    } on TimeoutException {
+      log.warning('直连站源注册超时，按当前状态继续', scope: 'spider');
+    } catch (_) {
+      // 注册失败已由 _registerDirectSpidersQuietly 记日志；这里不吞掉后续加载。
+    }
+  }
+
+  /// CatVod 站源（Atvp 壳）需要的第三方依赖。
+  ///
+  /// 壳在**模块顶层**就 import 它们（实测 C:/dev/Atvp.py:18-23 的 requests /
+  /// Crypto / lxml），因此缺依赖不是「某个方法不可用」而是**启动即失败**：
+  /// host.py 记一行 stderr 后 return 3，用户只会看到「sidecar 意外退出 code=3」。
+  static const List<String> catVodPythonModules = <String>[
+    'requests',
+    'Crypto',
+    'lxml',
+  ];
+
+  /// 托管运行时是否已经尝试过（无论成败，一次进程只尝试一次）。
+  bool _pythonRuntimeTried = false;
+
+  bool get _pythonProvisionDisabled =>
+      Platform.environment['WEBHTV_DISABLE_PYTHON_PROVISION'] == '1';
+
+  /// 后台准备带依赖的 Python 解释器（不阻塞首屏；失败只记日志）。
+  ///
+  /// 用户诉求（2026-10-24）：「如果需要迁移啥的不应该程序自己做嘛？」——技术栈
+  /// 迁移（CatVod 壳 → Python 运行时）本来就该由程序自己完成，不该让用户看到
+  /// 一句 code=3。
+  ///
+  /// 约束：
+  /// - 只在配置里**确实存在** CatVod 壳站点时触发（普通 js/py 站点零成本）；
+  /// - 本机解释器已带依赖时直接采用，不建 venv、不联网；
+  /// - 建 venv + pip 安装是分钟级同步操作，必须放后台 isolate；
+  /// - 永不抛异常、永不静默降级：失败只把原因写进日志，站点仍如实报不可用。
+  Future<void> _preparePythonRuntimeQuietly() async {
+    if (_pythonRuntimeTried) return;
+    _pythonRuntimeTried = true;
+    if (_pythonProvisionDisabled) return;
+    try {
+      final config = effectiveConfig;
+      if (config == null) return;
+      final needsCatVod =
+          config.sites.any((site) => catVodLoaderUrl(site) != null);
+      if (!needsCatVod) return;
+      final root = managedPythonRoot(paths.cacheDir);
+      final candidates = SidecarRuntimeResolver.pythonCandidates()
+          .map(
+            (command) => PythonBaseCandidate(
+              executable: command.executable,
+              arguments: command.arguments,
+            ),
+          )
+          .toList(growable: false);
+      final result = await Isolate.run(
+        () => prepareCatVodPythonRuntimeSync(
+          runtimeRoot: root,
+          baseCandidates: candidates,
+        ),
+      );
+      if (_disposed) return;
+      if (!result.ok) {
+        // 不静默降级：站点仍会如实报「未找到带 CatVod 依赖的 Python 运行时」，
+        // 这里把程序化准备失败的原因写进日志，便于用户/后续排查。
+        log.warning(
+          'Python 运行时准备失败（${result.status.name}）：${result.message}',
+          scope: 'spider',
+        );
+        return;
+      }
+      if (result.status == ProvisionStatus.created) {
+        log.info('已创建托管 Python 运行时：${result.executable}', scope: 'spider');
+      }
+      // 命中的解释器（本机自带依赖的那个，或刚建好的 venv）优先：清掉解释器
+      // 选择缓存，让后续 `_pythonCommandForCatVod` 直接复用它；运行时的构造
+      // 命令是**快照**，所以还要让 Router 丢掉上一代 runtime。
+      LocalSpiderCommand.preferPythonExecutable(result.executable);
+      _router.invalidateRuntimes();
+      log.info(
+        'Python 运行时就绪：${result.executable}'
+        '${isManagedPythonExecutable(result.executable, root) ? '（托管）' : ''}',
+        scope: 'spider',
+      );
+      notifyListeners();
+    } catch (error) {
+      // Isolate.run 失败、路径不可写等：如实记日志，不打断首屏。
+      log.warning('Python 运行时准备失败：$error', scope: 'spider');
+    }
+  }
+
   Future<void> _registerDirectSpidersQuietly() async {
     try {
       final config = effectiveConfig;
@@ -758,6 +885,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       notifyListeners();
     } catch (error) {
       log.warning('直连站源注册失败：$error', scope: 'spider');
+    } finally {
+      // 注册落定后清空：下一次配置装配/数据交换要能重新发起（幂等缓存由注册器
+      // 自己的哈希比对保证），同时让首屏等待者立刻放行。
+      _directReady = null;
     }
   }
 
@@ -972,7 +1103,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     final ok = await store.rememberAdBlockEnabled(enabled);
     _applyAdRulesToProxy();
     // 直连 js/py 站点：每次配置装配后异步注册（不阻塞首页；失败只记日志）。
-    unawaited(_registerDirectSpidersQuietly());
+    _kickDirectRegistration();
     notifyListeners();
     return ok;
   }
@@ -1667,7 +1798,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   void _afterDataSwap() {
     _applyAdRulesToProxy();
     if (_config != null) {
-      unawaited(_registerDirectSpidersQuietly());
+      _kickDirectRegistration();
     }
   }
 
@@ -1699,6 +1830,8 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     _searchHistory = const [];
     _lastDecision = null;
     _router.setDirectSpiders(const {});
+    // 换代必须让首屏等待者看到「没有进行中的注册」，否则会一直等到超时。
+    _directReady = null;
     _applyAdRulesToProxy();
     notifyListeners();
   }
@@ -2126,22 +2259,34 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     // 广告规则随配置生效；总开关关闭时注入空集（行为等价于未配置）。
     _applyAdRulesToProxy();
     // 直连 js/py 站点：每次配置装配后异步注册（不阻塞首页；失败只记日志）。
-    unawaited(_registerDirectSpidersQuietly());
+    _kickDirectRegistration();
+    // CatVod 壳站点（api=csp_PyProxy + ext.loader 指向 .py）在模块顶层就 import
+    // requests/Crypto/lxml。用户诉求（2026-10-24）「如果需要迁移啥的不应该程序
+    // 自己做嘛？」——让程序自己把带依赖的解释器准备好（本机已有就直接用，否则
+    // 后台建托管 venv），而不是让用户撞一句 code=3。同样不阻塞首屏。
+    unawaited(_preparePythonRuntimeQuietly());
+    // csp_* 站点：配置里声明的 jar 若指向远端地址，自动取回并静态检测。
+    // 能加载的自动装好；不能加载的把结论写进 probe.json，列表与详情直接回显
+    // 原因（用户诉求 2026-10-24「迁移不该让用户自己做」）。同样不阻塞首屏。
+    unawaited(_probeCspJarsQuietly());
+    // 站点服务必须复用**同一个** [_router] 实例。
+    //
+    // 缺陷（2026-10-24 实测）：这里曾每次新建一个匿名 SpiderRouter 交给
+    // SiteService，而 `setDirectSpiders`（直连/自动注册结果）与站点列表的
+    // `classifySite` 都作用于字段 [_router]。于是同一次启动内出现
+    // 「站点列表显示可用（本地 Spider），首页却报 PC Java Spider 未支持」——
+    // 列表读 [_router]，业务调用读匿名 Router，后者的 directSpiders 永远为空。
+    //
+    // 换代（出站代理/DoH/换配置）通过 [SpiderRouter.updateTransport] 完成，
+    // 它会清空 runtime 缓存，等价于过去「新建 Router」的效果。
+    _router.updateTransport(
+      client: _httpClient,
+      globalHeaders: config.headers,
+    );
     _siteService = SiteService(
       appConfig: config,
       playbackBridge: _androidPlaybackBridge,
-      router: SpiderRouter(
-        client: _httpClient,
-        globalHeaders: config.headers,
-        catHttpClient: _catHttpClient,
-        registry: _spiderRegistry,
-        supervisor: _supervisor,
-        log: log,
-        hostPath: _router.hostPath ?? defaultSidecarHostPath(),
-        jsHostPath: defaultJsSidecarHostPath(),
-        jvmHostPath: defaultJvmSidecarHostPath(),
-        cspBinding: _cspBinding,
-      ),
+      router: _router,
       database: _database,
     );
     // 选中站点必须属于当前配置：`??=` 会在导入新配置时保留上一个配置的站点
@@ -2493,7 +2638,6 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   }
 
   /// 加载首页（§8.1、§8.4）。
-  /// 加载首页（§8.1、§8.4）。
   ///
   /// 首页无推荐内容时**自动选第一个分类**（用户反馈 2026-10-09：「如果当前站点的
   /// 默认推荐分类无数据时自动隐藏选中显示第一个分类即可」）。
@@ -2504,6 +2648,14 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   Future<void> loadHome(Site site) async {
     final service = _siteService;
     if (service == null) return;
+    // 直连站源（.js/.py/CatVod 壳）要先等注册落定，否则首页会拿到一次
+    // 假「运行时未支持」（真实原因只是注册还没写完）。真 Android jar 不在
+    // 这一集合里，仍然立即如实报「不支持」。
+    if (directSpiderKind(site) != null &&
+        _router.directSpiders[site.key] == null) {
+      await _waitForDirectRegistration();
+      if (_disposed) return;
+    }
     _contentPhase = LoadPhase.loading;
     _lastError = null;
     notifyListeners();
@@ -3816,6 +3968,97 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   }
 
   // -------------------------------------------------------------------------
+  // T3（csp_*）桌面 JAR 站源导入（ADR-0002、docs/reference/win-box-borrowings.md §12.6）
+  // -------------------------------------------------------------------------
+
+  /// csp_* 站点的桌面 jar 缓存根：`<config>/spiders/csp`。
+  String get cspRoot => _cspBinding.root;
+
+  /// 站点 key 对应的缓存目录。
+  String cspDirectoryFor(String siteKey) => _cspBinding.directoryFor(siteKey);
+
+  /// 已导入的 T3 桌面站源（含静态检测结论，供设置页回显）。
+  List<InstalledJar> get installedCspJars =>
+      JarIntake.describeInstalled(_cspBinding.root);
+
+  /// 静态检测一个候选入口，**不落盘**（设置页在导入前预览结论）。
+  JarInspection inspectCspSource(String sourcePath, {String? siteKey}) =>
+      JarIntake.inspectPath(
+        sourcePath,
+        expectedClass: siteKey == null ? null : JarIntake.classNameFor(siteKey),
+      );
+
+  /// 导入 T3 桌面站源：静态检测 → 通过才落盘到 `<config>/spiders/csp/<siteKey>/`。
+  ///
+  /// 纪律：含 `classes.dex` / 原生库 / 无法解析的入口**一律不落盘**，
+  /// 也不覆盖既有文件；不启动 JVM、不执行站源代码（PRODUCT.md）。
+  Future<JarInstallResult> importCspJar({
+    required String siteKey,
+    required String sourcePath,
+  }) async {
+    final result = await JarIntake.install(
+      sourcePath: sourcePath,
+      targetDir: _cspBinding.directoryFor(siteKey),
+      siteKey: siteKey,
+      log: log,
+    );
+    // 分类结果不经过 SpiderRouter 的 _cache，磁盘变化后 classifySite 立即反映；
+    // 这里只需刷新 UI（站点列表的可用性文案会跟着变）。
+    notifyListeners();
+    return result;
+  }
+
+  /// 自动探测配置里声明的 csp_* jar（方案 3，§12.9）。
+  ///
+  /// 配置能把 `jar`/`spider` 写成远端地址（AT 就是
+  /// `http://192.168.50.50:4567/spring.jar`），可 PC 端只认本机缓存。这里把
+  /// 「取回 → 静态检测 → 允许才导入」自动化：**能加载的自动装好，不能加载的
+  /// 自动说清原因**，不再让用户自己去「迁移」。
+  ///
+  /// 纪律不变：含 `classes.dex` / 原生库的入口一律**不落盘**，只写结论
+  /// （`probe.json`）；不启动 JVM、不加载类（PRODUCT.md、ADR-0002）。
+  Future<CspProbeReport> probeCspJars() async {
+    final config = effectiveConfig;
+    if (config == null) return const CspProbeReport();
+    final report = await _cspProbe().materialize(config);
+    if (!report.isEmpty) notifyListeners();
+    return report;
+  }
+
+  /// 某站点上次的自动探测结论（设置页/站点页回显）；未探测过为 null。
+  Map<String, Object?>? cspProbeRecordFor(String siteKey) =>
+      CspJarProbe.recordFor(_cspBinding, siteKey);
+
+  CspJarProbe _cspProbe() => CspJarProbe(
+    root: _spiderRegistry.root,
+    binding: _cspBinding,
+    log: log,
+  );
+
+  /// 启动/换配置后异步探测（不阻塞首屏；失败只记日志）。
+  Future<void> _probeCspJarsQuietly() async {
+    try {
+      final config = effectiveConfig;
+      if (config == null) return;
+      if (!config.sites.any((site) => CspJvmBinding.matches(site.api))) return;
+      final report = await _cspProbe().materialize(config);
+      if (!report.isEmpty) notifyListeners();
+    } catch (error) {
+      log.warning('CSP jar 自动探测失败：$error', scope: 'spider');
+    }
+  }
+
+  /// 移除已导入的 T3 桌面站源（回滚到「缺少桌面 JVM 站源」）。
+  Future<bool> removeCspJar(String siteKey) async {
+    final removed = await JarIntake.remove(
+      targetDir: _cspBinding.directoryFor(siteKey),
+      log: log,
+    );
+    if (removed) notifyListeners();
+    return removed;
+  }
+
+  // -------------------------------------------------------------------------
   // 本地代理（§11）
   // -------------------------------------------------------------------------
 
@@ -3939,6 +4182,14 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       await resetCacheDirectory(paths.cacheDir);
       log.info('缓存目录已重建：${paths.cacheDir}', scope: 'storage');
       _notice = '缓存已清理';
+      // 托管 Python 运行时就在 `<cacheDir>/python` 下，清缓存会把它一起删掉。
+      // 不在这里重置标志，用户就会撞上「清一次缓存 → 所有 CatVod 站点 code=3」
+      // 的循环：程序自己重新准备一次（本机已有带依赖解释器时零成本，
+      // 否则重建 venv），而不是把问题留给用户。
+      _pythonRuntimeTried = false;
+      LocalSpiderCommand.invalidatePythonCache();
+      _router.invalidateRuntimes();
+      unawaited(_preparePythonRuntimeQuietly());
     } catch (error) {
       _lastError = AppError(AppErrorKind.storage, '清理缓存失败', detail: '$error');
     }
@@ -4104,6 +4355,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
 
   @override
   void dispose() {
+    _disposed = true;
     _detailRunId++;
     _followingTimer?.cancel();
     _followingKickTimer?.cancel();

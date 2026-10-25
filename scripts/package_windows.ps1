@@ -104,6 +104,9 @@ if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
 $sidecarFiles = @(
     'sidecars/spider-host-python/host.py',
     'sidecars/spider-host-python/webhtv_ipc.py',
+    'sidecars/spider-host-python/webhtv_catvod.py',
+    'sidecars/spider-host-python/base/__init__.py',
+    'sidecars/spider-host-python/base/spider.py',
     'sidecars/spider-host-js/host.js',
     'sidecars/spider-host-js/sandbox_worker.js',
     'sidecars/spider-host-jvm/host.jar'

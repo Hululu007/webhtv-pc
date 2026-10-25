@@ -198,10 +198,11 @@ class SpiderCapabilities:
 
 
 class UnsupportedMethod(Exception):
-    """sidecar 未声明该 capability。"""
+    """sidecar 未声明该 capability，或站源根本没实现这个方法。"""
 
-    def __init__(self, method: str):
-        super().__init__(f"未声明 capability：{method}")
+    def __init__(self, method: str, message: str | None = None):
+        # message 可选：CatVod 站源用它说明「方法存在但没实现」的具体原因。
+        super().__init__(message or f"未声明 capability：{method}")
         self.method = method
 
 

@@ -4,6 +4,11 @@
 - 归属取值：`已对齐`、`N/A（基础设施/平台无关）`、`P0-x`、`P1-x`、`P2-x`、`P3-x`、`N1`–`N8`。
 - 基准：`F:/Workspace/webtv2/webhtv` @ `77e2fbefdc`；清点口径见 `design/00` §4。
 - 数量随基准演进；运行时以脚本清点结果为准。
+- **基准漂移备注**：本地安卓仓库已推进到 `dcf9828cba61`（2026-10-23，merge beta）。相对写作基准，
+  仅对话框目录新增 1 个文件（`DialogSafeArea.java`，见下方 §2 表）；其余三类清点（manifest 屏幕去重后
+  43 个 activity 名、设置 Fragment 9 个、顶层模块 34 个）**无增减**。§2 已补该行，因此 G9.3 在
+  `dcf9828cba61` 上同样全绿（实测 `activities=43 未映射=0，dialogs=85 未映射=0，fragments=9 未映射=0，modules=34 未映射=0`）。
+  历史证据文件（`docs/phase9/evidence/`）按原样保留，不回填。
 
 ---
 
@@ -88,6 +93,7 @@
 | DanmakuSettingDialog | P0-7 | 弹幕显示设置 |
 | DanmakuSettingPanel | P0-7 | 弹幕设置面板 |
 | DebugLogDialog | 已对齐 | 调试日志 |
+| DialogSafeArea | N/A（平台无关） | 弹窗可见区计算：安卓端用 WindowInsets 从全屏尺寸里扣掉状态栏/导航栏/手势条。**Flutter 侧不需要对应实现**——桌面窗口没有系统栏，且本仓库弹窗走 Material `Dialog`，安全区内边距由 `SafeArea`/`MediaQuery` 承担（现有 `SafeArea` 用于 `player_page.dart`、`tmdb_detail_view.dart`） |
 | DiscMenuDialog | N2 | 蓝光菜单（MPV 专属） |
 | DisplayDialog | 已对齐 | 屏显设置（Phase 8） |
 | GitCloudDialog | P3-4 | 云备份 |

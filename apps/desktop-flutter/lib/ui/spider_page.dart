@@ -11,6 +11,8 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../services/csp_jar_probe.dart';
+import '../services/jar_intake.dart';
 import '../services/spider_process.dart';
 import '../services/spider_registry.dart';
 import '../state/app_state.dart';
@@ -89,6 +91,9 @@ class _SpiderPageState extends State<SpiderPage> {
           const SizedBox(height: 8),
           _IsolationNotice(),
           const SizedBox(height: 16),
+          _SectionTitle('T3 桌面 JAR 站源（csp_*）'),
+          _CspJarIntakeCard(state: _state),
+          const SizedBox(height: 24),
           _SectionTitle('已安装的本地 Spider（${local.length}）'),
           if (local.isEmpty)
             const SectionEmpty(
@@ -379,6 +384,306 @@ class _ProxyCard extends StatelessWidget {
                 ),
               ],
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// T3（`csp_*`）桌面 JAR 站源入口（ADR-0002、docs/reference/win-box-borrowings.md §12.6/§12.9）。
+///
+/// 两条路径：
+/// - **自动探测**：配置里已经把 jar 写成远端地址时，程序自己取回、静态检测、
+///   通过就装好；不通过只写结论（`probe.json`），站点列表直接显示真实原因。
+///   用户不需要手工「迁移」任何文件（2026-10-24 用户诉求）。
+/// - **手工导入**：用户本机已有 jar / 类目录时，填路径拷进
+///   `<config>/spiders/csp/<siteKey>/`。
+///
+/// 两条路径共用的纪律：
+/// - 导入前先静态检测（zip 目录项 + 文件树，不加载类、不执行代码）；
+/// - 含 `classes.dex` 或原生库的入口**一律拒绝且不落盘**，文案指向 ADR-0002；
+/// - 已导入条目可一键移除（回滚到「缺少桌面 JVM 站源」）。
+///
+/// 诚实预期（§12.6.5）：社区 T3 jar 里绝大多数含 dex 或继承 Android/CatVod 基类，
+/// 自动探测不会让它们变得可用；它只保证「该能跑的那批自己跑起来」与
+/// 「不能跑的那批原因写在用户看得到的地方」。
+class _CspJarIntakeCard extends StatefulWidget {
+  const _CspJarIntakeCard({required this.state});
+
+  final AppState state;
+
+  @override
+  State<_CspJarIntakeCard> createState() => _CspJarIntakeCardState();
+}
+
+class _CspJarIntakeCardState extends State<_CspJarIntakeCard> {
+  final TextEditingController _path = TextEditingController();
+  final TextEditingController _siteKey = TextEditingController();
+  JarInspection? _preview;
+  CspProbeReport? _report;
+  String? _message;
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _path.dispose();
+    _siteKey.dispose();
+    super.dispose();
+  }
+
+  AppState get _state => widget.state;
+
+  void _onInspect() {
+    final path = _path.text.trim();
+    if (path.isEmpty) {
+      setState(() => _message = '请先填写 jar 或类目录的绝对路径');
+      return;
+    }
+    final key = _siteKey.text.trim();
+    setState(() {
+      _preview = _state.inspectCspSource(
+        path,
+        siteKey: key.isEmpty ? null : key,
+      );
+      _message = null;
+    });
+  }
+
+  Future<void> _onImport() async {
+    final path = _path.text.trim();
+    final key = _siteKey.text.trim();
+    if (path.isEmpty || key.isEmpty) {
+      setState(() => _message = '导入需要同时填写站点 key（例 csp_Demo）与入口路径');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    final result = await _state.importCspJar(siteKey: key, sourcePath: path);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _preview = result.inspection ?? _preview;
+      _message = result.ok
+          ? '已导入到 ${result.targetPath}'
+          : '未导入：${result.error}';
+    });
+  }
+
+  /// 自动探测：配置里声明的 csp_* jar 由程序取回 + 静态检测（§12.9）。
+  Future<void> _onProbe() async {
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    final report = await _state.probeCspJars();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _report = report;
+      _message = report.isEmpty
+          ? '没有需要自动探测的 csp_* 站点（配置里未声明 jar，或已全部导入）。'
+          : '自动探测完成：已装 ${report.installed} 个、拒绝 ${report.rejected} 个、失败 ${report.failed} 个。';
+    });
+  }
+
+  Future<void> _onRemove(String siteKey) async {
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    final removed = await _state.removeCspJar(siteKey);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _message = removed ? '已移除 $siteKey' : '移除失败：$siteKey';
+    });
+  }
+
+  static String _outcomeLabel(CspProbeOutcome outcome) => switch (outcome) {
+    CspProbeOutcome.skippedInstalled => '已装过，跳过',
+    CspProbeOutcome.installed => '已自动装入',
+    CspProbeOutcome.rejected => '已拒绝（见原因）',
+    CspProbeOutcome.failed => '取回/写入失败',
+    CspProbeOutcome.noSource => '配置未声明 jar',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final installed = _state.installedCspJars;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '配置里把 jar 写成远端地址时（如 spring.jar），点「自动探测」由程序取回并静态检测：'
+              '能加载的自动装到 ${_state.cspRoot}，不能加载的原因直接显示在站点列表。'
+              '也可手工导入本机已有的 jar / 类目录。含 dex 的 Android 站源一律如实拒绝（ADR-0002）。',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                FilledButton.tonalIcon(
+                  key: const ValueKey('csp-jar-probe'),
+                  onPressed: _busy ? null : _onProbe,
+                  icon: const Icon(Icons.travel_explore, size: 18),
+                  label: const Text('自动探测配置里的 jar'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              key: const ValueKey('csp-jar-path'),
+              controller: _path,
+              decoration: const InputDecoration(
+                labelText: '入口路径（jar 文件或含 .class 的目录）',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              key: const ValueKey('csp-jar-site-key'),
+              controller: _siteKey,
+              decoration: const InputDecoration(
+                labelText: '站点 key（例 csp_Demo，须与配置里的 api 一致）',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                OutlinedButton.icon(
+                  key: const ValueKey('csp-jar-inspect'),
+                  onPressed: _busy ? null : _onInspect,
+                  icon: const Icon(Icons.search, size: 18),
+                  label: const Text('仅检测'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.icon(
+                  key: const ValueKey('csp-jar-install'),
+                  onPressed: _busy ? null : _onImport,
+                  icon: const Icon(Icons.add_circle_outline, size: 18),
+                  label: const Text('检测并导入'),
+                ),
+                if (_busy) ...[
+                  const SizedBox(width: 12),
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: LoadingBlock(center: false, size: 16),
+                  ),
+                ],
+              ],
+            ),
+            if (_message != null) ...[
+              const SizedBox(height: 8),
+              Text(_message!, style: theme.textTheme.bodySmall),
+            ],
+            if (_preview != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                '检测结论（${_preview!.verdict.name}）',
+                style: theme.textTheme.titleSmall,
+              ),
+              const SizedBox(height: 4),
+              Text(_preview!.summary, style: theme.textTheme.bodySmall),
+              Text(
+                '入口：${_preview!.sourcePath}',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+            if (_report != null && !_report!.isEmpty) ...[
+              const SizedBox(height: 12),
+              Text('自动探测结论', style: theme.textTheme.titleSmall),
+              for (final entry in _report!.entries)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '${entry.siteKey} · ${_outcomeLabel(entry.outcome)}',
+                              style: theme.textTheme.bodyMedium,
+                            ),
+                          ),
+                          if (entry.inspection != null)
+                            Chip(
+                              label: Text(
+                                entry.inspection!.installable ? '可加载' : '不可加载',
+                              ),
+                              visualDensity: VisualDensity.compact,
+                              backgroundColor: entry.inspection!.installable
+                                  ? null
+                                  : scheme.errorContainer,
+                            ),
+                        ],
+                      ),
+                      if (entry.message.isNotEmpty)
+                        Text(
+                          entry.message,
+                          style: theme.textTheme.bodySmall,
+                        ),
+                    ],
+                  ),
+                ),
+            ],
+            const SizedBox(height: 12),
+            Text(
+              '已导入（${installed.length}）',
+              style: theme.textTheme.titleSmall,
+            ),
+            if (installed.isEmpty)
+              Text(
+                '还没有导入任何 T3 桌面站源。',
+                style: theme.textTheme.bodySmall,
+              ),
+            for (final jar in installed)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '${jar.siteKey} · ${jar.inspection.verdict.name}',
+                            style: theme.textTheme.bodyMedium,
+                          ),
+                        ),
+                        Chip(
+                          label: Text(
+                            jar.inspection.installable ? '可加载' : '不可加载',
+                          ),
+                          visualDensity: VisualDensity.compact,
+                          backgroundColor: jar.inspection.installable
+                              ? null
+                              : scheme.errorContainer,
+                        ),
+                        const SizedBox(width: 8),
+                        TextButton(
+                          key: ValueKey('csp-jar-remove-${jar.siteKey}'),
+                          onPressed: _busy ? null : () => _onRemove(jar.siteKey),
+                          child: const Text('移除'),
+                        ),
+                      ],
+                    ),
+                    Text(jar.entryPath, style: theme.textTheme.bodySmall),
+                  ],
+                ),
+              ),
           ],
         ),
       ),

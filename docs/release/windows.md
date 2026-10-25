@@ -111,6 +111,14 @@ WebHTV-PC-<version>[-beta]-windows-x64/
 cd apps/desktop-flutter
 puro -e webhtv -p . flutter build windows --release --dart-define=APP_VERSION=0.1.0
 
+# 等价写法（**不必先 cd**）：
+#   puro --dir apps/desktop-flutter -e webhtv flutter build windows --release --dart-define=APP_VERSION=0.1.0
+# 注意：`-p <目录>` 只是选定 puro 环境所绑定的工程，**不会**改 flutter 的工作目录。
+# 在仓库根执行 `puro -e webhtv -p . flutter build windows` 必然报
+# `Error: No pubspec.yaml file found.`——因为仓库根的 pubspec 在 apps/desktop-flutter。
+# 构建前先确认没有同名进程正在运行：Release 产物被占用时 cmake install 会以
+# `file INSTALL cannot copy file ... Permission denied` 失败（error MSB3073）。
+
 # 2. 打包
 cd ../..
 pwsh -File scripts/package_windows.ps1 `

@@ -3,6 +3,7 @@
 - 状态：**W1 完成（P0 八项 + 5 条 L3）· W2 除 P1-6 外完成 · W3 进行中（P2-1、P2-2、P2-7、P2-8 已落地）**
 - 日期：2026-10-21
 - 基准（安卓）：`F:/Workspace/webtv2/webhtv` @ `77e2fbefdc`（2026-10-20，「默影视」）
+  - **漂移**：本地仓库已推进到 `dcf9828cba61`（2026-10-23，merge beta）。差异仅为对话框目录新增 `DialogSafeArea.java`（已补入 `design/05-upstream-map.md`），其余清点无增减；G9.1–G9.5 在该 commit 上已实测全绿。
 - 基准（PC）：本仓库 @ `81c398c`
 - 主设计文档：`docs/webhtv-pc-design.md` §21（Phase 9 摘要）
 - 方法：`docs/phase9/design/00-gap-method.md`

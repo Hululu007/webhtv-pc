@@ -1078,22 +1078,153 @@ class SidecarRuntimeResolver {
     return null;
   }
 
-  static SidecarCommand? _resolvePython() {
+  /// Python 候选解释器，按优先级排列（Windows 上 `py.exe` 在前）。
+  ///
+  /// `py.exe` 是 Windows 的 launcher，正常会自己挑一个已安装的版本；但它也可能
+  /// 指向**已被删除/迁移**的解释器（本机实测 `py -3` 直接以 101 退出）。因此候选
+  /// 必须逐个验证后再采用（见 [firstUsablePython]），否则这个错误会被伪装成
+  /// 「sidecar 崩溃」，并且把「本机没装 Python」这种可行动结论也搅浑。
+  /// 优先使用的解释器（托管运行时；null 表示没用托管运行时）。
+  ///
+  /// 存在的理由：CatVod 站源要第三方依赖（requests/Crypto/lxml），而 PATH 上的
+  /// 解释器常常没有；托管 venv 建好后必须排在所有候选之前，否则站点又会退回
+  /// 「缺依赖 → exit 3」。仍然要过 [pythonWorks] 验证，坏路径不会把整条链带崩。
+  static String? _preferredPython;
+
+  static void preferPythonExecutable(String? path) {
+    final trimmed = path?.trim();
+    final next = (trimmed == null || trimmed.isEmpty) ? null : trimmed;
+    if (_preferredPython == next) return;
+    _preferredPython = next;
+    _pythonProbed = false;
+    _pythonResolved = null;
+  }
+
+  static List<SidecarCommand> pythonCandidates() {
+    final candidates = <SidecarCommand>[];
+    void add(String executable, List<String> arguments) {
+      if (candidates.any(
+        (item) =>
+            item.executable.toLowerCase() == executable.toLowerCase() &&
+            item.arguments.join(' ') == arguments.join(' '),
+      )) {
+        return;
+      }
+      candidates.add(
+        SidecarCommand(executable: executable, arguments: arguments),
+      );
+    }
+
+    final preferred = _preferredPython;
+    if (preferred != null && File(preferred).existsSync()) {
+      add(preferred, const []);
+    }
+
     if (Platform.isWindows) {
       final launcher = _resolveFromPath('py.exe');
-      if (launcher != null) {
-        return SidecarCommand(executable: launcher, arguments: const ['-3']);
-      }
+      if (launcher != null) add(launcher, const ['-3']);
     }
-    final python = _resolveFromPath(Platform.isWindows ? 'python.exe' : 'python3');
-    if (python != null) {
-      return SidecarCommand(executable: python, arguments: const []);
+    for (final name in Platform.isWindows
+        ? const ['python.exe', 'python3.exe', 'python']
+        : const ['python3', 'python']) {
+      final resolved = _resolveFromPath(name);
+      if (resolved != null) add(resolved, const []);
     }
-    final fallback = _resolveFromPath('python');
-    if (fallback != null) {
-      return SidecarCommand(executable: fallback, arguments: const []);
+    return candidates;
+  }
+
+  /// 候选是否**真的能启动**：`--version` 退出码为 0 且输出 `Python 3.x`。
+  ///
+  /// 只做文件存在性检查是不够的：launcher 可能指向坏解释器，WindowsApps 的
+  /// App Execution Alias 也可能「启动成功但不输出任何内容」。
+  static bool pythonWorks(SidecarCommand command) {
+    if (!File(command.executable).existsSync()) return false;
+    try {
+      final result = Process.runSync(
+        command.executable,
+        [...command.arguments, '--version'],
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
+      );
+      final output = '${result.stdout ?? ''}${result.stderr ?? ''}';
+      return result.exitCode == 0 && RegExp(r'Python\s+3\.').hasMatch(output);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// CatVod 壳站点在**模块顶层**就 import 的第三方模块。
+  ///
+  /// 与 [python_runtime_provision.catVodPythonProbeModules] 同清单。这里复制字面量
+  /// 而不是 import 该模块：services/ 之间不引入反向依赖，且真正的安装逻辑仍只有
+  /// 一处（python_runtime_provision.dart）。
+  static const List<String> catVodDependencyModules = <String>[
+    'requests',
+    'Crypto',
+    'lxml',
+  ];
+
+  /// 依赖探测脚本：只在有缺失时输出 MISSING:a,b，否则输出 OK。
+  ///
+  /// 用 importlib.util.find_spec 而不是 import：只查模块能否被解析，不执行模块
+  /// 顶层代码（CatVod 壳的顶层代码本身就会解析配置并发网络请求）。
+  static const String dependencyProbeScript =
+      "import importlib.util as u,sys;"
+      "ms=[m for m in sys.argv[1:] if u.find_spec(m) is None];"
+      "print('MISSING:'+','.join(ms) if ms else 'OK')";
+
+  /// 候选是否既「能启动」（[pythonWorks]）又带齐 CatVod 依赖。
+  ///
+  /// 缺陷（2026-10-25 实测）：只验 `--version` 会让一个**没有 requests** 的 3.14
+  /// 通过，而 CatVod 壳在 import 阶段就会失败 —— host.py 记一行 stderr 后 return 3，
+  /// 用户只看到「sidecar 意外退出（code=3）」。带依赖的候选优先；依赖探测与
+  /// `--version` 同量级（实测 50–76 ms），因此只在「本机解释器」这一档付出成本。
+  static bool pythonWorksForCatVod(
+    SidecarCommand command, {
+    List<String> modules = catVodDependencyModules,
+  }) {
+    if (!pythonWorks(command)) return false;
+    if (modules.isEmpty) return true;
+    try {
+      final result = Process.runSync(
+        command.executable,
+        [...command.arguments, '-c', dependencyProbeScript, ...modules],
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
+      );
+      if (result.exitCode != 0) return false;
+      final output = '${result.stdout ?? ''}${result.stderr ?? ''}';
+      return output.contains('OK');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 从候选里挑第一个真正可用的；全部不可用时返回 null（调用方必须显示
+  /// 「运行时未安装或不受支持」，不得静默跳过站点）。
+  ///
+  /// [probe] 可注入，便于单测直接覆盖「第一个候选是坏的」这类真实场景。
+  static SidecarCommand? firstUsablePython(
+    List<SidecarCommand> candidates, {
+    bool Function(SidecarCommand)? probe,
+  }) {
+    final check = probe ?? pythonWorks;
+    for (final command in candidates) {
+      if (check(command)) return command;
     }
     return null;
+  }
+
+  static bool _pythonProbed = false;
+  static SidecarCommand? _pythonResolved;
+
+  static SidecarCommand? _resolvePython() {
+    // 探测要真的拉起子进程（每个候选约 60–120 ms），因此结果按进程缓存：
+    // 站点启动是热路径，不能每次 ensureRunning 都重探一遍。
+    if (_pythonProbed) return _pythonResolved;
+    _pythonProbed = true;
+    _pythonResolved = firstUsablePython(pythonCandidates());
+    return _pythonResolved;
   }
 
   static String? _resolveFromPath(String name) {

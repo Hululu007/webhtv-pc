@@ -29,6 +29,8 @@ import '../core/cat_http.dart';
 import '../core/http_api.dart';
 import '../core/ipc_protocol.dart';
 import '../core/protocol.dart';
+import 'direct_spider_registrar.dart';
+import 'jar_intake.dart';
 import 'log_service.dart';
 import 'sidecar_runtime.dart';
 import 'spider_process.dart';
@@ -267,8 +269,12 @@ class SpiderRouter {
     this.cspBinding,
   });
 
-  final HttpApiClient client;
-  final List<HeaderRule> globalHeaders;
+  /// HTTP 客户端。可随出站代理/DoH 设置变化替换（见 [updateTransport]）。
+  HttpApiClient client;
+
+  /// 配置级请求头。与 [client] 一起随配置装配更新。
+  List<HeaderRule> globalHeaders;
+
   final String userAgent;
 
   /// `webhtv-cat-http-v1` 客户端（§9.4）。
@@ -300,7 +306,11 @@ class SpiderRouter {
   final Map<String, SiteRuntime> _cache = {};
 
   /// 运行时缓存键：同一 `type` 可能有不同 ABI，不能只用 type 做键。
-  String _cacheKey(Site site) => '${site.type}:${site.api.trim().toLowerCase()}';
+  ///
+  /// 还必须带 `site.key`：CatVod 壳站点（如几十个 `csp_PyProxy`）的 api 完全相同，
+  /// 只用 api 做键会把它们塌缩成同一个 runtime（共享第一个站点的 ext）。
+  String _cacheKey(Site site) =>
+      '${site.type}:${site.key}:${site.api.trim().toLowerCase()}';
 
   /// 直连 js/py 站点自动注册结果（`site.key` → 已注册 spider）。
   ///
@@ -313,12 +323,50 @@ class SpiderRouter {
     _cache.clear();
   }
 
+  /// 运行时缓存失效（解释器就绪后调用）。
+  ///
+  /// 每个 [SiteRuntime] 都**快照**了构造时解析出的执行命令。托管 Python 运行时
+  /// 就绪、或解释器优先级变化后，必须让下次 [classifySite]/[runtimeFor] 重建，
+  /// 否则站点会继续用当年那个「没有 requests 的解释器」启动。
+  ///
+  /// 不清空 [directSpiders]（注册结果与解释器无关），也不 dispose 旧 runtime：
+  /// 在途调用仍持有它，宿主进程由 supervisor 按 siteKey 复用。
+  void invalidateRuntimes() {
+    _cache.clear();
+  }
+
+  /// 更新 HTTP 传输（出站代理 / DoH / 配置换源后调用）。
+  ///
+  /// 运行时会**快照**构造时的 client 与 globalHeaders（[_create]），所以只改字段
+  /// 不够，必须同时清空 [_cache]，否则旧 runtime 会继续用上一代传输。
+  ///
+  /// 本方法**不关闭**旧 [client]：它会随 `AppState` 的重建流程统一释放
+  /// （新客户端可能正被别处持有；早关会让在途请求直接失败）。
+  void updateTransport({
+    HttpApiClient? client,
+    List<HeaderRule>? globalHeaders,
+  }) {
+    if (client != null && !identical(client, this.client)) {
+      this.client = client;
+    }
+    if (globalHeaders != null && !identical(globalHeaders, this.globalHeaders)) {
+      this.globalHeaders = globalHeaders;
+    }
+    _cache.clear();
+  }
+
   /// 带注册表的可用性判定（§8.1）。
   ///
   /// 本地 `spider-local:` 站点必须能在注册表中找到合法 manifest 才可用；
   /// `csp_*` 站点需要本地缓存的**桌面** jar（含 dex 的 Android jar 明确不支持）；
   /// 未安装运行时（无 Python/Node/Java）也必须如实报告而不是静默失败。
   SiteAvailability classifySite(Site site) {
+    // 直连/自动注册产物排在 csp_ 之前：CatVod 壳站点（api=csp_PyProxy）虽然
+    // 名字像 JVM 绑定，实际由 Python sidecar 承载，必须先进直连分支。
+    final registered = SpiderLocalBinding.matches(site.api)
+        ? null
+        : directSpiders[site.key];
+    if (registered != null) return _classifyLocal(registered);
     if (CspJvmBinding.matches(site.api)) return _classifyCsp(site);
     if (!SpiderLocalBinding.matches(site.api)) {
       // 直连 js/py：已自动注册则按本地 spider 判定，否则如实报未就绪。
@@ -377,7 +425,7 @@ class SpiderRouter {
     );
   }
 
-  /// 直连 js/py 站点的运行时可读名；非该形态返回 null。
+  /// 直连 js/py/CatVod 壳站点的运行时可读名；非该形态返回 null。
   static String? _directUnavailableReason(Site site) {
     if (site.type != 3) return null;
     final api = site.api.trim().toLowerCase();
@@ -386,6 +434,9 @@ class SpiderRouter {
     }
     if (api.endsWith('.py') || api.contains('.py?')) {
       return 'Python Spider (tvbox-python-v1)';
+    }
+    if (catVodLoaderUrl(site) != null) {
+      return 'CatVod Python Spider (catvod-python-v1)';
     }
     return null;
   }
@@ -444,6 +495,23 @@ class SpiderRouter {
     }
     final entry = binding.entryFor(site.key);
     if (entry == null) {
+      // 自动探测（方案 3）给过的结论必须原样带到用户面前：配置声明的 jar 若
+      // 含 classes.dex / 原生库，程序已经试过并拒绝落盘，不能再让用户对着
+      // 「请把 jar 放到 …」自己去猜（§12.9）。
+      final probed = JarIntake.probeRecord(binding.directoryFor(site.key));
+      final summary = (probed?['summary'] as String?)?.trim() ?? '';
+      final sourceUrl = (probed?['sourceUrl'] as String?)?.trim() ?? '';
+      if (summary.isNotEmpty) {
+        final from = sourceUrl.isEmpty
+            ? '配置声明的 jar'
+            : '配置声明的 jar（${redactUrl(sourceUrl)}）';
+        return SiteAvailability(
+          available: false,
+          runtimeName: 'Android/JAR Spider',
+          stage: 'Phase 3',
+          reason: '自动检测失败：$from 无法在桌面 JVM 加载。$summary',
+        );
+      }
       return SiteAvailability(
         available: false,
         runtimeName: 'PC Java Spider',

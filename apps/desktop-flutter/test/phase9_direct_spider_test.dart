@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:path/path.dart' as p;
 import 'package:webhtv_pc/core/protocol.dart';
 import 'package:webhtv_pc/services/direct_spider_registrar.dart';
 import 'package:webhtv_pc/services/log_service.dart';
@@ -24,12 +25,20 @@ void main() {
     } catch (_) {}
   });
 
-  Site site(String api, {String key = 'direct-a', int type = 3}) => Site(
-    key: key,
-    name: '直连 $key',
-    type: type,
-    api: api,
-  );
+  Site site(
+    String api, {
+    String key = 'direct-a',
+    int type = 3,
+    Object? ext,
+  }) => Site(key: key, name: '直连 $key', type: type, api: api, ext: ext);
+
+  /// CatVod 壳站点的 ext：真正的蜘蛛地址在 loader 里。
+  Map<String, Object?> shellExt(String loader) => {
+    'api': 'https://pan.test',
+    'loader': loader,
+    'secret': 'x',
+    'token': '2024',
+  };
 
   group('P1-7 形态判定（README §4.2）', () {
     test('只认 type=3 且 .js/.py', () {
@@ -44,6 +53,147 @@ void main() {
         isNull,
       );
       expect(directSpiderKind(site('spider-local:a')), isNull);
+    });
+  });
+
+  group('CatVod 壳站点（方案 2）', () {
+    test('api 只写壳名时按 ext.loader 认形态', () {
+      final shell = site(
+        'csp_PyProxy',
+        key: 'shell-a',
+        ext: shellExt('https://pan.test/Atvp.py?v=1'),
+      );
+      expect(directSpiderKind(shell), DirectSpiderKind.catVod);
+      expect(catVodLoaderUrl(shell), 'https://pan.test/Atvp.py?v=1');
+
+      // ext 是 JSON 字符串、以及 Base64 过的 JSON，都要认。
+      final asJson = site(
+        'csp_PyProxy',
+        key: 'shell-b',
+        ext: jsonEncode(shellExt('https://pan.test/a.py')),
+      );
+      expect(directSpiderKind(asJson), DirectSpiderKind.catVod);
+      final asBase64 = site(
+        'csp_PyProxy',
+        key: 'shell-c',
+        ext: base64Encode(
+          utf8.encode(jsonEncode(shellExt('https://pan.test/b.py'))),
+        ),
+      );
+      expect(catVodLoaderUrl(asBase64), 'https://pan.test/b.py');
+
+      // 没有 loader、loader 不是 http(s)、或 ext 缺失 → 不认。
+      expect(directSpiderKind(site('csp_PyProxy', ext: {'api': 'x'})), isNull);
+      expect(
+        directSpiderKind(
+          site('csp_PyProxy', ext: shellExt(r'C:\spiders\a.py')),
+        ),
+        isNull,
+      );
+      expect(directSpiderKind(site('csp_PyProxy')), isNull);
+
+      // 显式 .py/.js 后缀仍优先于壳判定。
+      expect(
+        directSpiderKind(
+          site('https://x.test/a.py', ext: shellExt('https://pan.test/a.py')),
+        ),
+        DirectSpiderKind.py,
+      );
+    });
+
+    test('下载 loader → 生成壳入口与 manifest → 注册成功', () async {
+      var downloads = 0;
+      final registrar = DirectSpiderRegistrar(
+        root: temp.path,
+        registry: registry,
+        log: LogService(),
+        client: MockClient((request) async {
+          downloads += 1;
+          expect(request.url.path, endsWith('Atvp.py'));
+          return http.Response('class Spider:\n    pass\n', 200);
+        }),
+      );
+
+      final result = await registrar.materialize(
+        AppConfig(
+          sites: [
+            site(
+              'csp_PyProxy',
+              key: 'shell-a',
+              ext: shellExt('https://pan.test/Atvp.py?v=1'),
+            ),
+          ],
+        ),
+      );
+
+      expect(downloads, 1);
+      final local = result['shell-a']!;
+      expect(local.manifest.runtime, 'python');
+      expect(local.manifest.entry, 'spider.py');
+      expect(local.entryExists, isTrue);
+
+      final dir = p.dirname(local.manifestPath);
+      final entry = File(p.join(dir, 'spider.py')).readAsStringSync();
+      expect(entry, contains('create_catvod_spider'));
+      expect(entry, contains('create_spider'));
+      expect(File(p.join(dir, 'loader.py')).existsSync(), isTrue);
+
+      final stored = jsonDecode(File(local.manifestPath).readAsStringSync());
+      expect(stored['key'], 'shell-a');
+      expect(stored['runtime'], 'python');
+    });
+
+    test('同一 api 的多个壳站点互不覆盖', () async {
+      final registrar = DirectSpiderRegistrar(
+        root: temp.path,
+        registry: registry,
+        client: MockClient((_) async => http.Response('pass', 200)),
+      );
+      final result = await registrar.materialize(
+        AppConfig(
+          sites: [
+            site(
+              'csp_PyProxy',
+              key: 'shell-a',
+              ext: shellExt('https://pan.test/a.py'),
+            ),
+            site(
+              'csp_PyProxy',
+              key: 'shell-b',
+              ext: shellExt('https://pan.test/b.py'),
+            ),
+          ],
+        ),
+      );
+      expect(result.keys, ['shell-a', 'shell-b']);
+      expect(
+        p.dirname(result['shell-a']!.manifestPath),
+        isNot(p.dirname(result['shell-b']!.manifestPath)),
+      );
+    });
+
+    test('loader 哈希一致时不重复下载', () async {
+      var downloads = 0;
+      DirectSpiderRegistrar build() => DirectSpiderRegistrar(
+        root: temp.path,
+        registry: registry,
+        client: MockClient((_) async {
+          downloads += 1;
+          return http.Response('same loader', 200);
+        }),
+      );
+      final config = AppConfig(
+        sites: [
+          site(
+            'csp_PyProxy',
+            key: 'shell-a',
+            ext: shellExt('https://pan.test/a.py'),
+          ),
+        ],
+      );
+      await build().materialize(config);
+      await build().materialize(config);
+      expect(downloads, 1);
     });
   });
 
