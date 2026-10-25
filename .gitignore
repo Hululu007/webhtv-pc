@@ -36,3 +36,8 @@ sidecars/spider-host-jvm/.build/
 # Phase 7 验收脚本的临时输出（不应入库）
 tools/phase7/_run.out
 tools/phase7/_run.err
+
+# superpowers sdd 工作区（本地过程产物，不入库）
+# 注意：docs/phase6 与 docs/phase8 的 evidence 会引用其中的 progress.md 作为审计轨迹，
+# 删除本目录会让那些引用变成悬空指针——所以这里只忽略，不清理。
+.superpowers/
