@@ -13,6 +13,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../core/app_error.dart';
+import '../core/image_user_agent.dart';
 import '../core/protocol.dart';
 import '../core/session_recovery.dart';
 import '../core/site_group.dart';
@@ -28,6 +29,7 @@ import 'common.dart';
 import 'config_pages.dart';
 import 'diagnostics_pages.dart';
 import 'following_page.dart';
+import 'image_header_scope.dart';
 import 'library_pages.dart';
 import 'live_page.dart';
 import 'playback_resume.dart';
@@ -148,6 +150,13 @@ WebHTV PC 是一个通用桌面播放器。
 
 Future<void> main(List<String> args) async {
   StartupTrace.mark('entry');
+  // 图片请求的 User-Agent 必须**在客户端层**替换（见 `core/image_user_agent.dart`）：
+  // `Image.network(headers:)` 走的是 `request.headers.add()`，而 `dart:io` 默认已经
+  // 有 `Dart/x.y (dart:io)`，add 的结果是两个值拼成一条
+  // `Dart/3.13 (dart:io), WebHTV-PC/0.1 (Windows)`——豆瓣的 EdgeOne 照样 418。
+  // 只有 `HttpClient.userAgent`（客户端级、`set` 语义）才能真正替换它；
+  // 实测同一 URL：add UA → 418，HttpOverrides UA → 200。
+  installImageUserAgent();
   WidgetsFlutterBinding.ensureInitialized();
   StartupTrace.mark('binding');
   // 崩溃恢复（Phase 9 P2-8）：把未捕获异常写入有界崩溃日志，供下次启动展示。
@@ -304,6 +313,24 @@ class _WebHtvAppState extends State<WebHtvApp> with WindowListener {
       // 主题由用户偏好驱动（设置页可切换并持久化）。
       // 状态层存原始字符串、这里映射成 `ThemeMode`，避免状态层依赖 material。
       themeMode: themeModeOf(_state.themeMode),
+      // 图片请求 Header 的全局作用域（§7.4.6 的图片侧，见 `image_headers.dart`）。
+      //
+      // 为什么挂在这里：`builder` 位于 **Navigator 之上**，因此所有 push 出来
+      // 的路由与 `showDialog`/`showModalBottomSheet` 弹出层都是它的后代——
+      // 海报墙、演职人员头像、剧照查看器等图片位才能统一拿到顶层 `headers` 规则。
+      //
+      // 为什么要再包一层 `ListenableBuilder`：状态变更只会触发 `AppShell`
+      // （它自己 `addListener`）重建，本 State **没有**监听 `_state`；不监听的话
+      // 配置导入后 builder 不会重跑，规则永远是空表，图片依旧 418。
+      // 代价可控：`child` 是 MaterialApp 传下来的同一个 Widget 实例，
+      // Flutter 对同一实例会跳过子树重建。
+      builder: (context, child) => ListenableBuilder(
+        listenable: _state,
+        builder: (context, _) => ImageHeaderScope(
+          rules: _state.effectiveConfig?.headers ?? const <HeaderRule>[],
+          child: child ?? const SizedBox.shrink(),
+        ),
+      ),
       home: !_bootstrapped
           ? const _SplashPage()
           : AppShell(state: _state, startup: widget.startup),
@@ -808,6 +835,13 @@ class _BrandMark extends StatelessWidget {
           : Image.network(
               target,
               fit: BoxFit.cover,
+              // 配置 logo 也是外部图片：同样按 host 注入顶层 `headers` 规则；
+              // `Accept` 只作兜底——用户用本地 flask 图床当 logo 时，缺它会被 406。
+              headers: imageHeadersOrNull(
+                context,
+                target,
+                extra: const {'Accept': 'image/*,*/*;q=0.8'},
+              ),
               // logo 是用户提供的外部资源：取不到时**安静退回应用图标**，
               // 不留破图。它只是标记，不该影响可用性。
               errorBuilder: (_, _, _) => fallback(),
@@ -842,6 +876,8 @@ class _WallpaperBackdrop extends StatelessWidget {
         Image.network(
           target,
           fit: BoxFit.cover,
+          // 壁纸同样是外部图片：按 host 注入顶层 `headers` 规则。
+          headers: imageHeadersOrNull(context, target),
           // 取不到壁纸时安静退回纯底色：它只是背景。
           errorBuilder: (_, _, _) => const SizedBox.shrink(),
           loadingBuilder: (context, child, progress) =>
@@ -1409,6 +1445,12 @@ class PosterImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final target = url?.trim() ?? '';
+    // 图片请求也要按目标 host 注入顶层 `headers` 规则（§7.4.6）：豆瓣图床这类
+    // 防盗链站点不带 `Referer` 直接返回 418，而 `Image.network` 默认连 UA 都不带
+    // （`dart:io` 的 `Dart/x.y (dart:io)` 同样被边缘节点拦掉，见 `core/image_headers.dart`）。
+    //
+    // 没有作用域时（单测直接 pump）返回 null，与改造前行为完全一致。
+    final headers = imageHeadersOrNull(context, target);
     // 底层永远是占位底色 + 图标，图片叠在上面。
     //
     // 为什么不能只靠 `loadingBuilder` 兜底（实测 2026-10-09，网盘聚合站慢图床）：
@@ -1437,6 +1479,7 @@ class PosterImage extends StatelessWidget {
               fit: fit,
               alignment: alignment,
               cacheWidth: cacheWidth,
+              headers: headers,
               loadingBuilder: (context, child, progress) => progress == null
                   ? child
                   : Center(child: _placeholderIcon(context, loading: true)),

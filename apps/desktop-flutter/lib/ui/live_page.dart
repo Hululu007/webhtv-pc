@@ -20,6 +20,7 @@ import '../core/protocol.dart';
 import '../services/live_service.dart';
 import '../state/app_state.dart';
 import 'common.dart';
+import 'image_header_scope.dart';
 import 'player_page.dart';
 import 'tokens.dart';
 
@@ -718,6 +719,8 @@ class _GroupSection extends StatelessWidget {
                     width: 28,
                     height: 20,
                     fit: BoxFit.contain,
+                    // 频道图标也是外部图片：按 host 注入顶层 `headers` 规则（§7.4.6）。
+                    headers: imageHeadersOrNull(context, channel.logo!),
                     errorBuilder: (_, _, _) => const Icon(Icons.live_tv, size: 18),
                   )
                 : const Icon(Icons.live_tv, size: 18),

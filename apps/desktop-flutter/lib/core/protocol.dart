@@ -147,19 +147,49 @@ class HeaderRule {
   final String host;
   final HeaderMap header;
 
-  /// host 匹配支持 `*` 通配与包含规则；无通配时按“完全相同或作为子域后缀”匹配。
+  /// host 匹配（§7.4.6）。大小写不敏感，均为**整串域名**匹配：
+  ///
+  /// - `*`：匹配任意 host；
+  /// - 含 `*` 通配、或含 `\` 转义时按**正则**解释（`*` 等价 `.*`，其余保持
+  ///   正则语义，见 [_asHostRegex]）；
+  /// - 其余按字面：完全相同，或作为子域后缀（`example.com` 命中 `cdn.example.com`）。
+  ///
+  /// 正则形态不是臆造：TVBox 生态的真实配置里豆瓣图床就写作
+  /// `img\d+.doubanio.com`（用户 2026-10-25 配置的 11 条规则中第 1、11 条），
+  /// 而旧实现只认 `*`，这条规则**永远匹配不上**。
   bool matches(String host) {
     final pattern = this.host.trim().toLowerCase();
     final target = host.trim().toLowerCase();
     if (pattern.isEmpty) return false;
     if (pattern == '*') return true;
-    if (pattern.contains('*')) {
-      final regex = RegExp(
-        '^${RegExp.escape(pattern).replaceAll(r'\*', '.*')}\$',
-      );
-      return regex.hasMatch(target);
+    final regex = _asHostRegex(pattern);
+    if (regex != null) {
+      if (regex.hasMatch(target)) return true;
+      // 与字面分支保持一致：正则形态同样可当子域后缀用
+      // （`img\d+.doubanio.com` 也应命中 `cdn.img9.doubanio.com`）。
+      final dot = target.indexOf('.');
+      return dot >= 0 && regex.hasMatch(target.substring(dot + 1));
     }
     return target == pattern || target.endsWith('.$pattern');
+  }
+
+  /// 把 host 规则编译成整串正则；纯字面形态返回 null（走子域后缀分支）。
+  ///
+  /// 判定：出现 `*`、或出现任何 `\` 转义，就按**正则**解释。TVBox 生态里的 host
+  /// 就是这么写的（`img\d+.doubanio.com`），其中 `+`/`.` 等量词与通配必须保持
+  /// 正则语义——只把 `*` 换成 `.*`、其余全字面化会把 `\d+` 变成 `\d\+`，反而更错。
+  ///
+  /// 为了不让畸形配置把请求打挂：正则编译失败（`FormatException`）时回退到
+  /// 字面匹配，而不是抛异常。
+  static RegExp? _asHostRegex(String pattern) {
+    final looksRegex = pattern.contains('*') || pattern.contains(r'\');
+    if (!looksRegex) return null;
+    try {
+      final wildcard = pattern.replaceAll('*', '.*');
+      return RegExp('^$wildcard\$');
+    } on FormatException {
+      return null;
+    }
   }
 
   static HeaderRule? fromJson(Object? value) {
