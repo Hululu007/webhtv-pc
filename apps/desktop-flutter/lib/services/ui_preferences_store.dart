@@ -23,6 +23,10 @@
 ///   有同名影片时，混在一起会让「继续播放」跳错源。对齐上游安卓
 ///   `Setting.getGlobalHistoryMode`（关闭 / 自动 / 搜索），PC 端只保留
 ///   「按源」与「全局」两档。
+/// - `historyAggregation`：**历史记录的同名聚合**（`none` 每集一条 /
+///   `tmdb` 优先 TMDB、缺失时按片名 / `title` 只按片名）。默认 `tmdb`，
+///   对齐安卓 `history_aggregation_by_tmdb` 的聚合意图，但保留 `none`
+///   让用户能切回 v7 的逐集形态。
 ///
 /// 另外管理 `settings.json` **顶层** `player` 段（Phase 9）：
 /// 播放参数（缓冲/硬解/自动连播/失败回退/预加载/片头片尾开关/LUT）。
@@ -33,6 +37,7 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/history_aggregation.dart';
 import '../core/history_scope.dart';
 import '../core/history_view.dart';
 import '../core/danmaku_settings.dart';
@@ -105,6 +110,9 @@ class UiPreferencesStore {
 
   /// 历史记录可见范围。`null` = 从未设置过，用默认 [UiHistoryScope.source]。
   String? _historyScope;
+
+  /// 历史记录同名聚合模式。`null` = 从未设置过，用默认 [UiHistoryAggregation.tmdb]。
+  String? _historyAggregation;
 
   /// 屏显开关的**显式**设置；缺席的 id 用 [defaultOsdFlags] 补齐。
   ///
@@ -218,6 +226,13 @@ class UiPreferencesStore {
 
   /// 用户是否显式设置过历史范围。
   bool get hasExplicitHistoryScope => _historyScope != null;
+
+  /// 生效的历史聚合模式：用户选过就用选的，否则默认「优先 TMDB」。
+  String get historyAggregation =>
+      UiHistoryAggregation.normalize(_historyAggregation);
+
+  /// 用户是否显式设置过聚合模式。
+  bool get hasExplicitHistoryAggregation => _historyAggregation != null;
 
   /// 生效的屏显开关：显式设置过的项用用户值，其余用默认。
   Map<String, bool> get osdFlags => normalizeOsdFlags(_osdFlags);
@@ -390,6 +405,15 @@ class UiPreferencesStore {
             // 只接受合法值；手改成别的字符串时回落到默认（按源）。
             if (UiHistoryScope.values.contains(scope.trim().toLowerCase())) {
               _historyScope = scope.trim().toLowerCase();
+            }
+          }
+          final aggregation = ui['historyAggregation'];
+          if (aggregation is String) {
+            // 只接受合法值；手改成别的字符串时回落到默认（优先 TMDB）。
+            if (UiHistoryAggregation.values.contains(
+              aggregation.trim().toLowerCase(),
+            )) {
+              _historyAggregation = aggregation.trim().toLowerCase();
             }
           }
           // 屏显开关：只接受 bool；非法值忽略（该项回落默认）。
@@ -575,6 +599,14 @@ class UiPreferencesStore {
     final normalized = UiHistoryScope.normalize(scope);
     if (normalized == _historyScope) return Future.value(true);
     _historyScope = normalized;
+    return _persist();
+  }
+
+  /// 记住历史聚合模式。非法值归一化为默认（优先 TMDB）。
+  Future<bool> rememberHistoryAggregation(String mode) {
+    final normalized = UiHistoryAggregation.normalize(mode);
+    if (normalized == _historyAggregation) return Future.value(true);
+    _historyAggregation = normalized;
     return _persist();
   }
 
@@ -820,6 +852,9 @@ class UiPreferencesStore {
         // 历史范围：只有显式设置过才写，缺席 = 默认 source。
         final scope = _historyScope;
         if (scope != null) ui['historyScope'] = scope;
+        // 历史聚合：只有显式设置过才写，缺席 = 默认 tmdb（优先 TMDB）。
+        final aggregation = _historyAggregation;
+        if (aggregation != null) ui['historyAggregation'] = aggregation;
         // 屏显：只有显式设置过的项才写（缺席 = 默认）。
         if (_osdFlags.isNotEmpty) ui['osd'] = _osdFlags;
         // 按钮排版：两个键各自独立；都缺席时整个 playerButtons 不写。

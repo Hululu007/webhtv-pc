@@ -66,11 +66,11 @@ SyncMergeStats sync(
 }
 
 void main() {
-  group('schema 迁移（2 → 7；Phase 5 删除标记 + Phase 9 增强 + 播放源身份）', () {
-    test('schemaVersion 为 7，且 history_deletions/following 表存在', () {
-      expect(AppDatabase.schemaVersion, 7);
+  group('schema 迁移（2 → 8；Phase 5 删除标记 + Phase 9 增强 + 播放源身份 + 历史作品身份）', () {
+    test('schemaVersion 为 8，且 history_deletions/following 表存在', () {
+      expect(AppDatabase.schemaVersion, 8);
       final db = AppDatabase.inMemory();
-      expect(db.schemaVersionValue, '7');
+      expect(db.schemaVersionValue, '8');
       expect(db.count('history_deletions'), 0);
       expect(db.rowCounts().containsKey('history_deletions'), isTrue);
       expect(db.rowCounts().containsKey('following'), isTrue);
@@ -88,7 +88,7 @@ void main() {
         final opened = AppDatabase.open(path);
         expect(opened.succeeded, isTrue, reason: opened.error);
         final db = opened.database!;
-        expect(db.schemaVersionValue, '7');
+        expect(db.schemaVersionValue, '8');
         expect(db.count('history_deletions'), 0);
         db.dispose();
       }
@@ -137,7 +137,7 @@ void main() {
       final db = opened.database!;
       expect(db.count('history'), 1, reason: '旧数据必须完好');
       expect(db.count('history_deletions'), 0);
-      expect(db.schemaVersionValue, '7');
+      expect(db.schemaVersionValue, '8');
 
       // 旧历史能正常参与合并（不是只建了表但索引不可用）。
       expect(db.historySyncIndex(), hasLength(1));

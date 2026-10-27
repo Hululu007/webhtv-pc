@@ -1,12 +1,13 @@
 # Phase 5 计划（安卓桥接：T4 站点接入 + 历史/设置同步）
 
-- 状态：**已完成**（设计 `design/00`–`design/04` + 实现 T1–T14 全部落地；`PHASE5-ACCEPT result=PASS gates=all`）
-- 日期：2026-10-08（多源化改造 2026-10-26，见 §7）
+- 状态：**已完成**（设计 `design/00`–`design/05` + 实现 T1–T14 全部落地；`PHASE5-ACCEPT result=PASS gates=all`）
+- 日期：2026-10-08（多源化改造 2026-10-26，见 §7；历史聚合与跨源续播 2026-10-27，见 §8）
 - 后续验证：[T4 网盘分集与播放代理（2026-10-10）](evidence/t4-folder-playback.md)
 - 后续验证：[桥接线路标准化为普通线路（2026-10-11）](evidence/t4-standard-bridge-lines.md)
 - 后续验证：[站点选择器打开卡顿修复（2026-10-12）](evidence/site-picker-latency.md)
 - 后续改造：[安卓桥接多源化与历史按源隔离（2026-10-26）](design/04-bridge-multisource.md)
-- 对应设计文档章节：本目录 `design/00`–`design/04`、`docs/webhtv-pc-design.md` §21（Phase 5 生态与同步）、§22.1、§28（安卓桥接）
+- 后续改造：[历史同名聚合与跨源续播（2026-10-27）](design/05-history-aggregation-and-cross-source-resume.md)
+- 对应设计文档章节：本目录 `design/00`–`design/05`、`docs/webhtv-pc-design.md` §21（Phase 5 生态与同步）、§22.1、§28（安卓桥接）
 - 上游：`docs/phase4/README.md`（Phase 4 已完成：TMDB 元数据增强）
 - 上游参考工程：`webhtv/默影视`（Android，`F:\Workspace\webtv3\webhtv`，实测设备 `192.168.50.3:5559`）
 
@@ -83,7 +84,8 @@ Android 侧已经暴露出 **T4 本机网关**（`c388619629`：`feat(server): a
 | D3 | 同步协议 | `design/02-android-sync-protocol.md` | PC 必实现 4 端点、必调用 5 端点、字段映射表、合并算法、删除标记、7 类错误 |
 | D4 | 测试与验收 | `design/03-bridge-test-and-acceptance.md` | L1/L2/L3 分层、fixture 与 8 种故障注入、4 个套件、11 项门禁、7 项反向验证 |
 | D5 | 多源化（后续，2026-10-26） | `design/04-bridge-multisource.md` | 方案 B 取舍、`configKey` 端点、按源隔离历史、推送落源、降级矩阵 |
-| D6 | 主设计文档回填 | `docs/webhtv-pc-design.md` §21 + §22.1 + §23 + §26 + §28 | 章节号连续、交叉引用可解析 |
+| D6 | 历史聚合与跨源续播（后续，2026-10-27） | `design/05-history-aggregation-and-cross-source-resume.md` | 三档聚合读视图、存储 v8 身份列、来源标注、跨源两路径、进度迁移 9 条规则 |
+| D7 | 主设计文档回填 | `docs/webhtv-pc-design.md` §21 + §22.1 + §23 + §26 + §28 | 章节号连续、交叉引用可解析 |
 
 ### 2.2 实施阶段
 
@@ -334,3 +336,54 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 | PC 全量单测 | 147 个测试文件分批全绿（2867 例）；`dart analyze lib test integration_test` 干净 |
 | 安卓定向单测 | `VodApiTest` 34 例、`HistoryScopeSyncTest` 5 例全绿（全仓 4597 例中 8 个既有失败与本次改动无命中） |
 | 反向验证 #7 | 放行网关地址拦截后 `phase5_sync_client_test.dart` 必须失败（防回归靶子） |
+---
+
+## 8. 历史同名聚合与跨源续播（2026-10-27，后续）
+
+设计：`design/05-history-aggregation-and-cross-source-resume.md`。用户诉求原话（m00132）：
+「默认只显示当前线路的历史记录，支持用户手动切换显示全部。显示全部的时候参考安卓版的相关实现，
+比如：标注当前线路和非当前线路，点击播放的时候按设置采用自动匹配还是全局搜索等方式
+并确保进度能完美同步过去」；追加（m00325）：
+「历史记录需要支持同名聚合，优先 tmdb，没有配置等情况再基于名称等信息，具体可以参考安卓版，
+最好是默认这种模式同时保留现在没集独立的历史记录格式允许用户手动切换」。
+
+`04` 解决了"串源"，但也暴露出三处新裂口：同一部剧散成多张卡、看不出哪条属于别的源、
+点别的源的卡片只能弹「该记录所属站点已不在当前配置中」。
+
+### 8.1 改了什么
+
+| 项 | 之前 | 之后 |
+| --- | --- | --- |
+| 历史列表 | 一集一张卡 | 三档聚合（默认 `tmdb` / `none` 逐集 / `title` 按片名），工具栏开关 `history-aggregation-switch`（`05` §3） |
+| 作品身份 | 历史行只有片名 | 加 `vod_year`/`tmdb_id`/`media_type`，纯加法迁移；**旧行不回填**（`05` §4） |
+| 存储 | `schemaVersion 7` | `8`；`upsertHistory` 用条件覆盖，空值不抹掉已绑定身份 |
+| 来源标注 | 无 | 组内含其他源时显示来源 chip；多源显示「{n} 个其他来源」；老记录「来源未知」（`05` §6） |
+| 跨源播放 | 直接 SnackBar 结束 | 两条路径：原站点仍在 → 直接进详情页；否则在**当前源内**搜索匹配，无高置信候选则交给用户（`05` §7） |
+| 续播进度 | 跨源一律从头 | `ResumeSeed` 随历史卡带入详情页，`resolveResumeStart` 判定同一集后按 `ResumePositionPolicy.migrate` 换算（`05` §7.2） |
+
+### 8.2 三条硬边界
+
+| 边界 | 理由 |
+| --- | --- |
+| 聚合是**读视图**，写入仍一集一条 | `04` 的 `UNIQUE(source_key, site_key, vod_id, flag, episode_id)` 与安卓推送的合并语义都建立在「一条=一集」上；改写入模型等于重做同步协议（`05` §2） |
+| **不切源** | 切配置会把整个 App 弹到另一个源；用户选型 ③ 明确要求只在当前源内找替代站点（`05` §7） |
+| 宁可少续播，不可错续播 | 只认「TMDB 一致」或「片名+年份全等」两级；片名包含关系、年份缺失都不升格（`05` §7.1） |
+
+### 8.3 已知限制
+
+| 限制 | 处置 |
+| --- | --- |
+| 详情页拿不到目标集时长（`targetDurationMs` 传 0） | 走绝对毫秒；`migrate` 的比例分支已实现且有用例，接入点在 `PlayerPage._load` 拿到 `_controller.duration` 之后（`05` §10） |
+| 候选 `hasTargetEpisode` 在列表阶段恒 `true`、`episodeCount` 恒 0 | 「找到目标集优先」的排序权重暂不生效；需加载详情后回填（安卓 §11 的两阶段解析） |
+| 搜索关键词只用原生片名 | 跨源 TMDB 绑定属另一 `config_id`，取它会串缓存（`_searchKeywordOf` 注释） |
+| 已删除配置只能给短标识 | 显示为 `bridge:ac2d474b` 而非名字；保留配置墓碑可解 |
+
+### 8.4 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 新增套件 | `phase5_history_grouping_test`、`phase5_resume_migration_test`、`phase5_history_aggregation_ui_test`、`phase6_resume_playback_test`、`phase6_detail_resume_test` 追加组全绿 |
+| PC 全量单测 | 151 个测试文件分 6 批 × `-j 4` 全绿（约 2930 例） |
+| 静态分析 | `flutter analyze lib test integration_test` → `No issues found!` |
+| 反向验证靶子 | 去掉「≥2 个不同年份才拆」/「`!sameEpisode` → null」/「`fallback` 优先」/「`upsert` 条件覆盖」任一项，对应用例必须失败（`05` §9.3） |
+

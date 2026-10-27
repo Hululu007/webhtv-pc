@@ -2056,6 +2056,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       position: position,
       duration: duration,
       siteKey: _request.siteKey,
+      // 作品身份（历史同名聚合用，见 `core/history_grouping.dart`）：
+      // 有 TMDB 身份就带上，没有则留空由聚合按片名回退。
+      tmdbId: _request.tmdb?.tmdbId ?? 0,
+      mediaType: _request.tmdb?.mediaType.name ?? '',
     );
     // 季度进度（`02` §6.2）：`UnknownSeason` 不写，电影不写。
     // 来源 `history` 无论如何都写（既有行为不变）。

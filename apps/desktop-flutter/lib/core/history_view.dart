@@ -9,6 +9,8 @@
 library;
 
 import 'protocol.dart';
+import 'resume_migration.dart';
+import 'tmdb_title.dart';
 
 /// 详情页从历史恢复播放的目标（`docs/phase6/design/02` §2）。
 class HistoryResumeTarget {
@@ -169,6 +171,194 @@ String historyPlayLabel({
   if (resumePosition == null) return fallback;
   if (target.episodeName.isEmpty) return fallback;
   return '继续播放 · ${target.episodeName}';
+}
+
+/// 跨源 / 跨站点续播的**进度种子**：原记录的进度 + 原记录的集身份。
+///
+/// 为什么需要它：`AppState.resumePositionFor` 查历史时带 `sourceKey`
+/// （默认 = 当前播放源），原记录属于**别的源**时那条查询必然落空
+/// （`services/storage.dart` 的 `findHistory` 没有「唯一记录」兜底），
+/// 于是跨源续播只能由调用方把原记录的进度**显式**带下来。
+///
+/// 收标量而不收 `PlaybackHistory`：后者定义在 `services/storage.dart`，
+/// 本模块属于纯逻辑层（`core/` 不得依赖 `services/`）。
+class ResumeSeed {
+  const ResumeSeed({
+    required this.flag,
+    required this.episodeId,
+    required this.episodeName,
+    required this.positionMs,
+    required this.durationMs,
+    this.completed = false,
+  });
+
+  /// 原记录命中的线路 flag（可能是站点源线路名，也可能是展示名）。
+  final String flag;
+
+  /// 原记录的集入口目标（站点认的原始值；同步来的可能是不相等的哈希）。
+  final String episodeId;
+
+  /// 原记录的集名。跨源时它是**唯一**可信的集身份线索。
+  final String episodeName;
+
+  /// 原记录播放到的绝对毫秒位置。
+  final int positionMs;
+
+  /// 原记录那一集的总时长（0 = 未知，此时只能沿用绝对位置）。
+  final int durationMs;
+
+  /// 原记录是否已播完（播完则不迁移，从头开始）。
+  final bool completed;
+
+  /// 是否有可迁移的位置（> 0）。
+  bool get hasPosition => positionMs > 0;
+
+  @override
+  String toString() =>
+      'ResumeSeed(flag=$flag, episode=$episodeName, '
+      'position=$positionMs/$durationMs, completed=$completed)';
+}
+
+/// 原记录那一集在**目标线路列表**里的定位结果。
+class ResumeEpisodeLocation {
+  const ResumeEpisodeLocation({
+    required this.line,
+    required this.episodeIndex,
+    required this.episodeName,
+  });
+
+  /// 原记录命中的线路（可能不是即将播放的那条）。
+  final VodPlayLine line;
+
+  /// 该集在 [line] 的 `episodes` 里的**原始下标**。
+  final int episodeIndex;
+
+  /// 该集的集名。
+  final String episodeName;
+}
+
+/// 在目标线路列表里定位「原记录那一集」。
+///
+/// 两级顺序，与 [resolveHistoryTarget] 保持一致：
+/// 1. 线路 flag（`playbackFlag` 或展示 `flag`）命中，且该线路包含这一集；
+/// 2. 集入口目标在所有线路里**唯一**命中（跨源换站时的常见情形）。
+///
+/// 定位不到就返回 `null`——**不猜**。上层据此判定「不是同一集」，
+/// 从而不迁移进度（`docs/phase6/design/01` §4.1「宁可不续播，不可错续播」）。
+ResumeEpisodeLocation? locateResumeEpisode({
+  required List<VodPlayLine> lines,
+  required ResumeSeed seed,
+}) {
+  if (lines.isEmpty) return null;
+  for (final line in lines) {
+    if (line.playbackFlag != seed.flag && line.flag != seed.flag) continue;
+    final index = _episodeIndexOf(line, seed.episodeId, seed.episodeName);
+    if (index >= 0) {
+      return ResumeEpisodeLocation(
+        line: line,
+        episodeIndex: index,
+        episodeName: line.episodes[index].name,
+      );
+    }
+  }
+  if (seed.episodeId.isNotEmpty) {
+    final hits = <ResumeEpisodeLocation>[];
+    for (final line in lines) {
+      final index = _indexOfUrl(line, seed.episodeId);
+      if (index >= 0) {
+        hits.add(
+          ResumeEpisodeLocation(
+            line: line,
+            episodeIndex: index,
+            episodeName: line.episodes[index].name,
+          ),
+        );
+      }
+    }
+    if (hits.length == 1) return hits.first;
+  }
+  return null;
+}
+
+/// 判定「原记录那一集」与「即将播放的那一集」是否为**同一集**。
+///
+/// 这是进度迁移的硬闸门：只有同一集才允许把毫秒位置搬过去
+/// （[ResumePositionPolicy.migrate] 的第一条规则）。
+///
+/// 判定顺序（任一成立即算同一集）：
+/// 1. 两边都只有一集 → 单集作品，整部就是这一集（电影、单集剧）；
+/// 2. 集号相同（[sourceEpisodeNumber] 解析，如 `S01E03`、`第3集`、`EP03`）；
+/// 3. 集名完全相同；
+/// 4. 同一线路 + 同一原始下标。
+///
+/// 为什么把集号排在集名前面：跨源换站后集名常带站点自己的前缀/后缀
+/// （`第03集` vs `03`），但集号是作品本身的身份。
+bool resumeEpisodeMatches({
+  required List<VodPlayLine> lines,
+  required ResumeSeed seed,
+  required VodPlayLine targetLine,
+  required int targetEpisodeIndex,
+  required String targetEpisodeName,
+}) {
+  final targetName = targetEpisodeName.isNotEmpty
+      ? targetEpisodeName
+      : (targetEpisodeIndex >= 0 && targetEpisodeIndex < targetLine.episodes.length
+            ? targetLine.episodes[targetEpisodeIndex].name
+            : '');
+  final located = locateResumeEpisode(lines: lines, seed: seed);
+  // 定位不到原记录那一集：只能拿原记录自带的名字比一次，仍不知道就不迁移。
+  if (located == null) {
+    return _sameEpisodeByNumber(seed.episodeName, targetName);
+  }
+  if (located.line.episodes.length == 1 && targetLine.episodes.length == 1) {
+    return true;
+  }
+  if (_sameEpisodeByNumber(located.episodeName, targetName)) return true;
+  if (located.episodeName.isNotEmpty && located.episodeName == targetName) {
+    return true;
+  }
+  return identical(located.line, targetLine) &&
+      located.episodeIndex == targetEpisodeIndex;
+}
+
+bool _sameEpisodeByNumber(String source, String target) {
+  final a = sourceEpisodeNumber(source);
+  if (a < 0) return false;
+  return a == sourceEpisodeNumber(target);
+}
+
+/// 把「原记录的进度」换算成**目标集**的起始位置（跨源续播的完整策略入口）。
+///
+/// [targetDurationMs] 传播放器已有的时长（0 = 未知）；未知时策略沿用绝对位置。
+/// [fallback] 是同源场景下既有的精确查询结果，非空时优先返回它，保证
+/// 「同一个源、同一个站点」的行为与改动前一致。
+Duration? resolveResumeStart({
+  required List<VodPlayLine> lines,
+  required ResumeSeed? seed,
+  required VodPlayLine targetLine,
+  required int targetEpisodeIndex,
+  required String targetEpisodeName,
+  required int targetDurationMs,
+  Duration? fallback,
+}) {
+  if (fallback != null) return fallback;
+  if (seed == null || !seed.hasPosition) return null;
+  final sameEpisode = resumeEpisodeMatches(
+    lines: lines,
+    seed: seed,
+    targetLine: targetLine,
+    targetEpisodeIndex: targetEpisodeIndex,
+    targetEpisodeName: targetEpisodeName,
+  );
+  final migration = ResumePositionPolicy.migrate(
+    sourcePositionMs: seed.positionMs,
+    sourceDurationMs: seed.durationMs,
+    targetDurationMs: targetDurationMs,
+    sameEpisode: sameEpisode,
+    sourceCompleted: seed.completed,
+  );
+  if (migration == null) return null;
+  return Duration(milliseconds: migration.positionMs);
 }
 
 /// 历史页的三种模式。

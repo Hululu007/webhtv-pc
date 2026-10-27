@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/app_error.dart';
+import '../core/history_aggregation.dart';
+import '../core/history_grouping.dart';
 import '../core/history_scope.dart';
 import '../core/history_view.dart';
 import '../services/storage.dart';
@@ -16,6 +18,8 @@ import '../core/protocol.dart';
 import 'app.dart';
 import 'browse_pages.dart';
 import 'common.dart';
+import 'history_cross_source.dart';
+import 'history_resume_seed.dart';
 import 'playback_resume.dart';
 import 'tokens.dart';
 import 'viewing_report_page.dart';
@@ -77,6 +81,80 @@ class _HistoryScopeSwitch extends StatelessWidget {
   }
 }
 
+/// 历史聚合模式开关：同名作品合并 / 每集独立。
+///
+/// 用户 2026-10-27：「历史记录需要支持同名聚合……最好是默认这种模式同时保留
+/// 现在没集独立的历史记录格式允许用户手动切换」。因此这里做成一个两态开关
+/// （聚合 ↔ 逐条），默认聚合，选择落进 preferences。
+class _HistoryAggregationSwitch extends StatelessWidget {
+  const _HistoryAggregationSwitch({required this.state, required this.onChanged});
+
+  final AppState state;
+  final VoidCallback onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final off = state.historyAggregationIsOff;
+    return Tooltip(
+      message: off
+          ? '当前每集一条独立历史；点此改为按同名作品聚合'
+          : '当前按同名作品聚合；点此改为每集一条独立历史',
+      child: OutlinedButton.icon(
+        key: const ValueKey('history-aggregation-switch'),
+        onPressed: () async {
+          await state.setHistoryAggregation(
+            off ? UiHistoryAggregation.tmdb : UiHistoryAggregation.off,
+          );
+          onChanged();
+        },
+        icon: Icon(off ? Icons.view_list_outlined : Icons.layers_outlined),
+        label: Text(off ? '逐集' : '聚合'),
+      ),
+    );
+  }
+}
+
+/// 非当前源的来源角标。
+///
+/// 为什么用主题色而不是固定色：角标落在海报上，海报画面色彩不可控，
+/// 固定的半透明白/黑在某些封面上会不可读（与 [_HistoryBadge] 同一理由）。
+class _HistorySourceChip extends StatelessWidget {
+  const _HistorySourceChip({required this.label, super.key});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.tertiaryContainer.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.swap_horiz,
+            size: 11,
+            color: theme.colorScheme.onTertiaryContainer,
+          ),
+          const SizedBox(width: 2),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onTertiaryContainer,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class HistoryPage extends StatefulWidget {
   const HistoryPage({super.key, required this.state});
 
@@ -104,9 +182,30 @@ class _HistoryPageState extends State<HistoryPage> {
     });
   }
 
+  /// 当前展示的分组（聚合卡 / 逐条记录，取决于 [AppState.historyAggregation]）。
+  ///
+  /// 删除态与多选态仍按**记录级 id** 工作（见 [_deleteOne] / [_confirmDeleteSelected]）：
+  /// 聚合卡是多条记录的**读视图**，删除必须逐条落到真实记录上，
+  /// 否则「删一张卡」会连带抹掉别的集的进度。
+  List<HistoryGroup> get _groups => _state.historyGroups(keyword: _keyword);
+
+  /// 当前展示的历史记录（拍平，供既有按条逻辑使用）。
   List<PlaybackHistory> get _items => _keyword.isEmpty
       ? _state.recentHistory()
       : _state.searchHistory(_keyword);
+
+  /// 把聚合投影里的代表记录还原成**真实的** PlaybackHistory。
+  ///
+  /// 为什么需要还原：HistoryGroupInput 是 core/ 的标量投影（不依赖
+  /// services/storage.dart），而删除 / 播放 / 详情都要走既有按条 API，
+  /// 那些 API 收的是带数据库 id 的 PlaybackHistory。按 id 回查而不是
+  /// 重新构造：避免两个模型字段漂移时删错记录。
+  PlaybackHistory? _recordOf(HistoryGroupInput input) {
+    for (final record in _items) {
+      if (record.id == input.id) return record;
+    }
+    return null;
+  }
 
   /// 旧版本历史没有保存海报：打开历史页时按 vod_id 后台补齐，避免用户看到一屏
   /// 破图占位。只处理前 12 条且按作品去重，不阻塞历史页首帧。
@@ -154,6 +253,7 @@ class _HistoryPageState extends State<HistoryPage> {
   @override
   Widget build(BuildContext context) {
     final items = _items;
+    final groups = _groups;
     // Esc 退出删除态（`design/01` §3.1 的「退出方式」列）。
     //
     // 用 `CallbackShortcuts` + `Focus(autofocus: true)`，与播放页同一套写法
@@ -203,6 +303,11 @@ class _HistoryPageState extends State<HistoryPage> {
                 // 历史范围开关（对齐安卓 `global_history_mode`）：默认只看
                 // **当前播放源**，开了才看全部源。
                 _HistoryScopeSwitch(
+                  state: _state,
+                  onChanged: () => setState(() {}),
+                ),
+                const SizedBox(width: 8),
+                _HistoryAggregationSwitch(
                   state: _state,
                   onChanged: () => setState(() {}),
                 ),
@@ -347,7 +452,7 @@ class _HistoryPageState extends State<HistoryPage> {
           const Divider(height: 1),
         ],
         Expanded(
-          child: items.isEmpty
+          child: groups.isEmpty
               ? const EmptyState(
                   icon: Icons.history_outlined,
                   title: '暂无播放记录',
@@ -362,9 +467,9 @@ class _HistoryPageState extends State<HistoryPage> {
                     key: const ValueKey('history-grid'),
                     padding: const EdgeInsets.all(AppSpace.lg),
                     gridDelegate: _historyGridDelegate(constraints.maxWidth),
-                    itemCount: items.length,
+                    itemCount: groups.length,
                     itemBuilder: (context, index) =>
-                        _buildHistoryCard(context, items[index]),
+                        _buildHistoryCard(context, groups[index]),
                   ),
                 ),
         ),
@@ -396,14 +501,42 @@ class _HistoryPageState extends State<HistoryPage> {
 
   /// 单张历史卡片（对齐上游 `res/layout/adapter_vod.xml`）。
   ///
+  /// 卡片渲染的是**一组**（[HistoryGroup]）：聚合模式下是同名作品合并后的
+  /// 一张卡，逐集模式下组内恒为一条记录。两种形态共用同一套尺寸，
+  /// 只有角标与副标题不同。
+  ///
   /// **片名只渲染一次 `Text`**：`integration_test/phase5_sync_flow_test.dart`
   /// 按 `find.text(name)` 断言 `findsOneWidget`。`Tooltip` 的 `message` 是字符串、
   /// 不产生 `Text`，但这里仍然不加 tooltip——片名与集名已各占一行。
-  Widget _buildHistoryCard(BuildContext context, PlaybackHistory item) {
+  Widget _buildHistoryCard(BuildContext context, HistoryGroup group) {
     final theme = Theme.of(context);
+    final item = group.representative;
+    // 来源标注（用户 2026-10-27：「标注当前线路和非当前线路」）。
+    // 组内成员可能来自多个源：只要**有一个非当前源**就标注，并给出总数。
+    final otherSources = [
+      for (final sourceKey in group.sourceKeys)
+        if (sourceKey.isNotEmpty && sourceKey != _state.activeSourceKey) sourceKey,
+    ];
+    final unknownSource = group.members.any((m) => m.sourceKey.isEmpty);
+    final String? sourceLabel;
+    if (otherSources.isNotEmpty) {
+      final names = <String>[];
+      for (final key in otherSources) {
+        final label = _state.historySourceLabel(key);
+        if (label != null && !names.contains(label)) names.add(label);
+      }
+      sourceLabel = names.isEmpty
+          ? '其他来源'
+          : (names.length == 1 ? names.first : '${names.length} 个其他来源');
+    } else if (unknownSource) {
+      sourceLabel = '来源未知';
+    } else {
+      sourceLabel = null;
+    }
+    final isOtherSource = otherSources.isNotEmpty;
     return InkWell(
       key: ValueKey('history-row-${item.id}'),
-      onTap: () => _onCardTap(item),
+      onTap: () => _onCardTap(group),
       onLongPress: _onCardLongPress,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -455,6 +588,29 @@ class _HistoryPageState extends State<HistoryPage> {
                             : '已看 ${item.progressPercent}%',
                       ),
                     ),
+                  // 来源标注（非当前源才显示）：右上角一枚 chip。
+                  if (_view.mode != HistoryViewMode.singleDelete &&
+                      isOtherSource)
+                    Positioned(
+                      right: 6,
+                      top: 6,
+                      child: _HistorySourceChip(
+                        key: ValueKey('history-source-chip-${item.id}'),
+                        label: sourceLabel ?? '其他来源',
+                      ),
+                    ),
+                  // 聚合数量：组内多于一条时显示「N 集」，
+                  // 让用户一眼看出这张卡是合并过的而不是单条记录。
+                  if (_view.mode != HistoryViewMode.singleDelete &&
+                      group.aggregated)
+                    Positioned(
+                      right: 6,
+                      bottom: 6,
+                      child: _HistoryBadge(
+                        key: ValueKey('history-group-count-${item.id}'),
+                        text: '${group.members.length} 条',
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -497,14 +653,20 @@ class _HistoryPageState extends State<HistoryPage> {
                     ),
                   ),
                   Text(
-                    item.episodeName,
+                    // 非当前源时把来源名并进副标题：用户需要知道「这条是哪个源
+                    // 的进度」，而 chip 空间只够写很短的名字。
+                    sourceLabel == null
+                        ? item.episodeName
+                        : '${item.episodeName} · $sourceLabel',
                     textAlign: TextAlign.center,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodySmall?.copyWith(
                       fontSize: 11,
                       height: 1.2,
-                      color: theme.colorScheme.onSurfaceVariant,
+                      color: isOtherSource
+                          ? theme.colorScheme.tertiary
+                          : theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                 ],
@@ -521,14 +683,17 @@ class _HistoryPageState extends State<HistoryPage> {
   ///
   /// 删除态下「点谁删谁」（对齐上游 `HistoryAdapter#setClickListener`）；
   /// 多选态下只切换勾选；默认态按设置分流（Task 8 补）。
-  void _onCardTap(PlaybackHistory item) {
+  void _onCardTap(HistoryGroup group) {
+    final record = _recordOf(group.representative);
+    if (record == null) return;
+    final item = record;
     switch (_view.mode) {
       case HistoryViewMode.singleDelete:
         _deleteOne(item);
       case HistoryViewMode.multiSelect:
         setState(() => _view = _view.toggleSelection(item.id));
       case HistoryViewMode.none:
-        unawaited(_openBySetting(item));
+        unawaited(_openBySetting(group));
     }
   }
 
@@ -681,7 +846,16 @@ class _HistoryPageState extends State<HistoryPage> {
   ///
   /// 按「点击历史行为」设置分流（`docs/phase6/design/01` §4.1）：
   /// 默认 `detail`（进详情页），`play` 则是既有行为（直接续播）。
-  Future<void> _openBySetting(PlaybackHistory item) {
+  Future<void> _openBySetting(HistoryGroup group) {
+    final record = _recordOf(group.representative);
+    if (record == null) return Future<void>.value();
+    final item = record;
+    // 跨源续播（用户 2026-10-27）：这条记录属于**非当前播放源**时，先按
+    // 「在当前源里找可替代站点」解析，而不是直接抛「站点已不在当前配置中」。
+    // 逐集模式下 group 恒为单条，行为与既有实现一致。
+    if (_state.isHistoryFromOtherSource(item)) {
+      return openHistoryFromOtherSource(context, _state, item);
+    }
     return _state.historyClickAction == UiHistoryClickAction.play
         ? resumeHistoryEntry(context, _state, item)
         : _openDetail(item);
@@ -722,6 +896,10 @@ class _HistoryPageState extends State<HistoryPage> {
           // 点旧记录却续新记录是错的（`docs/phase6/design/02` §7.1）。
           historyFlag: item.flag,
           historyEpisodeId: item.episodeId,
+          // 进度也要传：`_play` 里那条"查本机历史"的路子依赖当前站点，
+          // 站点被换过（同 url 不同 key、或配置重导入）就落空 → 从头播。
+          // 带上原记录进度后由 `resolveResumeStart` 判定同集再迁移。
+          resumeSeed: resumeSeedOf(item),
         ),
       ),
     );
@@ -734,7 +912,7 @@ class _HistoryPageState extends State<HistoryPage> {
 /// 文字用主题的 `labelSmall`，底与字必须成对取自同一主题才不会在亮色主题下
 /// 变成「深底深字」。
 class _HistoryBadge extends StatelessWidget {
-  const _HistoryBadge({required this.text});
+  const _HistoryBadge({required this.text, super.key});
 
   final String text;
 

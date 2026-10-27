@@ -977,6 +977,7 @@ class DetailPage extends StatefulWidget {
     required this.vod,
     this.historyFlag = '',
     this.historyEpisodeId = '',
+    this.resumeSeed,
   });
 
   final AppState state;
@@ -991,6 +992,14 @@ class DetailPage extends StatefulWidget {
 
   /// 历史命中的集入口目标（空串 = 未传入）。
   final String historyEpisodeId;
+
+  /// 跨源续播种子：原记录的线路/集/进度（null = 本次不是"从别的源续播"）。
+  ///
+  /// 跨源时 [AppState.resumePositionFor] 必然落空——它按**当前站点**的
+  /// `siteKey + flag + episodeId` 查本机历史，而用户点的那条记录属于另一个源。
+  /// 所以必须把原记录自带的 `positionMs/durationMs` 一路带进来，由
+  /// [resolveResumeStart] 判定"是不是同一集"后再换算成起点。
+  final ResumeSeed? resumeSeed;
 
   @override
   State<DetailPage> createState() => _DetailPageState();
@@ -1372,6 +1381,25 @@ class _DetailPageState extends State<DetailPage> {
   ///
   /// 优先级：**构造参数 > 自己查**（`docs/phase6/design/02` §7.1）。
   PlaybackHistory? get _history {
+    final seed = widget.resumeSeed;
+    if (seed != null) {
+      // 跨源续播：线路/集/进度全部来自原记录。`episodeName` 也要带上——
+      // 原记录的 `episodeId` 可能是安卓哈希，只有集名还能对上目标站点。
+      return PlaybackHistory(
+        id: 0,
+        siteKey: widget.state.selectedSite?.key ?? '',
+        vodId: widget.vod.vodId,
+        vodName: widget.vod.vodName,
+        vodPic: widget.vod.vodPic,
+        flag: seed.flag,
+        episodeName: seed.episodeName,
+        episodeId: seed.episodeId,
+        positionMs: seed.positionMs,
+        durationMs: seed.durationMs,
+        updatedAt: 0,
+        completed: seed.completed,
+      );
+    }
     if (widget.historyFlag.isNotEmpty || widget.historyEpisodeId.isNotEmpty) {
       return PlaybackHistory(
         id: 0,
@@ -1453,16 +1481,40 @@ class _DetailPageState extends State<DetailPage> {
           target.episodeIndex >= line.episodes.length) {
         return null;
       }
-      final episode = line.episodes[target.episodeIndex];
-      return widget.state.resumePositionFor(
-        siteKey: widget.state.selectedSite?.key ?? '',
-        vodId: vod.vodId,
-        flag: line.playbackFlag,
-        episodeId: episode.url,
-        episodeName: episode.name,
-      );
+      return _resumeStartFor(vod, lines, line, target.episodeIndex);
     }
     return null;
+  }
+
+  /// 续播起点：同源查本机历史，跨源用原记录的进度换算。
+  ///
+  /// [resolveResumeStart] 的语义是「先给同源的精确答案，没有才用种子换算」：
+  /// 传入的 `fallback` 一旦命中就直接返回，所以同源场景的行为与改造前完全一致。
+  /// `targetDurationMs` 传 0：详情页拿不到目标集的真实时长（要 open 视频才有），
+  /// 纯逻辑层对 0 的约定是「走绝对毫秒」，见 [ResumePositionPolicy.migrate]。
+  Duration? _resumeStartFor(
+    Vod vod,
+    List<VodPlayLine> lines,
+    VodPlayLine line,
+    int episodeIndex,
+  ) {
+    final episode = line.episodes[episodeIndex];
+    final fallback = widget.state.resumePositionFor(
+      siteKey: widget.state.selectedSite?.key ?? '',
+      vodId: vod.vodId,
+      flag: line.playbackFlag,
+      episodeId: episode.url,
+      episodeName: episode.name,
+    );
+    return resolveResumeStart(
+      lines: lines,
+      seed: widget.resumeSeed,
+      targetLine: line,
+      targetEpisodeIndex: episodeIndex,
+      targetEpisodeName: episode.name,
+      targetDurationMs: 0,
+      fallback: fallback,
+    );
   }
 
   /// 历史那一集在**渲染列表**里的下标（-1 = 无，`design/02` §6）。
@@ -1536,13 +1588,10 @@ class _DetailPageState extends State<DetailPage> {
       // 必须同时给 `episodeName`：同步来的历史 `episode_id` 存的是安卓哈希
       // （`episodeUrl` 的 SHA-256），与这里的 `episode.url`（站点入口）不同源，
       // 只靠 `episodeId` 永远命不中 → 手动拉取的历史点开就从头开始。
-      final resume = state.resumePositionFor(
-        siteKey: state.selectedSite?.key ?? '',
-        vodId: vod.vodId,
-        flag: line.playbackFlag,
-        episodeId: episode.url,
-        episodeName: episode.name,
-      );
+      //
+      // 跨源（`resumeSeed` 非空）时上面这条查询必然落空：它按当前站点的
+      // `siteKey` 查本机历史。此时改用原记录的进度做迁移，见 [_resumeStartFor]。
+      final resume = _resumeStartFor(vod, state.playLinesOf(vod), line, episodeIndex);
       // TMDB 季度身份（`04` §8.1）：已确证季度时透传；未确证时只传 URL/集名。
       final tmdb = state.tmdb;
       final identity = TmdbPlaybackIdentity.of(

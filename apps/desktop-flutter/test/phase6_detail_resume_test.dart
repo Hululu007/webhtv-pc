@@ -1128,4 +1128,100 @@ void main() {
 
     // 第三条断言「剧照仍是 16:9」**不写**：见下方 Ruling。
   });
+
+  group('跨源续播：resumeSeed 接进播放链路', () {
+    // 用户 2026-10-27 的要求：跨源（历史记录属于**非当前播放源**）续播时
+    // 「进度能完美同步过去」。
+    //
+    // 能观察到的钉子只有**首屏文案**：没有站点服务时 `resolvePlayback` 直接
+    // 返回 null，`_play` 在推到 PlayerPage 之前就抛错，widget 层看不到传下去
+    // 的 `startPosition`。而文案这条链（`_heroPlayLabel` → `_resumePositionOf`
+    // → `_resumeStartFor`）与 `_play` 用的是**同一个** `_resumeStartFor`，
+    // 所以文案对了就说明换算这条链接通了。
+    late Directory dir;
+    late AppState appState;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('webhtv-cross-source-resume');
+      appState = AppState(
+        paths: AppPaths.resolve(
+          overrides: {'roaming': dir.path, 'local': dir.path},
+        ),
+        log: LogService(),
+      );
+      await appState.bootstrap();
+    });
+
+    tearDown(() async {
+      appState.dispose();
+      try {
+        await dir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    final vod = Vod(
+      vodId: 'demo-1',
+      vodName: '剧集甲',
+      vodPlayFrom: '线路',
+      vodPlayUrl: r'第1集$http://x/e1#第2集$http://x/e2',
+    );
+
+    Future<void> pump(WidgetTester tester, {required ResumeSeed seed}) async {
+      tester.view.physicalSize = const Size(1400, 2000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      appState.seedDetailForTest(vod: vod);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: DetailPage(state: appState, vod: vod, resumeSeed: seed),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('本机没有这条历史 → 仍按原记录进度显示「继续播放」', (tester) async {
+      // 关键前提：库里**一条历史都没有**（`resumePositionFor` 必然落空），
+      // 进度只能来自 resumeSeed。若接线回退成「只查本机历史」，
+      // 文案会变回「播放第一集」，本用例立刻红。
+      const seed = ResumeSeed(
+        flag: '线路',
+        episodeId: 'bridge-hash-e2',
+        episodeName: '第2集',
+        positionMs: 180000,
+        durationMs: 2400000,
+      );
+      await pump(tester, seed: seed);
+      expect(find.text('继续播放 · 第2集'), findsOneWidget);
+    });
+
+    testWidgets('原记录那一集与目标不是同一集 → 不迁移', (tester) async {
+      // 原记录在第 3 集，目标线路只有 2 集 → 判不出同一集 → 宁可从头播。
+      const seed = ResumeSeed(
+        flag: '线路',
+        episodeId: 'bridge-hash-e3',
+        episodeName: '第3集',
+        positionMs: 180000,
+        durationMs: 2400000,
+      );
+      await pump(tester, seed: seed);
+      expect(find.text('播放第一集'), findsOneWidget);
+      expect(find.textContaining('继续播放'), findsNothing);
+    });
+
+    testWidgets('原记录已播完 → 不迁移', (tester) async {
+      const seed = ResumeSeed(
+        flag: '线路',
+        episodeId: 'bridge-hash-e2',
+        episodeName: '第2集',
+        positionMs: 2390000,
+        durationMs: 2400000,
+        completed: true,
+      );
+      await pump(tester, seed: seed);
+      expect(find.text('播放第一集'), findsOneWidget);
+    });
+  });
 }

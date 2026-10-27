@@ -23,6 +23,15 @@ import '../core/site_injection.dart';
 import '../core/skip_segments.dart';
 import '../core/subtitle_provider.dart';
 
+/// 归一化媒体类型：只认 `movie` / `tv`，其余回空串。
+///
+/// 对齐安卓 `History.normalizeMediaType` 的收敛方向——不认识的类型**不参与**
+/// TMDB 聚合，避免电影与剧集命名空间里相同的数字 ID 被误合并。
+String normalizeMediaTypeValue(String? raw) {
+  final value = (raw ?? '').trim().toLowerCase();
+  return value == 'movie' || value == 'tv' ? value : '';
+}
+
 /// 播放历史（§15.1）。
 class PlaybackHistory {
   const PlaybackHistory({
@@ -39,6 +48,9 @@ class PlaybackHistory {
     required this.updatedAt,
     this.completed = false,
     this.sourceKey = '',
+    this.vodYear = '',
+    this.tmdbId = 0,
+    this.mediaType = '',
   });
 
   final int id;
@@ -59,6 +71,20 @@ class PlaybackHistory {
   /// 空串表示「迁移前/来源不明」：查询时对所有源可见，
   /// 保证升级后既有历史不凭空消失；下一次写入会重写成具体源。
   final String sourceKey;
+
+  /// 作品年份（可空串）。用于同名聚合的年份消歧，见
+  /// `core/history_grouping.dart`。
+  final String vodYear;
+
+  /// TMDB 数字 ID；0 = 未绑定（迁移前的旧行一律为 0，不回填猜测）。
+  final int tmdbId;
+
+  /// `movie` / `tv`；空串 = 未绑定。
+  final String mediaType;
+
+  /// 是否带可用的 TMDB 身份（ID 与类型都齐）。
+  bool get hasTmdbIdentity =>
+      tmdbId > 0 && (mediaType == 'movie' || mediaType == 'tv');
 
   double get progress {
     if (durationMs <= 0) return 0;
@@ -82,6 +108,9 @@ class PlaybackHistory {
     updatedAt: row['updated_at'] as int,
     completed: (row['completed'] as int) != 0,
     sourceKey: (row['source_key'] as String?) ?? '',
+    vodYear: (row['vod_year'] as String?) ?? '',
+    tmdbId: (row['tmdb_id'] as int?) ?? 0,
+    mediaType: (row['media_type'] as String?) ?? '',
   );
 }
 
@@ -288,10 +317,14 @@ class AppDatabase {
   ///   `history` 与 `history_deletions` 需要**重建表**——唯一键要从
   ///   `(site_key, …)` 扩成 `(source_key, site_key, …)`，而 SQLite 不能
   ///   `ALTER` 唯一约束。重建前先留 `history_backup_v6` 底表。
+  /// - `7` → `8`：历史同名聚合所需的作品身份（`vod_year`、`tmdb_id`、
+  ///   `media_type`）。**纯加法式**：三列默认值分别是空串 / 0 / 空串，
+  ///   旧行升级后一律「身份未知」，聚合时自然回退到按片名分组。
   ///
-  /// 除 v7 的两张表之外，升级都是**加法式**（`CREATE TABLE IF NOT EXISTS`）：
-  /// 旧库打开后自动获得新表且不丢数据，无需分支式升级逻辑。
-  static const int schemaVersion = 7;
+  /// 除 v7 的两张表之外，升级都是**加法式**（`CREATE TABLE IF NOT EXISTS` 或
+  /// `ALTER TABLE ADD COLUMN`）：旧库打开后自动获得新表/新列且不丢数据，
+  /// 无需分支式升级逻辑。
+  static const int schemaVersion = 8;
 
   /// 打开数据库；失败返回错误原因而不是抛出，保证启动不被阻塞（§16.3）。
   static StoreOpenResult open(String path) {
@@ -365,6 +398,9 @@ class AppDatabase {
         duration_ms INTEGER NOT NULL DEFAULT 0,
         completed INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL,
+        vod_year TEXT NOT NULL DEFAULT '',
+        tmdb_id INTEGER NOT NULL DEFAULT 0,
+        media_type TEXT NOT NULL DEFAULT '',
         UNIQUE(source_key, site_key, vod_id, flag, episode_id)
       );
     ''');
@@ -423,6 +459,7 @@ class AppDatabase {
     _migrateSiteInjection();
     _migrateFollowing();
     _migrateSources();
+    _migrateHistoryIdentity();
     _db.execute(
       "INSERT INTO meta(key, value) VALUES('schema_version', '$schemaVersion') "
       'ON CONFLICT(key) DO UPDATE SET value=excluded.value;',
@@ -815,6 +852,35 @@ class AppDatabase {
     }
   }
 
+  /// 7 → 8 · 历史同名聚合所需的作品身份（`vod_year` / `tmdb_id` / `media_type`）。
+  ///
+  /// ## 为什么是加法式而不是重建表
+  ///
+  /// 唯一键不需要变：聚合是**读视图**（`core/history_grouping.dart` 把多行
+  /// 投影成一张卡），写入仍然是「每集一条记录」。重建表只会白白承担搬迁风险。
+  ///
+  /// ## 为什么旧行不回填
+  ///
+  /// 旧行确实没法可靠回填：历史表里没有 `tmdbId`，而按片名去反查 TMDB 属于
+  /// 「猜」——安卓 §18 明确要求「不根据展示标题猜测回填」。这些行升级后
+  /// 保持 `tmdb_id = 0`，聚合时走片名分组；用户下次播放到该作品时，
+  /// 由播放器写入真实 TMDB 身份，那张卡自动升级为 TMDB 聚合。
+  void _migrateHistoryIdentity() {
+    _addHistoryColumn('vod_year', "TEXT NOT NULL DEFAULT ''");
+    _addHistoryColumn('tmdb_id', 'INTEGER NOT NULL DEFAULT 0');
+    _addHistoryColumn('media_type', "TEXT NOT NULL DEFAULT ''");
+    _db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_history_tmdb '
+      'ON history(media_type, tmdb_id);',
+    );
+  }
+
+  /// 加法式加列：列已存在则跳过（`ALTER TABLE` 不能重复执行）。
+  void _addHistoryColumn(String name, String declaration) {
+    final columns = _columnsOf('history');
+    if (columns.contains(name)) return;
+    _db.execute('ALTER TABLE history ADD COLUMN $name $declaration;');
+  }
   // -------------------------------------------------------------------------
   // 追番（Phase 9 P2-1）
   // -------------------------------------------------------------------------
@@ -1163,6 +1229,9 @@ class AppDatabase {
     int? openingMs,
     int? endingMs,
     String sourceKey = '',
+    String vodYear = '',
+    int tmdbId = 0,
+    String mediaType = '',
   }) {
     final isCompleted =
         completed ??
@@ -1182,12 +1251,21 @@ class AppDatabase {
     _db.execute(
       'INSERT INTO history(source_key, site_key, vod_id, vod_name, vod_pic, '
       'flag, episode_name, episode_id, position_ms, duration_ms, completed, '
-      'updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) '
+      'updated_at, vod_year, tmdb_id, media_type) '
+      'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
       'ON CONFLICT(source_key, site_key, vod_id, flag, episode_id) DO UPDATE SET '
       'vod_name=excluded.vod_name, vod_pic=excluded.vod_pic, '
       'episode_name=excluded.episode_name, position_ms=excluded.position_ms, '
       'duration_ms=excluded.duration_ms, completed=excluded.completed, '
-      'updated_at=excluded.updated_at;',
+      'updated_at=excluded.updated_at, '
+      // 身份列只在**本次拿到真实值**时覆盖：同步来的记录不带 TMDB 身份，
+      // 若无条件覆盖会把播放器刚写好的身份抹掉（那张卡会从 TMDB 聚合退回片名聚合）。
+      'vod_year=CASE WHEN excluded.vod_year = \'\' THEN history.vod_year '
+      'ELSE excluded.vod_year END, '
+      'tmdb_id=CASE WHEN excluded.tmdb_id = 0 THEN history.tmdb_id '
+      'ELSE excluded.tmdb_id END, '
+      'media_type=CASE WHEN excluded.media_type = \'\' THEN history.media_type '
+      'ELSE excluded.media_type END;',
       [
         sourceKey,
         siteKey,
@@ -1205,6 +1283,10 @@ class AppDatabase {
         // 写成 `now()` 会让一条 2024 年的安卓记录看起来比本地所有记录都新，
         // 下一轮“旧不覆盖新”的裁决随之失真。
         updatedAt ?? DateTime.now().millisecondsSinceEpoch,
+        vodYear.trim(),
+        tmdbId,
+        // 只认 movie / tv：留个坏值进来会让聚合键分裂成第三种命名空间。
+        normalizeMediaTypeValue(mediaType),
       ],
     );
     // 写入即意味着这条记录重新存在，删除标记不再有意义。

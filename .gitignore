@@ -37,6 +37,10 @@ sidecars/spider-host-jvm/.build/
 tools/phase7/_run.out
 tools/phase7/_run.err
 
+# DSH 会话临时日志与 flutter 工具状态（本地过程产物，不入库）
+.dsh/
+**/.flutter_tool_state
+
 # superpowers sdd 工作区（本地过程产物，不入库）
 # 注意：docs/phase6 与 docs/phase8 的 evidence 会引用其中的 progress.md 作为审计轨迹，
 # 删除本目录会让那些引用变成悬空指针——所以这里只忽略，不清理。

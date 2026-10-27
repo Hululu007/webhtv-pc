@@ -37,6 +37,8 @@ import '../services/backup_service.dart';
 import '../services/doh_resolver.dart';
 import '../services/following_service.dart';
 import '../services/session_recovery_store.dart';
+import '../core/history_aggregation.dart';
+import '../core/history_grouping.dart';
 import '../core/history_scope.dart';
 import '../core/history_view.dart';
 import '../core/live_settings.dart';
@@ -297,7 +299,12 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// 猫源导入门面；未安装 Node 时为 null。
   CatImportPipeline? _catPipeline;
 
-  late final ConfigImportService _importService;
+  /// 配置导入门面；未安装 Node 时为 null。
+  ///
+  /// 为什么可空而不是 `late final`：`late final` 在「从未初始化」时读一次就抛
+  /// `LateInitializationError`，而 `dispose()` 会无条件读它——没有 Node 的机器
+  /// 或单元测试环境里，退出应用会因此崩掉（先前测试只捕获了「读到才崩」）。
+  ConfigImportService? _importService;
   late HttpApiClient _httpClient = HttpApiClient();
 
   /// 构造时注入的原始 HTTP 客户端（测试/诊断）。见 `_applyOutboundProxy`。
@@ -1492,6 +1499,26 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     return ok;
   }
 
+  /// 历史记录的**同名聚合模式**（[UiHistoryAggregation]）：`tmdb` 优先按
+  /// TMDB 身份合并、缺失时按片名+年份；`title` 只按片名；`none` 每集独立。
+  ///
+  /// 默认 `tmdb`：用户 2026-10-27 明确要求「默认这种模式，同时保留现在
+  /// 每集独立的历史记录格式允许用户手动切换」。
+  String get historyAggregation =>
+      _uiPreferences?.historyAggregation ?? UiHistoryAggregation.tmdb;
+
+  bool get historyAggregationIsOff =>
+      historyAggregation == UiHistoryAggregation.off;
+
+  /// 持久化历史聚合模式。
+  Future<bool> setHistoryAggregation(String mode) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberHistoryAggregation(mode);
+    notifyListeners();
+    return ok;
+  }
+
   /// 当前生效配置的来源标识（见 `core/source_key.dart`）。
   ///
   /// 桥接源为 `bridge|<deviceUuid>|<interfaceKey>`，本地导入为
@@ -2462,8 +2489,16 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     notifyListeners();
 
     try {
+      final importService = _importService;
+      if (importService == null) {
+        throw AppError(
+          AppErrorKind.configInvalid,
+          '未检测到 Node 运行时，无法导入配置',
+          detail: '请安装 Node.js 后重启应用',
+        );
+      }
       final source = ConfigSource.parse(input);
-      var imported = await _importService.import(source);
+      var imported = await importService.import(source);
       var repositoryIndex = 0;
 
       if (imported.isRepository) {
@@ -2472,7 +2507,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
           '导入配置仓库 entries=${imported.repositoryEntries.length} '
           'origin=${redactUrl(imported.origin)}',
         );
-        imported = await _importService.expandRepository(imported);
+        imported = await importService.expandRepository(imported);
       }
 
       final config = imported.config;
@@ -3566,6 +3601,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     required Duration position,
     required Duration duration,
     String? siteKey,
+    // TMDB 身份（movie / tv 与数字 ID）。历史同名聚合优先用它分组，
+    // 缺失时回退按片名。由播放器从 PlaybackRequest.tmdb 透传。
+    int tmdbId = 0,
+    String mediaType = '',
   }) {
     final database = _database;
     final effectiveSiteKey = siteKey ?? _selectedSite?.key ?? 'cli';
@@ -3593,6 +3632,12 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         // 写入永远带**具体源**：全局历史只是读视图，不能把新进度写成
         // "无源"的老记录（否则切回按源隔离时就看不见了）。
         sourceKey: activeSourceKey,
+        // 作品身份：年份来自站点条目（可能为空），TMDB 身份来自播放请求。
+        // 三者都「有值才生效」：upsert 的 ON CONFLICT 分支只在非空/非 0 时
+        // 覆盖，因此同步来的无身份记录不会抹掉这里刚写好的身份。
+        vodYear: vod.vodYear?.trim() ?? '',
+        tmdbId: tmdbId,
+        mediaType: mediaType,
       );
       // 崩溃恢复上下文（P2-8）：与历史同源，但只存标识与进度。
       _recordRecoveryPlayback(
@@ -3965,6 +4010,73 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     notifyListeners();
   }
 
+
+  // -------------------------------------------------------------------------
+  // 历史同名聚合（读视图）
+  // -------------------------------------------------------------------------
+
+  /// 历史页的**分组视图**：把 [recentHistory] / [searchHistory] 的结果按
+  /// [historyAggregation] 投影成一张卡一组。
+  ///
+  /// 关键约束（对应 `docs/phase5/design/05`）：
+  /// - 聚合只是**读视图**：写入仍是一集一条记录，切回 `none` 立刻恢复原样；
+  /// - 组内代表记录取 `updatedAt` 最新（安卓 §8.1）；
+  /// - 搜索关键词命中组内**任一成员**即保留该组（否则「搜某集搜不到」）。
+  List<HistoryGroup> historyGroups({String keyword = ''}) {
+    final records = keyword.isEmpty
+        ? recentHistory()
+        : searchHistory(keyword);
+    return groupHistory(
+      [for (final record in records) _historyGroupInputOf(record)],
+      mode: historyAggregation,
+    );
+  }
+
+  /// 把一条历史映射成聚合投影的输入（补上作品身份）。
+  HistoryGroupInput _historyGroupInputOf(PlaybackHistory record) =>
+      HistoryGroupInput(
+        id: record.id,
+        sourceKey: record.sourceKey,
+        siteKey: record.siteKey,
+        vodId: record.vodId,
+        vodName: record.vodName,
+        vodPic: record.vodPic,
+        flag: record.flag,
+        episodeName: record.episodeName,
+        episodeId: record.episodeId,
+        positionMs: record.positionMs,
+        durationMs: record.durationMs,
+        updatedAt: record.updatedAt,
+        completed: record.completed,
+        vodYear: record.vodYear,
+        tmdbId: record.tmdbId,
+        mediaType: record.mediaType,
+      );
+
+  /// `source_key` → 用户可读的来源名（用于历史卡片上的「非当前源」标注）。
+  ///
+  /// 空串（迁移前的老记录）返回 `null`：那不是「别的源」，而是「不知道来源」，
+  /// 由调用方单独标注为「来源未知」。
+  String? historySourceLabel(String sourceKey) {
+    if (sourceKey.isEmpty) return null;
+    if (sourceKey == activeSourceKey) return null;
+    final record = _database?.configBySourceKey(sourceKey);
+    if (record != null) {
+      final name = record.name.trim();
+      if (name.isNotEmpty) return name;
+      final origin = record.origin.trim();
+      if (origin.isNotEmpty) return origin;
+    }
+    // 配置已删除 / 未桥接：只能用标识尾部标示（不暴露完整 origin）。
+    final parsed = parseSourceKey(sourceKey);
+    return parsed.isKnown ? parsed.shortLabel : '其他来源';
+  }
+
+  /// 某条历史是否属于**非当前播放源**。
+  bool isHistoryFromOtherSource(PlaybackHistory record) {
+    if (record.sourceKey.isEmpty) return false;
+    return record.sourceKey != activeSourceKey;
+  }
   List<FavoriteEntry> favorites({String? kind}) {
     final database = _database;
     if (database == null) return const [];
@@ -4459,7 +4571,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     _followingKickTimer?.cancel();
     _followingService = null;
     _router.dispose();
-    _importService.close();
+    _importService?.close();
     _liveService?.close();
     _epgService?.close();
     _tmdbService.close();
