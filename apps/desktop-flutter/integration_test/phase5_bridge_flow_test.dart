@@ -6,7 +6,8 @@
 /// 8 步（`design/03` §5.1）：
 ///   1. 打开设置页 → 安卓设备接入；
 ///   2. 输入 fixture 地址 → 设备信息正确；
-///   3. 点「导入站点」→ 导入成功、站点数 = 170；
+///   3. 点「导入站点」→ 导入成功：设备上的**两个**点播源各成一条记录
+///      （fixture-vod-a = 170 站点、fixture-vod-b = 3 站点，`04` §4.3）；
 ///   4. 新配置记录产生，**当前配置未被覆盖**（Q10）；
 ///   5. 切到桥接配置 → 首页请求打到 fixture；
 ///   6. 请求的 `Host` 与可达地址一致（P2）；
@@ -113,37 +114,75 @@ void main() {
     expect(state.syncState.notice, contains('已识别设备'));
     evidence('step=2 device=${device.name} type=${device.type}');
 
-    // 3) 导入站点 → 170 个站点。
+    // 3) 导入站点 → 设备上的**两个**点播源各成一条记录（`04` §4.3）。
     final before = state.database!.activeConfig();
     await tapIo(tester, find.byKey(const ValueKey('android-import')));
 
     expect(state.syncState.lastError, isNull, reason: '导入失败');
-    final conversion = state.syncState.conversionFor(androidBase);
-    expect(conversion, isNotNull);
-    expect(conversion!.siteCount, 170);
+
+    // 4) 记录：一条一个源，且都**不覆盖**当前配置（Q10）。
+    final records = state.database!.listConfigs();
     expect(
-      conversion.hostRewrites,
+      records,
+      hasLength(2),
+      reason: '设备上的每个点播源都应各自成记录（不再只取当前激活源）',
+    );
+    final byKey = <String, dynamic>{};
+    for (final record in records) {
+      byKey[record.bridgeInterfaceKey] = record;
+      expect(
+        record.origin,
+        'http://localhost:18080',
+        reason: '同一台设备的多个源 origin 相同，只有 sourceKey 能区分',
+      );
+      expect(
+        record.bridgeDevice,
+        isNotEmpty,
+        reason: '推送落源需要设备坐标（`04` §4.5）',
+      );
+    }
+    expect(byKey.keys.toSet(), {'fixture-vod-a', 'fixture-vod-b'});
+
+    // 4a) 每个源的站点数来自它**自己**的清单，不是同一份快照。
+    final recordsById = {for (final r in records) r.id: r};
+    final recordA = byKey['fixture-vod-a']!;
+    final recordB = byKey['fixture-vod-b']!;
+    expect(recordA.siteCount, 170, reason: 'A 源的站点数');
+    expect(recordB.siteCount, 3, reason: 'B 源的站点数（与 A 完全不重叠）');
+    expect(
+      recordA.sourceKey,
+      isNot(recordB.sourceKey),
+      reason: '两条记录的历史必须落在不同分区（`04` §4.1）',
+    );
+    expect(recordsById.length, 2);
+
+    // 4b) 两源各自的转换结果按 interfaceKey 可取到。
+    final conversionA = state.syncState.conversionOf(androidBase, 'fixture-vod-a');
+    final conversionB = state.syncState.conversionOf(androidBase, 'fixture-vod-b');
+    expect(conversionA, isNotNull);
+    expect(conversionB, isNotNull);
+    expect(conversionA!.siteCount, 170);
+    expect(conversionB!.siteCount, 3);
+    expect(
+      conversionA.hostRewrites,
       isEmpty,
       reason: 'fixture 用请求 Host 现算站点地址，不应该需要修正',
     );
-    evidence('step=3 sites=${conversion.siteCount}');
 
-    // 4) 新配置记录产生，且**当前配置未被覆盖**（Q10）。
-    final records = state.database!.listConfigs();
-    expect(records, hasLength(1), reason: '应产生一条新配置记录');
-    expect(records.single.origin, 'http://localhost:18080');
-    expect(records.single.siteCount, 170);
     expect(
       state.database!.activeConfig()?.id,
       before?.id,
       reason: '导入不得切换当前配置（Q10）',
     );
     expect(state.config, isNull, reason: '导入不应把桥接配置设为生效配置');
-    evidence('step=4 record=${records.single.id} active-unchanged=true');
+    evidence(
+      'step=3,4 records=${records.map((r) => r.id).join(',')} '
+      'sites=${recordA.siteCount}/${recordB.siteCount} active-unchanged=true',
+    );
 
-    // 4b) 站点地址与请求的 Host 一致（P2 的端到端形态）。
+    // 4c) 站点地址与请求的 Host 一致（P2 的端到端形态）。
     final siteHosts = <String>{};
-    for (final site in conversion.config.sites) {
+    for (final site in conversionA.config.sites) {
       final uri = Uri.parse(site.api);
       siteHosts.add('${uri.host}:${uri.port}');
     }
@@ -168,12 +207,18 @@ void main() {
     await tapIo(tester, find.text('接入设备'));
     await tapIo(tester, find.byKey(const ValueKey('android-import')));
 
-    final record = state.database!.listConfigs().single;
-    await tester.runAsync(() => state.activateConfigRecord(record.id));
+    // 多源导入后有两条记录；「启用」只切 PC 本地的生效记录，不碰安卓。
+    final records = state.database!.listConfigs();
+    expect(records, hasLength(2));
+    final target = records.firstWhere(
+      (item) => item.bridgeInterfaceKey == 'fixture-vod-a',
+    );
+    await tester.runAsync(() => state.activateConfigRecord(target.id));
     await settle(tester, rounds: 10);
 
     expect(state.config, isNotNull);
     expect(state.config!.sites, hasLength(170));
+    expect(state.activeSourceKey, target.sourceKey);
     expect(state.selectedSite, isNotNull);
 
     // 5b) 加载首页 → 请求打到 fixture 的 `/vod/api?key=...`。
@@ -195,7 +240,17 @@ void main() {
     //    这里 base 用的是 `localhost`（非回环字面量），只要 `Host` 由我们显式
     //    设置且当真来自 base，就一定是 `localhost:18080`。
     final lastHost = (stats['lastHost'] as Map).cast<String, dynamic>();
-    expect(lastHost['/vod/api?ac=config'], 'localhost:18080');
+    // 多源化后取清单走的是带 `configKey` 的路径；两条清单请求都必须带对 Host。
+    expect(
+      lastHost['/vod/api?ac=config&configKey=fixture-vod-a'],
+      'localhost:18080',
+      reason: 'A 源清单请求的 Host 必须与可达地址一致（P2）',
+    );
+    expect(
+      lastHost['/vod/api?ac=config&configKey=fixture-vod-b'],
+      'localhost:18080',
+      reason: 'B 源清单请求的 Host 必须与可达地址一致（P2）',
+    );
     expect(
       lastHost[keyRoute],
       'localhost:18080',

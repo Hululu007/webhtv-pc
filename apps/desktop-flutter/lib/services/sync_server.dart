@@ -60,7 +60,13 @@ class SyncServerHost {
   final bool Function(String peerUuid) isPeerAuthorized;
 
   /// 应用一批历史，返回明细统计。
-  final Future<SyncMergeStats> Function(SyncHistoryParseResult parsed)
+  ///
+  /// [sourceKey] 来自载荷里的 `configKey`（安卓推给我们的那一源的标识）：
+  /// 非空时只把记录写进该源、且不污染别的源；空串表示老安卓没给标识。
+  final Future<SyncMergeStats> Function(
+    SyncHistoryParseResult parsed, {
+    String sourceKey,
+  })
   onHistory;
 
   /// 应用一批收藏。
@@ -363,6 +369,7 @@ class SyncServer {
     final stats = switch (type) {
       'history' => await host.onHistory(
         SyncHistoryParseResult.parse(_decode(parsed.fields['targets'])),
+        sourceKey: (parsed.fields['configKey'] ?? '').trim(),
       ),
       'keep' => await host.onKeep(
         SyncFavoriteParseResult.parse(_decode(parsed.fields['targets'])),

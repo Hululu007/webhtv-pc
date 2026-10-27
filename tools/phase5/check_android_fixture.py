@@ -22,6 +22,22 @@ import urllib.request
 
 # 故障注入模式 → 期望形态（`design/03` §2.3 表）。
 # 每一项都必须能被**逐一触发**，否则"6 类错误全覆盖"就是空话。
+# 预检覆盖的路由清单（`design/04` §2.2 之后共 11 条）。
+# 这里的条目数是 G1 判据的一部分：新增路由必须同步登记，避免"加了端点但没人验"。
+ANDROID_ROUTES = (
+    "/device",
+    "/vod/api?ac=config",
+    "/vod/api?ac=site",
+    "/vod/api?key=",
+    "/vod/api?ac=config&configKey=",
+    "/manage/configs",
+    "/action",
+    "/__stats",
+    "/__reset",
+    "/__mode",
+    "/live/<live-config.json>",
+)
+
 MODE_EXPECTATIONS = {
     "404": ("status", 404),
     "empty": ("sites", 0),
@@ -175,6 +191,86 @@ def main() -> int:
         f"status={status} keys={sorted(home) if isinstance(home, dict) else '-'}",
     )
 
+    # 4b. 方案 B 新端点（`design/04` §2.2）：
+    #     `/manage/configs` 列出全部配置，`ac=config&configKey=` 取**指定源**站点。
+    #     这两条是「桥接后拉取安卓所有点播源」的唯一数据来源，必须真的可用，
+    #     且两个源的站点集合必须不同 —— 否则「按源隔离/切换」的断言会空转。
+    status, listing, _ = fetch(base, "/android/manage/configs", host=custom_host)
+    items = listing.get("items", []) if isinstance(listing, dict) else []
+    vod_items = [item for item in items if item.get("type") == 0]
+    check(
+        "manage/configs 列出全部配置",
+        status == 200
+        and len(items) >= 3
+        and len(vod_items) == 2
+        and all(item.get("interfaceKey") for item in items),
+        f"status={status} items={len(items)} vod={len(vod_items)}",
+    )
+    check(
+        "manage/configs 里只有一个点播源激活",
+        [item.get("interfaceKey") for item in vod_items if item.get("active")]
+        == ["fixture-vod-a"],
+        f"active={[i.get('interfaceKey') for i in vod_items if i.get('active')]}",
+    )
+    status, source_a, _ = fetch(
+        base, "/android/vod/api?ac=config&configKey=fixture-vod-a", host=custom_host
+    )
+    status_b2, source_b, _ = fetch(
+        base, "/android/vod/api?ac=config&configKey=fixture-vod-b", host=custom_host
+    )
+    keys_a = {site.get("key") for site in source_a.get("sites", [])}
+    keys_b = {site.get("key") for site in source_b.get("sites", [])}
+    check(
+        "configKey=A 返回该源站点（170）",
+        status == 200 and len(keys_a) == 170 and "csp_PianDan" in keys_a,
+        f"status={status} sites={len(keys_a)}",
+    )
+    check(
+        "configKey=B 返回另一源的站点（3，且与 A 不重叠）",
+        status_b2 == 200
+        and len(keys_b) == 3
+        and "cspB_Alpha" in keys_b
+        and not (keys_a & keys_b),
+        f"status={status_b2} sites={len(keys_b)}",
+    )
+    hosts_b = {
+        site["api"].split("//", 1)[1].split("/", 1)[0]
+        for site in source_b.get("sites", [])
+        if "//" in site.get("api", "")
+    }
+    check(
+        "configKey 响应同样按 Host 现算主机",
+        hosts_b == {custom_host},
+        f"hosts={sorted(hosts_b)}",
+    )
+    status, unknown, _ = fetch(
+        base, "/android/vod/api?ac=config&configKey=no-such-key", host=custom_host
+    )
+    check(
+        "未知 configKey 原样回 msg",
+        status == 200
+        and isinstance(unknown, dict)
+        and "未知的配置标识" in str(unknown.get("msg", "")),
+        f"status={status} msg={unknown.get('msg') if isinstance(unknown, dict) else '-'}",
+    )
+
+    # 4c. 直播配置文档：`lives` 是 PC 单独拉取的（T4 网关 `lives` 恒空）。
+    status, live_config, _ = fetch(base, "/live/live-config.json", host=custom_host)
+    lives = live_config.get("lives", []) if isinstance(live_config, dict) else []
+    check(
+        "直播配置文档可拉取且含 lives",
+        status == 200 and len(lives) == 2 and all(item.get("name") for item in lives),
+        f"status={status} lives={len(lives)}",
+    )
+    check(
+        "直播配置里的地址按 Host 现算",
+        "__HOST__" not in json.dumps(live_config, ensure_ascii=False)
+        and all(
+            custom_host in str(item.get("url", "")) for item in lives
+        ),
+        f"lives={lives}",
+    )
+
     # 5. 8 种故障注入逐一可触发（`design/03` §2.3）。
     for mode, (kind, expected) in MODE_EXPECTATIONS.items():
         fetch(base, f"/android/__mode?config={mode}")
@@ -314,7 +410,7 @@ def main() -> int:
             print(f"  - {item}", file=sys.stderr)
         return 1
     print(
-        f"PHASE5-ACCEPT android-fixture routes=8 modes={len(MODE_EXPECTATIONS) + 2} "
+        f"PHASE5-ACCEPT android-fixture routes={len(ANDROID_ROUTES)} modes={len(MODE_EXPECTATIONS) + 2} "
         "failures=0"
     )
     return 0

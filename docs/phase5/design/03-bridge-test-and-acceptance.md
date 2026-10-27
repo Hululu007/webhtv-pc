@@ -57,7 +57,12 @@ packages/test-fixtures/android/
   backup-android.json          # Backup 形态（含 prefers 白名单）
   sync-options.json            # SyncOptions 形态
   vod-home.json                # 站点首页响应
+  manage-configs.json          # /manage/configs 响应：2 个点播源 + 1 直播源 + 1 壁纸源（`04` §2.3）
+  gateway-config-source-b.json # 第二个点播源的站点清单（3 站点，key 与 A 完全不重叠）
 ```
+
+`packages/test-fixtures/live/` 另有 `live-config.json`（`lives[]` 形态）。T4 网关的 `lives` 恒空，
+直播源必须单独拉取，因此它不在 `android/` 目录下——fixture 服务的 `/live/**` 只服务 live 目录。
 
 ### 2.2 快照来源
 
@@ -80,7 +85,9 @@ packages/test-fixtures/android/
 | `GET /android/device` | 返回 `device.json` | 设备识别 |
 | `GET /android/vod/api?ac=config` | 返回 `gateway-config.json`，其中 `__HOST__` **替换为请求的 `Host` 头** | **复现真实网关的 Host 派生行为**（`00` §3.2） |
 | `GET /android/vod/api?ac=site` | 同 `ac=config` | 等价性断言 |
+| `GET /android/vod/api?ac=config&configKey=<k>` | 返回**该源**的站点清单（`fixture-vod-a` → 170 站点；`fixture-vod-b` → 3 站点）；未知 `k` 原样回 `{"msg":"未知的配置标识: <k>"}` | 方案 B 的多源取站点（`04` §2.2） |
 | `GET /android/vod/api?key=<key>` | 返回 `vod-home.json` | 站点可执行性 |
+| `GET /android/manage/configs` | 返回 `manage-configs.json`（全部配置，含 `interfaceKey`/`url`/`active`） | 「设备上有哪些源」的唯一来源（`04` §2.2） |
 | `POST /android/action?do=sync&...` | 200 `OK`，并把收到的表单字段记入 stats | 断言 PC 推送的形态 |
 | `GET /android/__stats` | 各路由命中次数 + 最近一次收到的表单字段 | 请求捕获 |
 | `GET /android/__reset` | 清空 stats | 用例隔离 |
@@ -101,6 +108,9 @@ packages/test-fixtures/android/
 
 > `__mode` 与 `__stats` 沿用 TMDB fixture 的 `__` 前缀约定（`docs/phase4/design/05` §2.2），
 > 便于识别"这是测试开关，不是被测协议"。
+>
+> **故障注入只作用于默认（当前激活源）路径**：`configKey` 分支永远返回正常清单。
+> 这样「某个源坏了」与「设备自身故障」不会被混成一类错误（`04` §2.3）。
 
 ### 2.4 fixture 不模拟什么
 
@@ -251,7 +261,15 @@ packages/test-fixtures/android/
 3. `/android/vod/api?ac=site` 与 `ac=config` 字节相同；
 4. `__stats` / `__reset` 可用；
 5. 8 种故障注入模式逐一返回预期形态；
-6. `/android/action` 能接收表单并回 200 `OK`，字段被 stats 记录。
+6. `/android/action` 能接收表单并回 200 `OK`，字段被 stats 记录；
+7. `/android/manage/configs` 列出全部配置，且只有**一个**点播源处于 `active`；
+8. `ac=config&configKey=fixture-vod-a` 与 `fixture-vod-b` 返回**不同**的站点集合（170 / 3，且 key 无交集）——
+   这条是「按源隔离 / 切换真的生效」的前置条件，两个源返回同样站点时断言会空转；
+9. `configKey` 响应的站点主机同样按请求 `Host` 现算；未知 `configKey` 原样回 `msg`（不折叠成空站点）；
+10. `/live/live-config.json` 可拉取、含 `lives[]`、地址按 `Host` 现算。
+
+末行打印 `PHASE5-ACCEPT android-fixture routes=11 modes=8 failures=0`；
+路由条目数取自脚本内的 `ANDROID_ROUTES` 常量，新增路由必须同步登记（否则"加了端点但没人验"）。
 
 ### 4.3 反向验证 `tools/phase5/verify_reverse_checks.py`
 
@@ -266,8 +284,11 @@ packages/test-fixtures/android/
 | 4 | 哨兵值不做过滤 | `phase5_android_sync_test.dart` 溢出用例 |
 | 5 | 删除标记检查被移除 | `phase5_android_sync_test.dart` 不复活用例 |
 | 6 | `SyncOptions` 的 `settings` 默认改为 `true` | `phase5_android_sync_test.dart` 默认关闭用例 |
+| 7 | 推送时允许 `config.url` 等于设备网关地址（即回退到今天已知的 bug） | `phase5_sync_client_test.dart` 网关地址拦截用例 |
 
-> 6 项是本套文档最重要的"门禁真的锁住了契约"的证据。
+> 7 项是本套文档最重要的"门禁真的锁住了契约"的证据。
+> #7 直接对应本次多源化修掉的那个缺陷——**给安卓新增了一个桥接源**：
+> 只要拦截被移除，用例必须失败（`04` §1、§4.5）。
 > 尤其 #2（毫秒换算）与 #5（复活）是本阶段最容易悄悄写错的两处。
 
 ---
@@ -279,9 +300,9 @@ packages/test-fixtures/android/
 真实窗口 + 真实 HTTP（fixture 服务充当 Android）：
 
 1. 打开设置页 → 安卓设备接入；
-2. 手动输入 fixture 地址 → 设备信息正确显示（名称、类型、站点数）；
-3. 点"导入站点" → 导入成功，站点数 = 170；
-4. 断言新配置记录产生，**当前配置未被覆盖**（Q10）；
+2. 手动输入 fixture 地址 → 设备信息正确显示（名称、类型）；
+3. 点"导入站点" → 导入成功：设备上的**两个**点播源各成一条记录（A = 170 站点、B = 3 站点）；
+4. 断言新配置记录产生，且**当前配置未被覆盖**（Q10）；两条记录的 `source_key` 分别为 `bridge|<uuid>|fixture-vod-a` 与 `...|fixture-vod-b`；
 5. 切到桥接配置 → 首页请求打到 fixture 的 `/android/vod/api?key=...`；
 6. 断言请求的 `Host` 与可达地址一致（P2）；
 7. 故障注入 `empty` → 明确报错 `bridgeEmptySites`，不是"0 个站点"成功；
@@ -315,12 +336,12 @@ PC 当客户端（fixture 充当 Android 的 `/action` 接收端）：
 
 | 门禁 | 命令 | 通过判据 |
 | --- | --- | --- |
-| G1 安卓 fixture 预检 | `py -3 tools/phase5/check_android_fixture.py --base <url>` | 路由 8 项 + 故障注入 8 项全通过 |
+| G1 安卓 fixture 预检 | `py -3 tools/phase5/check_android_fixture.py --base <url>` | 路由 **11** 项（含 `/manage/configs` 与 `ac=config&configKey=`）+ 故障注入 8 项全通过 |
 | G2 Python 契约 | `py -3 -m unittest tests.test_contracts` | 12 个新增安卓用例通过（全仓 21 个） |
 | G3 Schema 校验 | `py -3 scripts/validate_contracts.py` | 无错误 |
 | G4 静态检查 | `dart analyze` | 无问题 |
-| G5 单元测试 | `flutter test` | 全绿（含 7 个 `phase5_*` 套件，共 1338 例） |
-| G6 套件存在性 | 脚本内清单核对 | 8 个套件文件均存在 |
+| G5 单元测试 | `flutter test` | 全绿（本机实测 147 个测试文件 2867 例） |
+| G6 套件存在性 | 脚本内清单核对 | 12 个套件文件均存在 |
 | G7 Windows 集成 | `flutter test integration_test/phase5_*_flow_test.dart -d windows` | 3 个套件全绿 |
 | G8 反向验证 | `py -3 tools/phase5/verify_reverse_checks.py` | 6 项全部"按预期失败"且还原后工作区干净 |
 | G9 脱敏 | `py -3 tools/phase4/verify_tmdb_redaction.py` + `py -3 tools/phase5/verify_bridge_redaction.py` | 无凭据/指纹原文（三层：源码日志实参 / 脱敏用例在位 / 证据文件） |

@@ -225,6 +225,59 @@ void main() {
         reason: '校验失败不得发出请求：否则用户看到"成功"但安卓什么都没写',
       );
     });
+
+    group('网关地址当 config.url 时本地拒绝（方案 B，用户现象「反而新增桥接源」）',
+        () {
+      test('gateway url · 与设备同 host:port → syncPayloadInvalid 且不发请求', () async {
+        final client = FakeClient();
+        final sync = SyncClient(log: LogService(), client: client);
+        final error = await throwsAppError(
+          () => sync.pushHistory(
+            deviceBase: deviceBase,
+            configJson: '{"name":"安卓桥接","url":"$deviceBase"}',
+            items: [localItem()],
+          ),
+          AppErrorKind.syncPayloadInvalid,
+        );
+        // 安卓 Config.find(url,type) 查不到就 create().insert()，会在设备上
+        // 凭空多出一行「桥接源」，所以这一层必须拦住。
+        expect(error.message, contains('桥接源'));
+        expect(error.detail, contains('config.url'));
+        expect(client.requests, isEmpty);
+      });
+
+      test('gateway url · 尾部斜杠 / 带路径 / 省略端口都识别为网关', () async {
+        for (final url in <String>[
+          '$deviceBase/',
+          '$deviceBase/vod/api?ac=config',
+          'http://192.168.50.9:9978',
+        ]) {
+          final client = FakeClient();
+          final sync = SyncClient(log: LogService(), client: client);
+          await throwsAppError(
+            () => sync.pushHistory(
+              deviceBase: deviceBase,
+              configJson: '{"url":"$url"}',
+              items: [localItem()],
+            ),
+            AppErrorKind.syncPayloadInvalid,
+          );
+          expect(client.requests, isEmpty, reason: url);
+        }
+      });
+
+      test('该源自己的订阅地址照常推送（不同 host 不受影响）', () async {
+        final client = FakeClient();
+        final sync = SyncClient(log: LogService(), client: client);
+        await sync.pushHistory(
+          deviceBase: deviceBase,
+          configJson:
+              '{"url":"https://sub.example.com/catvod/index.js.md5"}',
+          items: [localItem()],
+        );
+        expect(client.requests, hasLength(1));
+      });
+    });
   });
 
   group('错误分类（design/02 §6）', () {

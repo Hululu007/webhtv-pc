@@ -36,6 +36,7 @@ DESIGN_DOCS = [
     "docs/phase5/design/01-android-t4-site-bridge.md",
     "docs/phase5/design/02-android-sync-protocol.md",
     "docs/phase5/design/03-bridge-test-and-acceptance.md",
+    "docs/phase5/design/04-bridge-multisource.md",
 ]
 
 MAIN_DOC = "docs/webhtv-pc-design.md"

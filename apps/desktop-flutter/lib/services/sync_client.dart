@@ -15,9 +15,11 @@
 ///
 /// ## 两条必须校验的前置条件（P5）
 ///
-/// 1. `type=history` 时 `config` 必须含**非空 `url`**：安卓的 `syncHistory`
-///    首行就是 `if (config.getUrl() == null) return;` —— 静默无操作但返回 200，
-///    不校验就会把“什么都没写”报成成功；
+/// 1. `type=history` 时 `config` 必须含**非空 `configKey`（桥接源）或非空
+///    `url`（本地导入的老形态）**：安卓的 `syncHistory` 首行就是
+///    `if (config.getUrl() == null) return;` —— 静默无操作但返回 200，
+///    不校验就会把“什么都没写”报成成功；带 `configKey` 时安卓走
+///    `pushScopedHistory`，按 cid 直接写库、根本不读 `url`；
 /// 2. 请求必须打到 PC 视角的**可达地址**，并显式设置 `Host` 头，
 ///    与 T4 桥接同一约定（`design/01` §4）。
 library;
@@ -95,7 +97,7 @@ class SyncClient {
     required List<SyncHistoryItem> items,
     SyncOptions options = SyncOptions.pcDefault,
   }) async {
-    _requireConfigUrl(configJson);
+    final configKey = requireTargetConfig(configJson, deviceBase);
     final targets = items.map((item) => item.toAndroidJson()).toList();
     return _post(
       deviceBase: deviceBase,
@@ -103,6 +105,9 @@ class SyncClient {
       mode: '1',
       form: {
         'config': configJson,
+        // 方案 B §3.5：带标识时安卓按 cid 直接写库，既不 Config.find
+        // （凭空建出一个「桥接源」）也不 VodConfig.load（切走当前源）。
+        if (configKey.isNotEmpty) 'configKey': configKey,
         'targets': jsonEncode(targets),
         'options': options.jsonText,
       },
@@ -174,7 +179,12 @@ class SyncClient {
 
   // ------------------------------------------------------------------ 内部
 
-  void _requireConfigUrl(String configJson) {
+  /// 校验 [configJson] 能否定位安卓上的一条配置，返回它的 configKey。
+  ///
+  /// 返回空串表示「老形态：只有 url」，调用方不发 configKey 字段；返回非空表示
+  /// 「按源标识写库」，此时 url 完全不参与校验——桥接源的 url 天然就是网关地址
+  /// （见 [_rejectGatewayUrl] 的缺陷说明），拿它做校验只会把正常推送拦下来。
+  String requireTargetConfig(String configJson, String deviceBase) {
     Object? decoded;
     try {
       decoded = jsonDecode(configJson);
@@ -185,7 +195,10 @@ class SyncClient {
         detail: 'config',
       );
     }
-    final url = (asString(asMap(decoded)['url']) ?? '').trim();
+    final map = asMap(decoded);
+    final configKey = (asString(map['configKey']) ?? '').trim();
+    if (configKey.isNotEmpty) return configKey;
+    final url = (asString(map['url']) ?? '').trim();
     if (url.isEmpty) {
       throw AppError(
         AppErrorKind.syncPayloadInvalid,
@@ -194,6 +207,39 @@ class SyncClient {
         detail: 'config.url',
       );
     }
+    _rejectGatewayUrl(url, deviceBase);
+    return '';
+  }
+
+  /// 拒绝把**安卓网关自己的地址**当成 `config.url`（防回归，方案 B §4.3）。
+  ///
+  /// 缺陷原样（用户可见现象「反而给安卓版新增了一个桥接源」）：PC 曾把桥接
+  /// 记录的 `origin`（网关地址）当 `config.url` 发过去，安卓
+  /// `Action.syncHistory` → `Config.find(Config.objectFrom(config))` 查不到
+  /// 该 url 就 `Config.create(type, url)` → **`.insert()`**，于是安卓库里凭空
+  /// 多出一行「桥接源」，还会顺带切走安卓当前激活源。
+  ///
+  /// 现在推送一律带 `configKey`，安卓按标识写库、根本不读 url；这层断言是给
+  /// 「老安卓 + 万一又拼错载荷」留的兜底：宁可明确报错，也不能静默污染用户
+  /// 设备上的配置列表。
+  void _rejectGatewayUrl(String url, String deviceBase) {
+    final target = Uri.tryParse(url);
+    if (target == null || target.host.isEmpty) return;
+    final String deviceHostPort;
+    try {
+      deviceHostPort = hostPortOf(deviceBase);
+    } on AppError {
+      return;
+    }
+    final urlHostPort =
+        '${target.host}:${target.hasPort ? target.port : androidDefaultPort}';
+    if (urlHostPort != deviceHostPort) return;
+    throw AppError(
+      AppErrorKind.syncPayloadInvalid,
+      '推送历史时 config.url 不能是安卓网关地址（那会让安卓凭空多出一个'
+      '「桥接源」）；请改为该源自己的订阅地址',
+      detail: 'config.url=${redactUrl(url)}',
+    );
   }
 
   Future<SyncPushResult> _post({

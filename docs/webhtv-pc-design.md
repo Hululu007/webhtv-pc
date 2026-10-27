@@ -2190,7 +2190,7 @@ fixture 只能证明解析逻辑正确，不能证明现实站点可用。必须
 
 目标：建立与 WebHTV 和其他设备的可选协同能力。
 
-> 完整设计指导见 `docs/phase5/design/00`–`design/03`，阶段计划见 `docs/phase5/README.md`，
+> 完整设计指导见 `docs/phase5/design/00`–`design/04`，阶段计划见 `docs/phase5/README.md`，
 > 主设计文档摘要见 §28。
 
 功能：
@@ -2750,9 +2750,10 @@ Android 特有的多套详情页形态。
 
 - 定位：把已经跑在 Android 上的 WebHTV 当作**局域网内的站源服务器与同步对端**，
   用 T4 网关间接访问它加载的全部站源，并与它双向共用播放历史与相关设置。
-- 状态：设计指导已补齐（`docs/phase5/design/00`–`design/03`），**实施进行中**。
+- 状态：设计指导已补齐（`docs/phase5/design/00`–`design/04`），**实施进行中**。
 - 完整设计指导：`docs/phase5/design/00-android-bridge-design-index.md`（索引）、
-  `01`（T4 站点桥接）、`02`（同步协议）、`03`（测试与验收）。
+  `01`（T4 站点桥接）、`02`（同步协议）、`03`（测试与验收）、
+  `04`（多源化改造：拉取全部点播源、历史按源隔离 + 全局开关、推送落到目标源）。
 - 阶段计划：`docs/phase5/README.md`。
 - 上游依据：Android `c388619629`
   `feat(server): add local T3-to-T4 gateway with HTTP contract coverage`，

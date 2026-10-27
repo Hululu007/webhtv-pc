@@ -30,6 +30,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 import '../core/android_bridge.dart';
+import '../core/android_sources.dart';
 import '../core/android_sync.dart';
 import '../core/app_error.dart';
 import '../core/playback_identity.dart';
@@ -66,12 +67,18 @@ abstract class SyncStateHost {
     required String origin,
     required AppConfig config,
     required List<String> diagnostics,
+    String deviceUuid = '',
+    String interfaceKey = '',
+    String configUrl = '',
   });
 
-  /// 与安卓当前配置对齐的配置 JSON（含非空 `url`）；无法确定时为 `null`。
+  /// 推送时要带的配置身份 JSON；无法确定时为 `null`。
   ///
-  /// 见 `design/02` §3.2：`config.url` 为空时安卓**静默忽略**整批记录却仍返回
-  /// 200，因此宁可不发也不能发一个空 url。
+  /// 桥接源送 `configKey`（= 安卓的 `interfaceKey`）：安卓据此**直接写目标源**，
+  /// 不再经过 `Config.find(url)`（查不到会 insert 一行，凭空多出"桥接源"）。
+  /// 本地导入的源没有 interfaceKey，仍按老协议送自己的 `url`。
+  ///
+  /// 带 `configKey` 时 `url` 只作展示，安卓不读它。
   String? syncConfigJson();
 
   /// 把白名单内的设置落到本地设置文件（调用方已确认 `settings` 开启）。
@@ -311,6 +318,9 @@ class SyncState extends ChangeNotifier {
   /// 让他再去配置页手动点一次「启用」是多余的一步（用户反馈 2026-10-09：
   /// 「导入站点成功后应该自动切换或者弹出确认框让用户确认是否切换到该配置」）。
   int? _lastImportRecordId;
+
+  /// 最近一次导入**成功落库的全部**配置记录 id（一台设备多个源时有多条）。
+  List<int> _importRecordIds = const [];
   List<AndroidDevice> _devices = const [];
   Map<String, BridgeConversion> _conversions = const {};
   BridgeStage? _stage;
@@ -373,14 +383,38 @@ class SyncState extends ChangeNotifier {
   /// 最近一次成功导入桥接站点所创建的配置记录 id；无导入时为 `null`。
   int? get lastImportRecordId => _lastImportRecordId;
 
+  /// 最近一次导入**成功落库的全部**记录 id（一台设备多个源时有多条）。
+  List<int> get importRecordIds => _importRecordIds;
+
   bool get busy => _busy;
   BridgeStage? get stage => _stage;
   int get scanDone => _scanDone;
   int get scanTotal => _scanTotal;
 
   /// 某设备最近一次拉到的桥接转换结果（含诊断）。
-  BridgeConversion? conversionFor(String deviceBase) =>
-      _conversions[normalizeBase(deviceBase)];
+  ///
+  /// 多源导入时按设备只能给出"该设备最后一个源"的结果；要精确到源用
+  /// [conversionOf]。
+  BridgeConversion? conversionFor(String deviceBase) {
+    final base = normalizeBase(deviceBase);
+    final direct = _conversions[base];
+    if (direct != null) return direct;
+    // 多源导入只按 `base#interfaceKey` 存；设备卡片要的是"这台设备的最近一次
+    // 转换结果"，因此回退到该设备任一源（用于展示主机修正与诊断）。
+    final prefix = '$base#';
+    for (final entry in _conversions.entries) {
+      if (entry.key.startsWith(prefix)) return entry.value;
+    }
+    return null;
+  }
+
+  /// 某设备上**某一个源**的桥接转换结果（多源导入后按 interfaceKey 取）。
+  BridgeConversion? conversionOf(String deviceBase, String interfaceKey) {
+    final base = normalizeBase(deviceBase);
+    final key = interfaceKey.trim();
+    if (key.isEmpty) return _conversions[base];
+    return _conversions['$base#$key'] ?? _conversions[base];
+  }
 
   // ------------------------------------------------------------------ 加载
 
@@ -1154,89 +1188,197 @@ class SyncState extends ChangeNotifier {
 
   // ------------------------------------------------------------- 站点导入
 
-  /// 拉取并导入站点（`design/01` §5）。
+  /// 拉取并导入站点（`design/01` §5；用户反馈 2026-10-26 后改为**全量源**）。
   ///
-  /// 导入产生**新配置记录**且**不覆盖当前配置**（Q10）。
-  Future<bool> importSites(String address) async {
+  /// 桥接的正确语义是「安卓只是运行容器」：把它上面**所有**点播源都拉过来，
+  /// 每个源各成一条 PC 配置记录（可切换），而不是造一条"桥接源"。
+  /// 因此这里先读 `/manage/configs` 拿到源清单，再对每条源用
+  /// `/vod/api?ac=config&configKey=<interfaceKey>` 取**该源自己的**站点，
+  /// 全程不切换安卓的当前配置（对齐 P3）。
+  ///
+  /// 导入产生/更新**本机记录**且**不覆盖当前配置**（Q10）。
+  /// 取「本次导入要归属的设备」：已探测过就直接用，否则**补一次探测**。
+  ///
+  /// 为什么要补探测：源标识里的设备段必须是设备的稳定 uuid。以前这里在
+  /// 找不到已探测设备时退化用地址当 uuid，导入出来的 source_key 就变成
+  /// `bridge|http://192.168.50.9:9978|a`——设备换个 IP 就与自己的历史断链，
+  /// 而且和 UI 先探测再导入的路径产生两套标识（同一台设备两条记录）。
+  /// 探测失败仍退回地址，保证「设备能连但 /device 不可用」的旧形态不被打断。
+  Future<AndroidDevice> _deviceForImport(String base) async {
+    for (final item in _devices) {
+      if (item.reachableBase == base) return item;
+    }
+    AndroidDevice device;
+    try {
+      device = await _bridge.probeDevice(base);
+    } on AppError {
+      device = AndroidDevice(
+        uuid: base,
+        name: Uri.parse(base).host,
+        reachableBase: base,
+      );
+    }
+    if (!_devices.any((item) => item.uuid == device.uuid)) {
+      _devices = [..._devices, device];
+    }
+    return device;
+  }
+
+  /// [interfaceKey] 非空时只导入该源（单源重拉）。
+  Future<bool> importSites(String address, {String? interfaceKey}) async {
     _busy = true;
-    _stage = BridgeStage.fetchingConfig;
+    _stage = BridgeStage.probingDevice;
     _lastError = null;
     _notice = null;
     _lastImportRecordId = null;
+    _importRecordIds = const [];
     notifyListeners();
     try {
       final base = normalizeBase(address);
-      final device = _devices.firstWhere(
-        (item) => item.reachableBase == base,
-        orElse: () => AndroidDevice(
-          uuid: base,
-          name: Uri.parse(base).host,
-          reachableBase: base,
-        ),
-      );
-      final conversion = await _bridge.fetchGatewayConfig(
-        base,
-        // P4：把 PC 自己的服务端地址也交给转换层，拒绝指向本机的站点。
-        selfBase: serverRunning ? _server!.baseUrl : null,
-        onStage: (stage) {
-          _stage = stage;
-          notifyListeners();
-        },
-      );
-      _conversions = {..._conversions, base: conversion};
+      final device = await _deviceForImport(base);
+      final selfBase = serverRunning ? _server!.baseUrl : null;
 
-      // 直播源：T4 网关的 `lives` 恒为空（`VodApi.java` 写死 `new JsonArray()`），
-      // 必须另从设备当前启用的直播配置里取（用户反馈 2026-10-09：
-      // 「安卓桥接没有同步直播源」）。取不到不报错——站点导入本身已成功。
+      // 1) 源清单：拿不到（老安卓）就退化为"只导入当前激活源"的老路径。
+      _stage = BridgeStage.fetchingSources;
+      notifyListeners();
+      AndroidSourceCatalog catalog;
+      try {
+        catalog = await _bridge.fetchSources(base);
+      } on AppError catch (error) {
+        // 404/网关缺失 = 老安卓没有 `/manage/configs`：退回只导入当前激活源，
+        // 而不是把「设备上多个源」这个新能力变成整条导入失败的理由。
+        if (error.kind != AppErrorKind.bridgeNoGateway) rethrow;
+        catalog = const AndroidSourceCatalog();
+      }
+      final wanted = interfaceKey?.trim() ?? '';
+      final targets = wanted.isEmpty
+          ? catalog.sources
+          : [
+              for (final source in catalog.sources)
+                if (source.interfaceKey == wanted) source,
+            ];
+      if (targets.isEmpty) {
+        if (wanted.isNotEmpty) {
+          throw AppError(
+            AppErrorKind.bridgeUnreachable,
+            '安卓设备上找不到该配置（$wanted），可能已被删除',
+            detail: base,
+          );
+        }
+        // 老安卓：没有 /manage/configs，退回只导入当前激活源。
+        return await _importActiveSourceOnly(base, device, selfBase, catalog);
+      }
+
+      // 2) 直播源只取一次（设备级），每条源记录都共享它。
       final liveSources = await _bridge.fetchLiveSources(base);
-      final bridgedConfig = liveSources.isEmpty
-          ? conversion.config
-          : conversion.config.copyWith(lives: liveSources);
 
-      final recordId = await host.saveBridgeConfig(
-        name: bridgedConfig.name ?? '安卓桥接（${Uri.parse(base).host}）',
-        origin: base,
-        config: bridgedConfig,
-        diagnostics: conversion.diagnostics,
-      );
-      if (recordId == null) {
+      // 3) 逐源取站点并落库：一台设备多个源时，origin 全是网关地址，
+      //    只有 sourceKey 能把它们区分开（见 storage.saveConfig 去重键）。
+      final savedIds = <int>[];
+      final failures = <String>[];
+      // 每个源的失败分类都要留着：设备级故障（网关 404、站点为空、主机不匹配）
+      // 会让**所有**源以同一分类失败，此时必须原样冒泡那个分类，而不是把
+      // 「站点为空」折叠成 bridgeUnreachable —— 后者会让用户无法区分
+      // 「设备上有源但都取不到」和「设备根本连不上」。
+      final failureKinds = <AppErrorKind>[];
+      AppError? singleFailure;
+      var totalSites = 0;
+      var totalLive = 0;
+      for (final source in targets) {
+        _stage = BridgeStage.fetchingConfig;
+        notifyListeners();
+        try {
+          final conversion = await _bridge.fetchGatewayConfig(
+            base,
+            selfBase: selfBase,
+            interfaceKey: source.interfaceKey,
+            onStage: (stage) {
+              _stage = stage;
+              notifyListeners();
+            },
+          );
+          _conversions = {
+            ..._conversions,
+            '$base#${source.interfaceKey}': conversion,
+          };
+          var bridgedConfig = conversion.config;
+          if (liveSources.isNotEmpty && bridgedConfig.lives.isEmpty) {
+            bridgedConfig = bridgedConfig.copyWith(lives: liveSources);
+          }
+          final recordId = await host.saveBridgeConfig(
+            name: source.displayName,
+            origin: base,
+            config: bridgedConfig,
+            diagnostics: [
+              ...conversion.diagnostics,
+              if (catalog.diagnostics.isNotEmpty) catalog.diagnostics.first,
+            ],
+            deviceUuid: device.uuid,
+            interfaceKey: source.interfaceKey,
+            configUrl: source.url,
+          );
+          if (recordId == null) {
+            failures.add('${source.displayName}：保存配置记录失败（数据库不可用）');
+            continue;
+          }
+          savedIds.add(recordId);
+          totalSites += conversion.siteCount;
+          totalLive += bridgedConfig.lives.length;
+        } on AppError catch (error) {
+          failures.add('${source.displayName}：${error.message}');
+          failureKinds.add(error.kind);
+          if (targets.length == 1) singleFailure = error;
+        }
+      }
+
+      if (savedIds.isEmpty && singleFailure != null) throw singleFailure;
+
+      // 全部失败且分类一致 → 这是**设备级**故障，冒泡原始分类（P5：能力缺口
+      // 必须披露，不得折叠）。只有分类混杂时才退化成汇总错误。
+      if (savedIds.isEmpty &&
+          failureKinds.length == targets.length &&
+          failureKinds.toSet().length == 1) {
         throw AppError(
-          AppErrorKind.storage,
-          '导入成功但保存配置记录失败（数据库不可用）',
+          failureKinds.first,
+          '安卓桥接导入失败：${failures.first}',
           detail: base,
         );
       }
-      // 供 UI 在导入后询问「是否切换到该配置」（用户反馈 2026-10-09：
-      // 「导入站点成功后应该自动切换或者弹出确认框」）。
-      _lastImportRecordId = recordId;
 
-      // 先改内存里的设备历史与白名单，**最后只落一次盘**：
+      if (savedIds.isEmpty) {
+        throw AppError(
+          failures.isEmpty
+              ? AppErrorKind.storage
+              : AppErrorKind.bridgeUnreachable,
+          '安卓桥接导入失败：${failures.isEmpty ? '没有可保存的源' : failures.first}',
+          detail: base,
+        );
+      }
+
+      // 4) 设备历史与白名单：最后只落一次盘。
       // `_persist` 是「写 .tmp → 删旧 → rename」，同一流程里连写两次会放大文件锁
       // 窗口（测试环境下会让 `settleIo` 的固定帧数不够用）。
-      // 因此 `_rememberDevice` 不落盘，由随后的 `authorizePeer` 一并写入。
       await _rememberDevice(
         uuid: device.uuid,
         name: device.name,
         address: device.reachableBase,
         persist: false,
       );
-      // 顺带把设备加入白名单：用户刚刚显式接入它（并在这里落盘）。
       await authorizePeer(device);
 
-      _notice = '已导入 ${conversion.siteCount} 个站点'
-          '${liveSources.isEmpty ? '' : '、${liveSources.length} 个直播源'}'
-          '（新配置记录 #$recordId，未切换当前配置）'
-          '${conversion.diagnostics.isEmpty ? '' : '；${conversion.diagnostics.first}'}';
+      _importRecordIds = List.unmodifiable(savedIds);
+      // 供 UI 在导入后询问「是否切换到该配置」（单源重拉时就是该源）。
+      _lastImportRecordId = savedIds.first;
+      _notice = '已从 ${_hostOf(base)} 导入 ${savedIds.length} 个播放源'
+          '（$totalSites 个站点${totalLive == 0 ? '' : '、$totalLive 个直播源'}）'
+          '${failures.isEmpty ? '' : '；${failures.length} 个源失败：${failures.first}'}';
       _lastOperation =
-          'bridge-import sites=${conversion.siteCount} '
-          'lives=${liveSources.length} '
-          'skipped=${conversion.skippedSites.length} '
-          'rewrites=${conversion.hostRewrites.length}';
+          'bridge-import sources=${savedIds.length}/${targets.length} '
+          'sites=$totalSites lives=$totalLive failed=${failures.length}';
       log.info(
-        '安卓桥接导入完成 sites=${conversion.siteCount} '
-        'lives=${liveSources.length} '
-        'skipped=${conversion.skippedSites.length} '
-        'rewrites=${conversion.hostRewrites.length} record=$recordId',
+        '安卓桥接导入完成 sources=${savedIds.length}/${targets.length} '
+        'sites=$totalSites lives=$totalLive failed=${failures.length} '
+        'records=${savedIds.join(",")}',
         scope: 'bridge',
       );
       return true;
@@ -1256,6 +1398,75 @@ class SyncState extends ChangeNotifier {
       _stage = null;
       notifyListeners();
     }
+  }
+
+  /// 老安卓退路：没有 `/manage/configs` 时只能拉当前激活源。
+  Future<bool> _importActiveSourceOnly(
+    String base,
+    AndroidDevice device,
+    String? selfBase,
+    AndroidSourceCatalog catalog,
+  ) async {
+    _stage = BridgeStage.fetchingConfig;
+    notifyListeners();
+    final conversion = await _bridge.fetchGatewayConfig(
+      base,
+      selfBase: selfBase,
+      onStage: (stage) {
+        _stage = stage;
+        notifyListeners();
+      },
+    );
+    _conversions = {..._conversions, base: conversion};
+    final liveSources = await _bridge.fetchLiveSources(base);
+    final bridgedConfig = liveSources.isEmpty
+        ? conversion.config
+        : conversion.config.copyWith(lives: liveSources);
+    // 老安卓拿不到 interfaceKey：记录不带 sourceKey，去重退回按 origin（老语义）。
+    final recordId = await host.saveBridgeConfig(
+      name: bridgedConfig.name ?? '安卓桥接（${_hostOf(base)}）',
+      origin: base,
+      config: bridgedConfig,
+      diagnostics: [...catalog.diagnostics, ...conversion.diagnostics],
+    );
+    if (recordId == null) {
+      throw AppError(
+        AppErrorKind.storage,
+        '导入成功但保存配置记录失败（数据库不可用）',
+        detail: base,
+      );
+    }
+    _lastImportRecordId = recordId;
+    _importRecordIds = List.unmodifiable([recordId]);
+    await _rememberDevice(
+      uuid: device.uuid,
+      name: device.name,
+      address: device.reachableBase,
+      persist: false,
+    );
+    await authorizePeer(device);
+    _notice = '已导入 ${conversion.siteCount} 个站点'
+        '${liveSources.isEmpty ? '' : '、${liveSources.length} 个直播源'}'
+        '（新配置记录 #$recordId，未切换当前配置）'
+        '${conversion.diagnostics.isEmpty ? '' : '；${conversion.diagnostics.first}'}';
+    _lastOperation =
+        'bridge-import sites=${conversion.siteCount} '
+        'lives=${liveSources.length} '
+        'skipped=${conversion.skippedSites.length} '
+        'rewrites=${conversion.hostRewrites.length}';
+    log.info(
+      '安卓桥接导入完成（老安卓，仅当前源） sites=${conversion.siteCount} '
+      'lives=${liveSources.length} record=$recordId',
+      scope: 'bridge',
+    );
+    return true;
+  }
+
+  /// 取 host:port 用于提示文案。
+  static String _hostOf(String base) {
+    final uri = Uri.tryParse(base);
+    if (uri == null || uri.host.isEmpty) return base;
+    return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
   }
 
   // ------------------------------------------------------------------ 推送
@@ -1385,8 +1596,8 @@ class SyncState extends ChangeNotifier {
     deviceName: _deviceName,
     isEnabled: () => _serverEnabled,
     isPeerAuthorized: isPeerAuthorized,
-    onHistory: (parsed) async {
-      final stats = _mergeHistory(parsed);
+    onHistory: (parsed, {String sourceKey = ''}) async {
+      final stats = _mergeHistory(parsed, sourceKey: sourceKey);
       _recordMerge('history', stats);
       return stats;
     },
@@ -1496,7 +1707,14 @@ class SyncState extends ChangeNotifier {
     return result;
   }
 
-  SyncMergeStats _mergeHistory(SyncHistoryParseResult parsed) {
+  /// 把对端推来的一批历史合并进本地。
+  ///
+  /// [sourceKey] 非空时**整体限定在该源内**：既只和该源已有记录比对，
+  /// 写回也带该源标识。否则一台设备上的多个源会互相覆盖（站点 key 重复）。
+  SyncMergeStats _mergeHistory(
+    SyncHistoryParseResult parsed, {
+    String sourceKey = '',
+  }) {
     final database = host.syncDatabase;
     if (database == null) {
       return SyncMergeStats(
@@ -1508,10 +1726,10 @@ class SyncState extends ChangeNotifier {
     }
     final plan = buildHistoryMergePlan(
       parsed: parsed,
-      localByMatchKey: database.historySyncIndex(),
-      deletedAtByMatchKey: database.historyDeletionIndex(),
+      localByMatchKey: database.historySyncIndex(sourceKey: sourceKey),
+      deletedAtByMatchKey: database.historyDeletionIndex(sourceKey: sourceKey),
     );
-    return database.applyHistoryMerge(plan);
+    return database.applyHistoryMerge(plan, sourceKey: sourceKey);
   }
 
   SyncMergeStats _mergeKeep(SyncFavoriteParseResult parsed) {

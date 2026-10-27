@@ -64,6 +64,7 @@ class _FakeBridge extends AndroidBridgeService {
   Future<BridgeConversion> fetchGatewayConfig(
     String base, {
     String? selfBase,
+    String? interfaceKey,
     void Function(BridgeStage stage)? onStage,
   }) async {
     onStage?.call(BridgeStage.converting);

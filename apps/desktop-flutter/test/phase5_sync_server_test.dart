@@ -69,7 +69,7 @@ class TestHost {
     deviceName: 'WebHTV PC（测试）',
     isEnabled: () => enabled,
     isPeerAuthorized: (identity) => authorizeAll || authorized.contains(identity),
-    onHistory: (parsed) async {
+    onHistory: (parsed, {String sourceKey = ''}) async {
       final plan = buildHistoryMergePlan(
         parsed: parsed,
         localByMatchKey: db.historySyncIndex(),

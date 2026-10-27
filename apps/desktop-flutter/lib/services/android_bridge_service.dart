@@ -17,6 +17,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import '../core/android_bridge.dart';
+import '../core/android_sources.dart';
 import '../core/app_error.dart';
 import '../core/protocol.dart';
 import 'log_service.dart';
@@ -25,6 +26,9 @@ import 'log_service.dart';
 enum BridgeStage {
   /// 正在校验设备（`/device`）。
   probingDevice,
+
+  /// 正在拉取源清单（`/manage/configs`）。
+  fetchingSources,
 
   /// 正在拉取站点清单（`/vod/api?ac=config`）。
   fetchingConfig,
@@ -98,15 +102,28 @@ class AndroidBridgeService {
   /// 拉取并转换 T4 站点清单（`design/01` §5）。
   ///
   /// [selfBase] 为 PC 自己监听的地址（可选），用于 P4 自引用防护。
+  ///
+  /// [interfaceKey] 指定要取**哪一个**源（安卓 `Config.interfaceKey`）。
+  /// 为空时取设备**当前激活**的源——这是老安卓（不支持 `configKey`）的
+  /// 唯一可用路径，因此不能因为参数缺失就报错。
+  ///
+  /// 关键：带 [interfaceKey] 的请求是**只读**的，网关按该源渲染站点清单，
+  /// **不会**切换安卓的激活配置（方案 B 的核心保证，见 `VodApi` 的
+  /// `ac=config&configKey=` 分支）。
   Future<BridgeConversion> fetchGatewayConfig(
     String base, {
     String? selfBase,
+    String? interfaceKey,
     void Function(BridgeStage stage)? onStage,
   }) async {
     final normalized = normalizeBase(base);
+    final key = interfaceKey?.trim() ?? '';
     onStage?.call(BridgeStage.fetchingConfig);
+    final query = key.isEmpty
+        ? 'ac=config'
+        : 'ac=config&configKey=${Uri.encodeQueryComponent(key)}';
     final body = await _getText(
-      Uri.parse('$normalized/vod/api?ac=config'),
+      Uri.parse('$normalized/vod/api?$query'),
       base: normalized,
       timeout: timeout,
       notFoundKind: AppErrorKind.bridgeNoGateway,
@@ -122,9 +139,40 @@ class AndroidBridgeService {
     _logInfo(
       '安卓桥接：拉取站点 sites=${conversion.siteCount} '
       'rewrites=${conversion.hostRewrites.length} '
-      'skipped=${conversion.skippedSites.length} base=$normalized',
+      'skipped=${conversion.skippedSites.length} '
+      'base=$normalized${key.isEmpty ? '' : ' configKey=${key.length <= 8 ? key : key.substring(0, 8)}'}',
     );
     return conversion;
+  }
+
+  /// 拉取设备上的**全部点播源**（`/manage/configs`，方案 B §4.3）。
+  ///
+  /// 为什么不能靠 `/vod/api?ac=config`：那条端点只返回**当前激活**的源，
+  /// 而用户要的是「把安卓版的所有源都拉过来并支持切换」。
+  ///
+  /// 404 按「安卓版本过旧」处理（老版本没有 `/manage/configs`），
+  /// 由调用方降级为「只导入当前激活源」；其它错误照常抛，不折叠成空列表。
+  Future<AndroidSourceCatalog> fetchSources(String base) async {
+    final normalized = normalizeBase(base);
+    final body = await _getText(
+      Uri.parse('$normalized/manage/configs'),
+      base: normalized,
+      timeout: timeout,
+      notFoundKind: AppErrorKind.bridgeNoGateway,
+      notFoundMessage: '安卓设备版本过旧：缺少配置清单接口（/manage/configs 不存在）',
+    );
+    final catalog = parseAndroidSources(
+      _decodeJson(body, normalized),
+      base: normalized,
+    );
+    _logInfo(
+      '安卓桥接：拉取配置清单 sources=${catalog.sources.length} '
+      'active=${catalog.active?.shortKey ?? '-'} base=$normalized',
+    );
+    for (final note in catalog.diagnostics) {
+      _logWarning('安卓桥接：$note');
+    }
+    return catalog;
   }
 
   /// 拉取安卓设备**当前启用的直播源**（`lives`）。

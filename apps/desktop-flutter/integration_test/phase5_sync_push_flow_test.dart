@@ -78,7 +78,10 @@ void main() {
       ('demo-003', '端到端剧集三', 'http://127.0.0.1:18080/media/ep-3.m3u8', 2700000),
     ];
     for (final (vodId, name, episodeUrl, position) in rows) {
+      // 多源化后历史按源归属：这里显式指定 sourceKey = 当前激活源，
+      // 否则空串行在非全局视图下不可见（见 design/04 4.4 节）。
       state.database!.upsertHistory(
+        sourceKey: state.activeSourceKey,
         siteKey: 'csp_Media',
         vodId: vodId,
         vodName: name,
@@ -101,10 +104,16 @@ void main() {
     // 导入站点会产生以 fixture 为 origin 的配置记录，从而让
     // `syncConfigJson()` 能给出与"安卓当前配置"一致的 url（否则推送会被
     // 主动拒绝——那是设计行为，见 `design/02` §3.5）。
+    // 多源化后 fixture 有两个点播源，各成一条记录（`design/04` §4.3），
+    // 这里固定激活 A 源，好让推送载荷的 `configKey` 可预期。
     await tester.runAsync(
       () => state.syncState.importSites('127.0.0.1:18080'),
     );
-    final record = state.database!.listConfigs().single;
+    final imported = state.database!.listConfigs();
+    expect(imported, hasLength(2), reason: '多源导入应各成一条记录');
+    final record = imported.firstWhere(
+      (item) => item.bridgeInterfaceKey == 'fixture-vod-a',
+    );
     await tester.runAsync(() => state.activateConfigRecord(record.id));
     await tester.runAsync(() => state.syncState.setPushEnabled(true));
     expect(state.syncState.pushEnabled, isTrue);

@@ -50,9 +50,10 @@ Android 侧的接口已经存在、已经跑起来，PC 只能被动适配它的
 | 01 | `01-android-t4-site-bridge.md` | T4 网关契约、Host 头派生地址、设备探测、配置转换、自引用防护、站点保真 | `VodApi.java`、`docs/C45-t4-api-gateway.md`、`Server.java`、`ScanTask.java` |
 | 02 | `02-android-sync-protocol.md` | `/device`、`/action?do=sync`、`Backup` 形态、历史映射、PC 侧服务端、默认关闭与失败隔离 | `Action.java`、`Backup.java`、`History.java`、`PlaybackProgressWriter.java` |
 | 03 | `03-bridge-test-and-acceptance.md` | 三层测试、fixture、门禁表、一键验收、证据落盘 | Phase 1–4 的门禁与证据机制 |
+| 04 | `04-bridge-multisource.md` | 多源化（方案 B）：`configKey` 端点、无副作用解析、历史按源隔离与全局开关、推送落源、修掉「新增桥接源」 | `VodApi.java`、`Manage.java`、`Action.java`、`History.java` |
 | — | `../README.md` | Phase 5 阶段计划与门禁表 | `docs/phase4/README.md` |
 
-阅读顺序建议：00 → 01 → 02 → 03 → `../README.md`。
+阅读顺序建议：00 → 01 → 02 → 03 → 04 → `../README.md`。
 只关心"怎么把安卓的站源接进来"的读者可直接读 01 §3–§5；
 只关心"历史怎么共用"的读者可直接读 02 §3–§6。
 
@@ -268,6 +269,7 @@ PC **不**在本地重新实现 Android 的站源执行。Android 上加载的 T
 | `02` §3 同步协议 | §21 Phase 5（配置/历史/收藏同步）、§15 历史与续播 |
 | `02` §5 默认关闭 | §22.5 发布门禁、§19 安全与隐私 |
 | `03` 测试与验收 | §19 测试策略、§22 总验收清单 |
+| `04` 多源化（方案 B） | §28 安卓桥接（多源取站点、按源隔离历史、推送落源） |
 
 ---
 
@@ -281,6 +283,9 @@ PC **不**在本地重新实现 Android 的站源执行。Android 上加载的 T
 | **推送 / 接收** | 同步方向：推送 = PC → Android（走 Android 的 `/action?do=sync&mode=1`）；接收 = Android → PC（走 PC 自己实现的服务端） |
 | **对端** | 用户显式添加并确认的一台 Android 设备（以 `uuid` 唯一标识） |
 | **快照（snapshot）** | 一次同步传输的完整数据体（历史列表或备份 JSON），不是增量流 |
+| **源标识（sourceKey）** | PC 侧对「一份配置」的稳定坐标：`local|<origin>` 或 `bridge|<deviceUuid>|<interfaceKey>`；历史分区与推送落源都以它为准（`04` §4.1） |
+| **历史范围（historyScope）** | 历史页的可见范围：`source` 只看当前源（默认）/ `global` 看全部源。**PC 本地偏好，不写回安卓**（`04` §4.4） |
+| **configKey** | 安卓 `Config.interfaceKey` 在 HTTP 层的传递名：`/vod/api?ac=config&configKey=<k>` 取指定源站点，`/action` 的表单 `config` 里带它则按该源写库（`04` §2.2） |
 
 ---
 
@@ -298,3 +303,8 @@ PC **不**在本地重新实现 Android 的站源执行。Android 上加载的 T
 | Q8 | `tmdb_config` 等含凭据的设置是否默认同步？ | **不默认**，需单独确认 | §5 取舍表；§19 安全与隐私 |
 | Q9 | 删除历史是否向 Android 传播？ | **本阶段不写墓碑**，只保证不复活 | §5 取舍表 |
 | Q10 | 桥接配置是否覆盖当前配置？ | **不覆盖**，作为新配置记录导入 | P3；§7.4.1 导入即切换语义 |
+| Q11 | 桥接只取安卓当前激活源，还是取全部点播源？ | **全部**：`/manage/configs` 列源 + `configKey` 逐个取站点；切换只切 PC 本地 | `04`；用户诉求"桥接后应该是把安卓版的所有源都拉取过来并支持切换" |
+| Q12 | 历史默认按源隔离还是全局？ | **默认按源隔离**（`source`），另给开关看全局 | `04` §4.4；两源同名 `siteKey` 会互相串进度 |
+| Q13 | 推送历史如何落到对应源？ | 载荷带 `configKey`，安卓按 cid 写库：**不切源、不新增 `Config` 行** | `04` §2.2/§3.4；`Action.syncHistory` 源码 |
+| Q14 | 为写历史而切换安卓当前源，可以吗？ | **不可以**：安卓只是运行容器，跨设备操作一律不得改变它的激活配置 | `04` §2.1；用户选型原话 |
+| Q15 | 历史范围开关是否写回安卓 `global_history_mode`？ | **不写回**，是 PC 本地偏好 | `04` §4.4；安卓只是容器 |

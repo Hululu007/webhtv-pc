@@ -38,6 +38,7 @@ class PlaybackHistory {
     required this.durationMs,
     required this.updatedAt,
     this.completed = false,
+    this.sourceKey = '',
   });
 
   final int id;
@@ -52,6 +53,12 @@ class PlaybackHistory {
   final int durationMs;
   final int updatedAt;
   final bool completed;
+
+  /// 记录归属的播放源（见 core/source_key.dart）。
+  ///
+  /// 空串表示「迁移前/来源不明」：查询时对所有源可见，
+  /// 保证升级后既有历史不凭空消失；下一次写入会重写成具体源。
+  final String sourceKey;
 
   double get progress {
     if (durationMs <= 0) return 0;
@@ -74,6 +81,7 @@ class PlaybackHistory {
     durationMs: row['duration_ms'] as int,
     updatedAt: row['updated_at'] as int,
     completed: (row['completed'] as int) != 0,
+    sourceKey: (row['source_key'] as String?) ?? '',
   );
 }
 
@@ -124,6 +132,10 @@ class ConfigRecord {
     this.repositoryEntries = const [],
     this.json = const {},
     this.isActive = false,
+    this.sourceKey = '',
+    this.bridgeDevice = '',
+    this.bridgeInterfaceKey = '',
+    this.bridgeConfigUrl = '',
   });
 
   final int id;
@@ -139,6 +151,23 @@ class ConfigRecord {
   /// 完整配置 JSON，用于重启后恢复（未知字段原样保留）。
   final Map<String, Object?> json;
   final bool isActive;
+
+  /// 播放源身份（见 core/source_key.dart）。
+  /// 桥接源形如 `bridge|<deviceUuid>|<interfaceKey>`，本机源形如 `local|<origin>`。
+  final String sourceKey;
+
+  /// 桥接设备地址（仅桥接源非空）。
+  final String bridgeDevice;
+
+  /// 安卓端 Config.interfaceKey（仅桥接源非空；空值表示旧协议记录）。
+  final String bridgeInterfaceKey;
+
+  /// 该源在安卓端的真实配置地址（/vod/api?ac=config&configKey=...）。
+  ///
+  /// 推送历史必须发这个值：空值表示不知道该源的安卓地址，
+  /// 宁可不推送也不能发设备网关地址——安卓 Config.find 查不到就会 insert，
+  /// 凭空多出一行「桥接源」。
+  final String bridgeConfigUrl;
 
   AppConfig? get config => json.isEmpty ? null : _decode(json);
 
@@ -173,6 +202,10 @@ class ConfigRecord {
           ? const {}
           : (jsonDecode(rawJson) as Map).cast<String, Object?>(),
       isActive: (row['is_active'] as int? ?? 0) != 0,
+      sourceKey: (row['source_key'] as String?) ?? '',
+      bridgeDevice: (row['bridge_device'] as String?) ?? '',
+      bridgeInterfaceKey: (row['bridge_interface_key'] as String?) ?? '',
+      bridgeConfigUrl: (row['bridge_config_url'] as String?) ?? '',
     );
   }
 }
@@ -250,11 +283,15 @@ class AppDatabase {
   /// - `3` → `4`：Phase 9 新增 `skip_segments`（片头片尾）、`subtitle_match`
   ///   与 `danmaku_match`（字幕/弹幕匹配记忆），见 `docs/phase9/design/01`–`02`；
   /// - `4` → `5`：Phase 9 站点注入（`injected_sites`），见 `README.md` P1-2；
-  /// - `5` → `6`：Phase 9 追番（`following`），见 `README.md` P2-1。
+  /// - `5` → `6`：Phase 9 追番（`following`），见 `README.md` P2-1；
+  /// - `6` → `7`：播放源身份（`source_key`）。`configs` 加法式加列；
+  ///   `history` 与 `history_deletions` 需要**重建表**——唯一键要从
+  ///   `(site_key, …)` 扩成 `(source_key, site_key, …)`，而 SQLite 不能
+  ///   `ALTER` 唯一约束。重建前先留 `history_backup_v6` 底表。
   ///
-  /// 升级都是**加法式**（`CREATE TABLE IF NOT EXISTS`）：旧库打开后
-  /// 自动获得新表且不丢数据，无需分支式升级逻辑。
-  static const int schemaVersion = 6;
+  /// 除 v7 的两张表之外，升级都是**加法式**（`CREATE TABLE IF NOT EXISTS`）：
+  /// 旧库打开后自动获得新表且不丢数据，无需分支式升级逻辑。
+  static const int schemaVersion = 7;
 
   /// 打开数据库；失败返回错误原因而不是抛出，保证启动不被阻塞（§16.3）。
   static StoreOpenResult open(String path) {
@@ -316,6 +353,7 @@ class AppDatabase {
     _db.execute('''
       CREATE TABLE IF NOT EXISTS history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_key TEXT NOT NULL DEFAULT '',
         site_key TEXT NOT NULL,
         vod_id TEXT NOT NULL,
         vod_name TEXT NOT NULL,
@@ -327,7 +365,7 @@ class AppDatabase {
         duration_ms INTEGER NOT NULL DEFAULT 0,
         completed INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL,
-        UNIQUE(site_key, vod_id, flag, episode_id)
+        UNIQUE(source_key, site_key, vod_id, flag, episode_id)
       );
     ''');
     _db.execute(
@@ -384,6 +422,7 @@ class AppDatabase {
     _migratePlaybackExtras();
     _migrateSiteInjection();
     _migrateFollowing();
+    _migrateSources();
     _db.execute(
       "INSERT INTO meta(key, value) VALUES('schema_version', '$schemaVersion') "
       'ON CONFLICT(key) DO UPDATE SET value=excluded.value;',
@@ -404,12 +443,14 @@ class AppDatabase {
   void _migrateSync() {
     _db.execute('''
       CREATE TABLE IF NOT EXISTS history_deletions (
-        match_key TEXT PRIMARY KEY,
+        source_key TEXT NOT NULL DEFAULT '',
+        match_key TEXT NOT NULL,
         site_key TEXT NOT NULL DEFAULT '',
         vod_id TEXT NOT NULL DEFAULT '',
         flag TEXT NOT NULL DEFAULT '',
         episode_id TEXT NOT NULL DEFAULT '',
-        deleted_at INTEGER NOT NULL
+        deleted_at INTEGER NOT NULL,
+        PRIMARY KEY(source_key, match_key)
       );
     ''');
     _db.execute(
@@ -638,6 +679,142 @@ class AppDatabase {
     );
   }
 
+  /// 6 → 7 · 播放源身份（`source_key`）。
+  ///
+  /// ## 为什么要重建 `history`
+  ///
+  /// 桥接多个源之后，两个源可以有**同名 `site_key`**（T4 站点 key 由源自己
+  /// 定义，跨源不唯一）。旧的 `UNIQUE(site_key, vod_id, flag, episode_id)`
+  /// 会让两个源的同一条记录互相覆盖——用户会看到「在看 A 源，B 源的进度被改了」。
+  ///
+  /// 唯一键必须变成 `(source_key, site_key, vod_id, flag, episode_id)`，
+  /// 而 SQLite 无法 `ALTER` 唯一约束，只能「建新表 → 搬数据 → 换名」。
+  ///
+  /// ## 为什么先留底表
+  ///
+  /// `DROP TABLE` 之后数据就只剩一份。先 `CREATE TABLE history_backup_v6`
+  /// 把 V6 的行原样存下来，迁移半途失败也能人工取证/回填。
+  ///
+  /// 全部步骤幂等：按 `PRAGMA table_info` 判断，重复打开旧库不会重复重建。
+  void _migrateSources() {
+    _addConfigColumn('source_key', "TEXT NOT NULL DEFAULT ''");
+    _addConfigColumn('bridge_device', "TEXT NOT NULL DEFAULT ''");
+    _addConfigColumn('bridge_interface_key', "TEXT NOT NULL DEFAULT ''");
+    _addConfigColumn('bridge_config_url', "TEXT NOT NULL DEFAULT ''");
+    _rebuildHistoryWithSourceKey();
+    _rebuildHistoryDeletionsWithSourceKey();
+  }
+
+  /// 加法式加列：列已存在则跳过（`ALTER TABLE` 不能重复执行）。
+  void _addConfigColumn(String name, String declaration) {
+    final columns = _columnsOf('configs');
+    if (columns.contains(name)) return;
+    _db.execute('ALTER TABLE configs ADD COLUMN $name $declaration;');
+  }
+
+  Set<String> _columnsOf(String table) => _db
+      .select('PRAGMA table_info($table);')
+      .map((row) => row['name'] as String)
+      .toSet();
+
+  /// `history` 重建：唯一键加入 `source_key`。
+  void _rebuildHistoryWithSourceKey() {
+    if (_columnsOf('history').contains('source_key')) return;
+    _db.execute('BEGIN IMMEDIATE;');
+    try {
+      _db.execute('CREATE TABLE history_backup_v6 AS SELECT * FROM history;');
+      _db.execute('''
+        CREATE TABLE history_v7 (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_key TEXT NOT NULL DEFAULT '',
+          site_key TEXT NOT NULL,
+          vod_id TEXT NOT NULL,
+          vod_name TEXT NOT NULL,
+          vod_pic TEXT,
+          flag TEXT NOT NULL DEFAULT '',
+          episode_name TEXT NOT NULL DEFAULT '',
+          episode_id TEXT NOT NULL DEFAULT '',
+          position_ms INTEGER NOT NULL DEFAULT 0,
+          duration_ms INTEGER NOT NULL DEFAULT 0,
+          completed INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(source_key, site_key, vod_id, flag, episode_id)
+        );
+      ''');
+      _db.execute('''
+        INSERT INTO history_v7(
+          id, source_key, site_key, vod_id, vod_name, vod_pic, flag,
+          episode_name, episode_id, position_ms, duration_ms, completed,
+          updated_at)
+        SELECT id, '', site_key, vod_id, vod_name, vod_pic, flag,
+          episode_name, episode_id, position_ms, duration_ms, completed,
+          updated_at
+        FROM history;
+      ''');
+      _db.execute('DROP TABLE history;');
+      _db.execute('ALTER TABLE history_v7 RENAME TO history;');
+      // `DROP TABLE` 会连带删掉旧索引，重建一次。
+      _db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_history_updated '
+        'ON history(updated_at DESC);',
+      );
+      _db.execute('COMMIT;');
+    } catch (error) {
+      _db.execute('ROLLBACK;');
+      throw AppError(
+        AppErrorKind.storage,
+        '升级历史表（按源隔离）失败',
+        detail: '$error',
+        cause: error,
+      );
+    }
+  }
+
+  /// `history_deletions` 重建：删除墓碑也必须按源隔离。
+  ///
+  /// 不隔离的话，在 A 源删掉一条记录会连 B 源同 key 的记录一起挡住
+  /// （墓碑键是 `siteKey\0vodId\0flag\0episodeId`，不含源）。
+  void _rebuildHistoryDeletionsWithSourceKey() {
+    if (_columnsOf('history_deletions').contains('source_key')) return;
+    _db.execute('BEGIN IMMEDIATE;');
+    try {
+      _db.execute('''
+        CREATE TABLE history_deletions_v7 (
+          source_key TEXT NOT NULL DEFAULT '',
+          match_key TEXT NOT NULL,
+          site_key TEXT NOT NULL DEFAULT '',
+          vod_id TEXT NOT NULL DEFAULT '',
+          flag TEXT NOT NULL DEFAULT '',
+          episode_id TEXT NOT NULL DEFAULT '',
+          deleted_at INTEGER NOT NULL,
+          PRIMARY KEY(source_key, match_key)
+        );
+      ''');
+      _db.execute('''
+        INSERT INTO history_deletions_v7(
+          source_key, match_key, site_key, vod_id, flag, episode_id,
+          deleted_at)
+        SELECT '', match_key, site_key, vod_id, flag, episode_id, deleted_at
+        FROM history_deletions;
+      ''');
+      _db.execute('DROP TABLE history_deletions;');
+      _db.execute('ALTER TABLE history_deletions_v7 RENAME TO history_deletions;');
+      _db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_history_deletions_at '
+        'ON history_deletions(deleted_at DESC);',
+      );
+      _db.execute('COMMIT;');
+    } catch (error) {
+      _db.execute('ROLLBACK;');
+      throw AppError(
+        AppErrorKind.storage,
+        '升级删除标记表（按源隔离）失败',
+        detail: '$error',
+        cause: error,
+      );
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 追番（Phase 9 P2-1）
   // -------------------------------------------------------------------------
@@ -790,7 +967,14 @@ class AppDatabase {
   // 配置
   // -------------------------------------------------------------------------
 
-  /// 保存或更新配置记录。同一 `origin` 的重复导入按新版本覆盖（§7.5）。
+  /// 保存或更新配置记录。
+  ///
+  /// ## 去重键：优先 `source_key`，退化为 `origin`
+  ///
+  /// 单机源（`local|<origin>`）的 `origin` 就是配置地址，天然唯一。
+  /// **桥接源不行**：同一台安卓设备上的多个源 `origin` 全是设备网关地址，
+  /// 按 `origin` 去重会让第二个源覆盖掉第一个——用户看到「导入后只有最后一个
+  /// 源」。所以调用方给出了 [sourceKey] 时按它去重，未给出时才退回旧语义（§7.5）。
   int saveConfig({
     required String name,
     required String origin,
@@ -801,42 +985,31 @@ class AppDatabase {
     int siteCount = 0,
     int liveCount = 0,
     bool makeActive = true,
+    String sourceKey = '',
+    String bridgeDevice = '',
+    String bridgeInterfaceKey = '',
+    String bridgeConfigUrl = '',
   }) {
     final now = DateTime.now().millisecondsSinceEpoch;
     _db.execute('BEGIN IMMEDIATE;');
     try {
-      final existing = _db.select(
-        'SELECT id FROM configs WHERE origin = ? LIMIT 1;',
-        [origin],
-      );
+      final existing = sourceKey.isEmpty
+          ? _db.select(
+              'SELECT id FROM configs WHERE origin = ? LIMIT 1;',
+              [origin],
+            )
+          : _db.select(
+              'SELECT id FROM configs WHERE source_key = ? LIMIT 1;',
+              [sourceKey],
+            );
       int id;
       if (existing.isNotEmpty) {
         id = existing.first['id'] as int;
         _db.execute(
-          'UPDATE configs SET name=?, content_type=?, repository_index=?, '
-          'repository_entries=?, json=?, site_count=?, live_count=?, '
-          'updated_at=? WHERE id=?;',
-          [
-            name,
-            contentType,
-            repositoryIndex,
-            repositoryEntries.isEmpty
-                ? null
-                : jsonEncode(
-                    repositoryEntries.map((e) => e.toJson()).toList(),
-                  ),
-            jsonEncode(json),
-            siteCount,
-            liveCount,
-            now,
-            id,
-          ],
-        );
-      } else {
-        _db.execute(
-          'INSERT INTO configs(name, origin, content_type, repository_index, '
-          'repository_entries, json, site_count, live_count, is_active, '
-          'updated_at) VALUES(?,?,?,?,?,?,?,?,0,?);',
+          'UPDATE configs SET name=?, origin=?, content_type=?, '
+          'repository_index=?, repository_entries=?, json=?, site_count=?, '
+          'live_count=?, updated_at=?, source_key=?, bridge_device=?, '
+          'bridge_interface_key=?, bridge_config_url=? WHERE id=?;',
           [
             name,
             origin,
@@ -851,6 +1024,37 @@ class AppDatabase {
             siteCount,
             liveCount,
             now,
+            sourceKey,
+            bridgeDevice,
+            bridgeInterfaceKey,
+            bridgeConfigUrl,
+            id,
+          ],
+        );
+      } else {
+        _db.execute(
+          'INSERT INTO configs(name, origin, content_type, repository_index, '
+          'repository_entries, json, site_count, live_count, is_active, '
+          'updated_at, source_key, bridge_device, bridge_interface_key, '
+          'bridge_config_url) VALUES(?,?,?,?,?,?,?,?,0,?,?,?,?,?);',
+          [
+            name,
+            origin,
+            contentType,
+            repositoryIndex,
+            repositoryEntries.isEmpty
+                ? null
+                : jsonEncode(
+                    repositoryEntries.map((e) => e.toJson()).toList(),
+                  ),
+            jsonEncode(json),
+            siteCount,
+            liveCount,
+            now,
+            sourceKey,
+            bridgeDevice,
+            bridgeInterfaceKey,
+            bridgeConfigUrl,
           ],
         );
         id = _db.lastInsertRowId;
@@ -903,6 +1107,16 @@ class AppDatabase {
     _db.execute('DELETE FROM configs WHERE id = ?;', [id]);
   }
 
+  /// 按 `source_key` 查配置记录（桥接源的身份查询）。
+  ConfigRecord? configBySourceKey(String sourceKey) {
+    if (sourceKey.isEmpty) return null;
+    final rows = _db.select(
+      'SELECT * FROM configs WHERE source_key = ? LIMIT 1;',
+      [sourceKey],
+    );
+    return rows.isEmpty ? null : ConfigRecord.fromRow(rows.first);
+  }
+
   /// 站点状态：只保存 header 键名，不保存值（§16.3 敏感 Header 不明文入库）。
   void saveConfigSites(int configId, Iterable<Site> sites) {
     _db.execute('DELETE FROM config_sites WHERE config_id = ?;', [configId]);
@@ -948,20 +1162,34 @@ class AppDatabase {
     int? updatedAt,
     int? openingMs,
     int? endingMs,
+    String sourceKey = '',
   }) {
     final isCompleted =
         completed ??
         (durationMs > 0 && positionMs >= durationMs - 5000);
+    // 迁移前的记录 `source_key` 为空串（对所有源可见）。首次以具体源写回时
+    // 把它**收编**为该源的行，而不是新增一行——否则用户升级后会看到两条
+    // 一模一样的记录。收编后旧的空串墓碑也要清掉，否则它会挡住这条记录。
+    if (sourceKey.isNotEmpty) {
+      _adoptLegacyHistoryRow(
+        sourceKey: sourceKey,
+        siteKey: siteKey,
+        vodId: vodId,
+        flag: flag,
+        episodeId: episodeId,
+      );
+    }
     _db.execute(
-      'INSERT INTO history(site_key, vod_id, vod_name, vod_pic, flag, '
-      'episode_name, episode_id, position_ms, duration_ms, completed, updated_at) '
-      'VALUES(?,?,?,?,?,?,?,?,?,?,?) '
-      'ON CONFLICT(site_key, vod_id, flag, episode_id) DO UPDATE SET '
+      'INSERT INTO history(source_key, site_key, vod_id, vod_name, vod_pic, '
+      'flag, episode_name, episode_id, position_ms, duration_ms, completed, '
+      'updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) '
+      'ON CONFLICT(source_key, site_key, vod_id, flag, episode_id) DO UPDATE SET '
       'vod_name=excluded.vod_name, vod_pic=excluded.vod_pic, '
       'episode_name=excluded.episode_name, position_ms=excluded.position_ms, '
       'duration_ms=excluded.duration_ms, completed=excluded.completed, '
       'updated_at=excluded.updated_at;',
       [
+        sourceKey,
         siteKey,
         vodId,
         vodName,
@@ -982,37 +1210,71 @@ class AppDatabase {
     // 写入即意味着这条记录重新存在，删除标记不再有意义。
     // `openingMs` / `endingMs` 目前只用于本地播放器行为，不入本表
     // （PC 有独立的 open/end 设置），此处接收只为签名向后兼容与调用方对称。
-    _forgetHistoryDeletion(
-      SyncHistoryItem.fromLocal(
-        siteKey: siteKey,
-        vodId: vodId,
-        vodName: vodName,
-        flag: flag,
-        episodeName: episodeName,
-        episodeId: episodeId,
-        positionMs: positionMs,
-        durationMs: durationMs,
-        updatedAt: updatedAt ?? DateTime.now().millisecondsSinceEpoch,
-      ).matchKey,
+    final matchKey = SyncHistoryItem.fromLocal(
+      siteKey: siteKey,
+      vodId: vodId,
+      vodName: vodName,
+      flag: flag,
+      episodeName: episodeName,
+      episodeId: episodeId,
+      positionMs: positionMs,
+      durationMs: durationMs,
+      updatedAt: updatedAt ?? DateTime.now().millisecondsSinceEpoch,
+    ).matchKey;
+    _forgetHistoryDeletion(matchKey, sourceKey: sourceKey);
+    // 收编后空串墓碑同样失效（见上）。
+    if (sourceKey.isNotEmpty) _forgetHistoryDeletion(matchKey);
+  }
+
+  /// 把迁移前的空 `source_key` 行收编为 [sourceKey]（见 [upsertHistory]）。
+  void _adoptLegacyHistoryRow({
+    required String sourceKey,
+    required String siteKey,
+    required String vodId,
+    required String flag,
+    required String episodeId,
+  }) {
+    _db.execute(
+      'UPDATE history SET source_key = ? WHERE source_key = \'\' '
+      'AND site_key = ? AND vod_id = ? AND flag = ? AND episode_id = ?;',
+      [sourceKey, siteKey, vodId, flag, episodeId],
     );
   }
 
-  List<PlaybackHistory> recentHistory({int limit = 100}) => _db
-      .select('SELECT * FROM history ORDER BY updated_at DESC LIMIT ?;', [limit])
-      .map(PlaybackHistory.fromRow)
-      .toList();
+  /// 最近历史。
+  ///
+  /// [sourceKey] 为空 = 全局视图（所有源）；非空 = 只看该源。
+  /// 默认视图里的「当前源」由 UI 层从当前激活配置推导后传进来——
+  /// 存储层不猜「哪个源是当前源」，否则同一份数据在两种上下文里会有两种含义。
+  ///
+  /// 迁移前的空 `source_key` 行在该源视图里**照样可见**（未归属 ≠ 别源），
+  /// 否则用户升级后打开当前源会看到历史凭空清空。
+  List<PlaybackHistory> recentHistory({int limit = 100, String sourceKey = ''}) =>
+      _db
+          .select(
+            'SELECT * FROM history WHERE (? = \'\' OR source_key = ? OR source_key = \'\') '
+            'ORDER BY updated_at DESC LIMIT ?;',
+            [sourceKey, sourceKey, limit],
+          )
+          .map(PlaybackHistory.fromRow)
+          .toList();
 
   /// 历史搜索：按片名与剧集名做包含匹配（§15.2）。
   ///
   /// 使用 `instr()` 而不是 `LIKE`：`instr` 是纯子串匹配，用户输入的 `%`、`_`、`\`
   /// 不会被当成通配符或转义符，也就不存在 LIKE 转义控制符写错的风险。
-  List<PlaybackHistory> searchHistory(String keyword, {int limit = 100}) {
+  List<PlaybackHistory> searchHistory(
+    String keyword, {
+    int limit = 100,
+    String sourceKey = '',
+  }) {
     return _db
         .select(
           'SELECT * FROM history '
-          'WHERE instr(vod_name, ?) > 0 OR instr(episode_name, ?) > 0 '
+          'WHERE (? = \'\' OR source_key = ? OR source_key = \'\') '
+          'AND (instr(vod_name, ?) > 0 OR instr(episode_name, ?) > 0) '
           'ORDER BY updated_at DESC LIMIT ?;',
-          [keyword, keyword, limit],
+          [sourceKey, sourceKey, keyword, keyword, limit],
         )
         .map(PlaybackHistory.fromRow)
         .toList();
@@ -1053,13 +1315,15 @@ class AppDatabase {
     String? flag,
     String? episodeId,
     String? episodeName,
+    String sourceKey = '',
   }) {
-    // ── 第 1 步：精确（旧行为，语义不变） ──
+    // ── 第 1 步：精确（旧行为，语义不变；sourceKey 为空则不按源过滤） ──
     final exact = _db.select(
       'SELECT * FROM history WHERE site_key=? AND vod_id=? '
+      'AND (? = \'\' OR source_key = ? OR source_key = \'\') '
       'AND (? IS NULL OR flag = ?) AND (? IS NULL OR episode_id = ?) '
       'ORDER BY updated_at DESC LIMIT 1;',
-      [siteKey, vodId, flag, flag, episodeId, episodeId],
+      [siteKey, vodId, sourceKey, sourceKey, flag, flag, episodeId, episodeId],
     );
     if (exact.isNotEmpty) return PlaybackHistory.fromRow(exact.first);
 
@@ -1072,16 +1336,18 @@ class AppDatabase {
     // ── 第 2 步：按集名兜底（同步记录的 episode_id 是哈希，只能靠集名对上） ──
     final byName = _db.select(
       'SELECT * FROM history WHERE site_key=? AND vod_id=? '
+      'AND (? = \'\' OR source_key = ? OR source_key = \'\') '
       'AND (? IS NULL OR flag = ?) AND episode_name = ? '
       'ORDER BY updated_at DESC LIMIT 1;',
-      [siteKey, vodId, flag, flag, name],
+      [siteKey, vodId, sourceKey, sourceKey, flag, flag, name],
     );
     return byName.isEmpty ? null : PlaybackHistory.fromRow(byName.first);
   }
 
   void deleteHistory(int id) {
     final rows = _db.select(
-      'SELECT site_key, vod_id, flag, episode_id FROM history WHERE id = ?;',
+      'SELECT source_key, site_key, vod_id, flag, episode_id '
+      'FROM history WHERE id = ?;',
       [id],
     );
     if (rows.isNotEmpty) _rememberDeletionOfRow(rows.first);
@@ -1093,13 +1359,28 @@ class AppDatabase {
   /// 同时为每条被删记录留删除标记：否则用户「清空历史」后，安卓再推来
   /// 同一批旧记录就会把它们全部复活（`docs/phase5/design/02` §4.5）。
   /// 标记是**本地行为**，不改变清空本身的可见结果。
-  void clearHistory() {
-    for (final row in _db.select(
-      'SELECT site_key, vod_id, flag, episode_id FROM history;',
-    )) {
+  void clearHistory({String sourceKey = ''}) {
+    final rows = sourceKey.isEmpty
+        ? _db.select(
+            'SELECT source_key, site_key, vod_id, flag, episode_id '
+            'FROM history;',
+          )
+        : _db.select(
+            'SELECT source_key, site_key, vod_id, flag, episode_id '
+            'FROM history WHERE source_key = ? OR source_key = \'\';',
+            [sourceKey],
+          );
+    for (final row in rows) {
       _rememberDeletionOfRow(row);
     }
-    _db.execute('DELETE FROM history;');
+    if (sourceKey.isEmpty) {
+      _db.execute('DELETE FROM history;');
+      return;
+    }
+    _db.execute(
+      'DELETE FROM history WHERE source_key = ? OR source_key = \'\';',
+      [sourceKey],
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -1110,9 +1391,9 @@ class AppDatabase {
   ///
   /// 匹配键是 `(siteKey, vodId, flag, episodeId)`，**不含 `cid`**
   /// （`design/02` §4.3）——这与 `history` 表的 `UNIQUE` 约束一致。
-  Map<String, SyncHistoryItem> historySyncIndex() {
+  Map<String, SyncHistoryItem> historySyncIndex({String sourceKey = ''}) {
     final result = <String, SyncHistoryItem>{};
-    for (final history in recentHistory(limit: 100000)) {
+    for (final history in recentHistory(limit: 100000, sourceKey: sourceKey)) {
       final item = SyncHistoryItem.fromLocal(
         siteKey: history.siteKey,
         vodId: history.vodId,
@@ -1131,10 +1412,16 @@ class AppDatabase {
   }
 
   /// 删除标记索引：合并匹配键 → 删除时刻（毫秒）。
-  Map<String, int> historyDeletionIndex() => {
-    for (final row in _db.select(
-      'SELECT match_key, deleted_at FROM history_deletions;',
-    ))
+  Map<String, int> historyDeletionIndex({String sourceKey = ''}) => {
+    for (final row in sourceKey.isEmpty
+        ? _db.select(
+            'SELECT match_key, deleted_at FROM history_deletions;',
+          )
+        : _db.select(
+            'SELECT match_key, deleted_at FROM history_deletions '
+            'WHERE source_key = ? OR source_key = \'\';',
+            [sourceKey],
+          ))
       row['match_key'] as String: row['deleted_at'] as int,
   };
 
@@ -1148,12 +1435,12 @@ class AppDatabase {
   /// - 写入使用**远端时间戳**（不用 `now()`），保住“旧不覆盖新”的判据；
   /// - 单条写入失败不回滚整批，只计入 `failed`（§4.3）；
   /// - 返回值的不变式必须是 `applied + skipped + failed == total`。
-  SyncMergeStats applyHistoryMerge(SyncMergePlan plan) {
+  SyncMergeStats applyHistoryMerge(SyncMergePlan plan, {String sourceKey = ''}) {
     var applied = 0;
     var failed = plan.failures.length;
     for (final item in plan.applied) {
       try {
-        _writeSyncHistory(item);
+        _writeSyncHistory(item, sourceKey: sourceKey);
         applied++;
       } catch (_) {
         failed++;
@@ -1168,8 +1455,9 @@ class AppDatabase {
   }
 
   /// 单条同步写入：时间戳用远端值，`completed` 按 PC 规则重算。
-  void _writeSyncHistory(SyncHistoryItem item) {
+  void _writeSyncHistory(SyncHistoryItem item, {String sourceKey = ''}) {
     upsertHistory(
+      sourceKey: sourceKey,
       siteKey: item.siteKey,
       vodId: item.vodId,
       vodName: item.vodName,
@@ -1190,12 +1478,15 @@ class AppDatabase {
     required String vodId,
     required String flag,
     required String episodeId,
+    String sourceKey = '',
   }) {
     _db.execute(
-      'INSERT INTO history_deletions(match_key, site_key, vod_id, flag, '
-      'episode_id, deleted_at) VALUES(?,?,?,?,?,?) '
-      'ON CONFLICT(match_key) DO UPDATE SET deleted_at=excluded.deleted_at;',
+      'INSERT INTO history_deletions(source_key, match_key, site_key, vod_id, '
+      'flag, episode_id, deleted_at) VALUES(?,?,?,?,?,?,?) '
+      'ON CONFLICT(source_key, match_key) DO UPDATE SET '
+      'deleted_at=excluded.deleted_at;',
       [
+        sourceKey,
         matchKey,
         siteKey,
         vodId,
@@ -1208,6 +1499,7 @@ class AppDatabase {
 
   /// 为一行（删除前的）历史记下删除标记。
   void _rememberDeletionOfRow(Row row) {
+    final sourceKey = (row['source_key'] as String?) ?? '';
     final siteKey = row['site_key'] as String;
     final vodId = row['vod_id'] as String;
     final flag = row['flag'] as String;
@@ -1228,12 +1520,15 @@ class AppDatabase {
       vodId: vodId,
       flag: flag,
       episodeId: episodeId,
+      sourceKey: sourceKey,
     );
   }
-  void _forgetHistoryDeletion(String matchKey) => _db.execute(
-    'DELETE FROM history_deletions WHERE match_key = ?;',
-    [matchKey],
-  );
+
+  void _forgetHistoryDeletion(String matchKey, {String sourceKey = ''}) =>
+      _db.execute(
+        'DELETE FROM history_deletions WHERE source_key = ? AND match_key = ?;',
+        [sourceKey, matchKey],
+      );
 
   // -------------------------------------------------------------------------
   // 收藏

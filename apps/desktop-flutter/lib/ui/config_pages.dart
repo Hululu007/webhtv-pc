@@ -713,7 +713,9 @@ class _SavedConfigs extends StatelessWidget {
             subtitle: SelectableText(
               '站点 ${record.siteCount} · 直播 ${record.liveCount} · '
               '更新 ${record.updatedAt.toLocal()} · '
-              '来源 ${redactUrl(record.origin)}',
+              // 桥接源多条记录的 origin 都是同一台设备的网关地址，
+              // 只显示它会让用户分不清谁是谁 → 补上源自己的订阅地址。
+              '${record.bridgeInterfaceKey.isEmpty ? '来源 ${redactUrl(record.origin)}' : '该设备的播放源 · ${record.bridgeConfigUrl.trim().isEmpty ? redactUrl(record.origin) : redactUrl(record.bridgeConfigUrl)}'}',
             ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
@@ -810,24 +812,27 @@ class _AndroidSettingsPageState extends State<AndroidSettingsPage> {
   /// - 当前配置本来就指向**同一台设备**（只是重复导入刷新站点，没有可切的东西）。
   Future<void> _import(AndroidDevice device) async {
     final state = widget.state;
-    final sitesBefore = state.configs.length;
     final ok = await _sync.importSites(device.reachableBase);
     if (!mounted) return;
     if (!ok) return;
 
-    final recordId = _sync.lastImportRecordId;
-    if (recordId == null) return;
+    final recordIds = _sync.importRecordIds;
+    if (recordIds.isEmpty) return;
+    // 单源时沿用原来的「是否切换」确认框；多源时让用户挑一个（或都不切）。
+    final recordId = recordIds.length == 1
+        ? recordIds.first
+        : await _pickImportedSource(device, recordIds);
+    if (!mounted || recordId == null) return;
 
     final active = state.activeRecord;
-    final sameDeviceActive =
-        active != null && normalizeBase(active.origin) == device.reachableBase;
-    if (active?.id == recordId || sameDeviceActive) return;
+    if (active?.id == recordId) return;
 
     final liveCount = state.configs
         .where((item) => item.id == recordId)
         .map((item) => item.liveCount)
         .firstOrNull;
-    final siteCount = _sync.conversionFor(device.reachableBase)?.siteCount ?? 0;
+    final record = state.configs.where((item) => item.id == recordId).firstOrNull;
+    final siteCount = record?.siteCount ?? 0;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -835,10 +840,10 @@ class _AndroidSettingsPageState extends State<AndroidSettingsPage> {
         title: const Text('已导入站点，是否切换到该配置？'),
         content: Text(
           '设备：${device.name}\n'
+          '播放源：${record?.name ?? recordId}\n'
           '站点：$siteCount 个'
           '${liveCount == null || liveCount == 0 ? '' : '，直播源 $liveCount 个'}\n\n'
-          '切换后浏览与直播将改用这台设备的站源。'
-          '${sitesBefore == 0 ? '' : '当前配置不会被删除，可随时在配置页切回。'}',
+          '切换后浏览与直播将改用该播放源。当前配置不会被删除，可随时在配置页切回。',
         ),
         actions: [
           TextButton(
@@ -856,6 +861,55 @@ class _AndroidSettingsPageState extends State<AndroidSettingsPage> {
     );
     if (confirmed != true || !mounted) return;
     await state.activateConfigRecord(recordId);
+  }
+
+  /// 多源导入后让用户挑一个源来切换（也可以先不切）。
+  ///
+  /// 返回 `null` 表示用户选择「先不切换」。
+  Future<int?> _pickImportedSource(
+    AndroidDevice device,
+    List<int> recordIds,
+  ) async {
+    final state = widget.state;
+    final records = [
+      for (final id in recordIds)
+        ...state.configs.where((item) => item.id == id),
+    ];
+    if (records.isEmpty) return null;
+    return showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const ValueKey('bridge-source-picker'),
+        title: Text('${device.name} 上有 ${records.length} 个播放源'),
+        content: SizedBox(
+          width: 420,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: records.length,
+            itemBuilder: (context, index) {
+              final record = records[index];
+              return ListTile(
+                key: ValueKey('bridge-source-pick-${record.id}'),
+                dense: true,
+                title: Text(record.name),
+                subtitle: Text('站点 ${record.siteCount} 个'),
+                trailing: record.isActive
+                    ? const Text('当前')
+                    : const Icon(Icons.chevron_right, size: 18),
+                onTap: () => Navigator.of(context).pop(record.id),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            key: const ValueKey('bridge-source-pick-later'),
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('先不切换'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _push(SyncPeer peer) async {

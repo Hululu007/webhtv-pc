@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 5 反向验证门禁（`docs/phase5/design/03` §4.3）。
 
-三项反向验证必须**可复现**，不能只写在证据文件的说明文字里：本脚本逐项
+反向验证必须**可复现**，不能只写在证据文件的说明文字里：本脚本逐项
 临时破坏一个契约，断言对应用例**确实失败**，然后无条件还原并校验工作区干净。
 
 | # | 破坏方式 | 必须失败的用例 |
@@ -12,11 +12,12 @@
 | 4 | 哨兵值不做过滤 | `phase5_android_sync_test.dart` |
 | 5 | 删除标记检查被移除 | `phase5_android_sync_test.dart` |
 | 6 | `SyncOptions` 的 `settings` 默认改为 `true` | `phase5_android_sync_test.dart` |
+| 7 | 网关地址拦截改为无条件放行（回退到今天已知的 bug） | `phase5_sync_client_test.dart` |
 
 用法：
     py -3 tools/phase5/verify_reverse_checks.py [--puro-env webhtv]
 
-退出码：0 = 六项都按预期失败并已还原；1 = 有项未按预期失败或还原失败。
+退出码：0 = 七项都按预期失败并已还原；1 = 有项未按预期失败或还原失败。
 
 其中 #2（毫秒换算）与 #5（删除不复活）是本阶段最容易**悄悄写错**的两处
 （`design/03` §4.3 原话），也是最需要机器证据的两条。
@@ -96,6 +97,16 @@ CHECKS = [
         old="    this.settings = false,",
         new="    this.settings = true, // 反向验证：默认同步含凭据的设置",
         test_file="test/phase5_android_sync_test.dart",
+    ),
+    # 方案 B 的防回归靶子（`design/04` §4.5）：桥接历史推送必须带 `configKey`，
+    # 且**绝不能**把网关地址当 `config.url` 发出去——那正是用户看到的
+    #「反而给安卓版新增了一个桥接源」。放行这层拦截，用例必须失败。
+    Check(
+        name="gateway-url-guard",
+        path=APP / "lib/services/sync_client.dart",
+        old="    if (urlHostPort != deviceHostPort) return;",
+        new="    if (true) return; // 反向验证：放行网关地址当 config.url",
+        test_file="test/phase5_sync_client_test.dart",
     ),
 ]
 

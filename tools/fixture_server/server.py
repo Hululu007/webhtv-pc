@@ -104,6 +104,13 @@ ANDROID_LAST_HEADERS: dict[str, dict[str, str]] = {}
 # 每次 `/android/api/playback/sync` 成功返回后推进，供"第二轮只拿到新增"的断言用。
 ANDROID_SYNC_STATE: dict[str, int] = {"sequence": 0}
 
+# `configKey`（安卓 `interfaceKey`）→ 该源的站点清单 fixture（方案 B）。
+# 两个 type=0 源的站点集合必须**不同**，否则「按源隔离 / 切换」的断言会空转。
+CONFIG_KEY_FIXTURES = {
+    "fixture-vod-a": "gateway-config.json",
+    "fixture-vod-b": "gateway-config-source-b.json",
+}
+
 REQUIRED_REFERER = "http://127.0.0.1:18080/"
 REQUIRED_USER_AGENT = "WebHTV-PC/0.1 (Windows)"
 LEGACY_USER_AGENT = "WebHTV-PC-Phase0"
@@ -440,7 +447,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if route == "/vod/api":
             action = params.get("ac", "")
             key = params.get("key", "")
+            config_key = params.get("configKey", "")
             name = f"/vod/api?ac={action}" if action else f"/vod/api?key={key}"
+            if config_key and not key:
+                # 多源请求必须能被单独统计，否则"到底取没取第二个源"无法断言。
+                name = f"/vod/api?ac={action}&configKey={config_key}"
             ANDROID_STATS[name] = ANDROID_STATS.get(name, 0) + 1
             ANDROID_LAST_HOST[name] = host
 
@@ -449,21 +460,41 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     _json_file(ANDROID_FIXTURES / "vod-home.json", host)
                 )
                 return
+            # 故障注入**先于**按源取清单：故障是"设备级"的（404/超时/空站点），
+            # 每个源都会以同样方式失败，PC 侧才能把「设备坏了」与「某个源坏了」
+            # 区分开（`docs/phase5/design/04` §2.3）。
             if mode == "404":
                 self._send_error_json(404, "not found")
                 return
             if mode == "slow":
                 time.sleep(5)
-            fixture = {
+            injected = {
                 "empty": "gateway-config-empty.json",
                 "mismatch": "gateway-config-mismatch.json",
                 "loopback": "gateway-config-loopback.json",
                 "repo": "gateway-config-repo.json",
-            }.get(mode, "gateway-config.json")
+            }.get(mode)
+            if injected is not None:
+                self._send_json_bytes(_json_file(ANDROID_FIXTURES / injected, host))
+                return
+            # 方案 B（`docs/phase5/design/04` §2.2）：按 `configKey` 返回**指定源**
+            # 的站点清单，而不是当前激活源。真实安卓的 `VodApi` 用
+            # `VodSiteCatalog` 做无副作用解析，未命中时原样回 `{"msg": ...}`。
+            if config_key:
+                ANDROID_LAST_QUERY.clear()
+                ANDROID_LAST_QUERY.update(params)
+                fixture = CONFIG_KEY_FIXTURES.get(config_key)
+                if fixture is None:
+                    self._send_json({"msg": f"未知的配置标识: {config_key}"})
+                    return
+                self._send_json_bytes(_json_file(ANDROID_FIXTURES / fixture, host))
+                return
             # 关键契约：站点 `api` 的主机由**请求的 `Host` 头**现算
             # （`docs/phase5/design/00` §3.2 实测）。
             # `ac=config` 与 `ac=site` 返回**字节相同**（§3.2 第 3 条）。
-            self._send_json_bytes(_json_file(ANDROID_FIXTURES / fixture, host))
+            self._send_json_bytes(
+                _json_file(ANDROID_FIXTURES / "gateway-config.json", host)
+            )
             return
 
         if route == "/action":
@@ -492,6 +523,13 @@ class FixtureHandler(BaseHTTPRequestHandler):
         # ------------------------------------------------------------
         if route in ("/api/playback/history", "/api/playback/current"):
             self._send_playback_read(route, params, host, mode)
+            return
+        if route == "/manage/configs":
+            # 方案 B（`docs/phase5/design/04` §2.2）：列出**全部**配置（type 0/1/2），
+            # 让 PC 能把安卓的每个点播源都变成一条本地记录。真实安卓
+            # `Manage.configs` 还兼作写入口（带 `url` 参数）；fixture 只读。
+            self._record_android_request("/manage/configs", host, params)
+            self._send_json_bytes(_json_file(ANDROID_FIXTURES / "manage-configs.json", host))
             return
         if route == "/manage/session":
             self._send_manage_session(host, mode)
@@ -1350,6 +1388,13 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return
         payload = candidate.read_bytes()
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        if candidate.suffix == ".json":
+            # 直播配置文档（`lives` 清单）里的地址同样要按请求的 `Host` 现算，
+            # 与 `/vod/api?ac=config` 的站点 `api` 保持同一口径。
+            host = self.headers.get("Host") or "127.0.0.1:18080"
+            payload = payload.replace(
+                b"http://__HOST__", f"http://{host}".encode()
+            )
         if candidate.suffix in (".m3u", ".txt"):
             content_type = "audio/x-mpegurl; charset=utf-8"
         if candidate.suffix == ".json":

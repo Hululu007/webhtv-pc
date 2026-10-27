@@ -6,7 +6,7 @@
 #   G3  Schema 校验
 #   G4  静态检查（dart analyze）
 #   G5  单元测试（flutter test，含 phase5_* 套件）
-#   G6  套件存在性（phase5_* 清单核对）
+#   G6  套件存在性（phase5_* 清单核对，含多源化改造新增套件）
 #   G7  Windows 集成测试（3 个 phase5_*_flow_test.dart）
 #   G8  反向验证（6 项必须"按预期失败"且还原后工作区干净）
 #   G9  脱敏（TMDB 凭据 + 桥接设备指纹/片名）
@@ -256,7 +256,12 @@ try {
             'test/phase5_sync_server_test.dart',
             'test/phase5_sync_client_test.dart',
             'test/phase5_sync_ui_test.dart',
-            'test/phase5_sync_refresh_test.dart'
+            'test/phase5_sync_refresh_test.dart',
+            # 多源化改造（`docs/phase5/design/04`，2026-10-26）新增。
+            'test/phase5_bridge_multisource_test.dart',
+            'test/phase5_bridge_picker_ui_test.dart',
+            'test/phase6_history_scope_ui_test.dart',
+            'test/source_key_and_history_scope_test.dart'
         )
         $missing = @()
         foreach ($relative in $required) {

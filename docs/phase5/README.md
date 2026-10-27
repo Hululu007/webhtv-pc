@@ -1,11 +1,12 @@
 # Phase 5 计划（安卓桥接：T4 站点接入 + 历史/设置同步）
 
-- 状态：**已完成**（设计 `design/00`–`design/03` + 实现 T1–T14 全部落地；`PHASE5-ACCEPT result=PASS gates=all`）
-- 日期：2026-10-08
+- 状态：**已完成**（设计 `design/00`–`design/04` + 实现 T1–T14 全部落地；`PHASE5-ACCEPT result=PASS gates=all`）
+- 日期：2026-10-08（多源化改造 2026-10-26，见 §7）
 - 后续验证：[T4 网盘分集与播放代理（2026-10-10）](evidence/t4-folder-playback.md)
 - 后续验证：[桥接线路标准化为普通线路（2026-10-11）](evidence/t4-standard-bridge-lines.md)
 - 后续验证：[站点选择器打开卡顿修复（2026-10-12）](evidence/site-picker-latency.md)
-- 对应设计文档章节：本目录 `design/00`–`design/03`、`docs/webhtv-pc-design.md` §21（Phase 5 生态与同步）、§22.1
+- 后续改造：[安卓桥接多源化与历史按源隔离（2026-10-26）](design/04-bridge-multisource.md)
+- 对应设计文档章节：本目录 `design/00`–`design/04`、`docs/webhtv-pc-design.md` §21（Phase 5 生态与同步）、§22.1、§28（安卓桥接）
 - 上游：`docs/phase4/README.md`（Phase 4 已完成：TMDB 元数据增强）
 - 上游参考工程：`webhtv/默影视`（Android，`F:\Workspace\webtv3\webhtv`，实测设备 `192.168.50.3:5559`）
 
@@ -80,8 +81,9 @@ Android 侧已经暴露出 **T4 本机网关**（`c388619629`：`feat(server): a
 | D1 | 索引与原则 | `design/00-android-bridge-design-index.md` | 5 条原则、实测契约快照、上游取舍表、10 条决策齐备 |
 | D2 | T4 站点桥接 | `design/01-android-t4-site-bridge.md` | 端点清单、可达地址两形态、配置转换 6 步、主机不一致三态、站点保真 6 项、6 类错误 |
 | D3 | 同步协议 | `design/02-android-sync-protocol.md` | PC 必实现 4 端点、必调用 5 端点、字段映射表、合并算法、删除标记、7 类错误 |
-| D4 | 测试与验收 | `design/03-bridge-test-and-acceptance.md` | L1/L2/L3 分层、fixture 与 8 种故障注入、4 个套件、11 项门禁、6 项反向验证 |
-| D5 | 主设计文档回填 | `docs/webhtv-pc-design.md` §21 + §22.1 + §23 + §26 + §28 | 章节号连续、交叉引用可解析 |
+| D4 | 测试与验收 | `design/03-bridge-test-and-acceptance.md` | L1/L2/L3 分层、fixture 与 8 种故障注入、4 个套件、11 项门禁、7 项反向验证 |
+| D5 | 多源化（后续，2026-10-26） | `design/04-bridge-multisource.md` | 方案 B 取舍、`configKey` 端点、按源隔离历史、推送落源、降级矩阵 |
+| D6 | 主设计文档回填 | `docs/webhtv-pc-design.md` §21 + §22.1 + §23 + §26 + §28 | 章节号连续、交叉引用可解析 |
 
 ### 2.2 实施阶段
 
@@ -89,18 +91,20 @@ Android 侧已经暴露出 **T4 本机网关**（`c388619629`：`feat(server): a
 | --- | --- | --- | --- | --- |
 | T1 | 纯逻辑：桥接转换 | `lib/core/android_bridge.dart` | `phase5_android_bridge_test.dart`（29 例） | ✅ |
 | T2 | 纯逻辑：同步编解码与合并 | `lib/core/android_sync.dart` | `phase5_android_sync_test.dart`（43 例） | ✅ |
-| T3 | 服务：设备探测与配置拉取 | `lib/services/android_bridge_service.dart` | `phase5_android_bridge_service_test.dart`（17 例） | ✅ |
+| T3 | 服务：设备探测与配置拉取 | `lib/services/android_bridge_service.dart` | `phase5_android_bridge_service_test.dart`（27 例） | ✅ |
 | T4 | 服务：PC 同步服务端 | `lib/services/sync_server.dart` | `phase5_sync_server_test.dart`（30 例，真实回环 HTTP） | ✅ |
-| T5 | 服务：同步客户端 | `lib/services/sync_client.dart` | `phase5_sync_client_test.dart`（18 例，请求捕获） | ✅ |
+| T5 | 服务：同步客户端 | `lib/services/sync_client.dart` | `phase5_sync_client_test.dart`（21 例，请求捕获） | ✅ |
 | T6 | 存储：合并路径与删除标记 | `lib/services/storage.dart` | `phase5_sync_storage_test.dart`（15 例）+ `schemaVersion` 2→3 迁移 | ✅ |
 | T7 | 状态层 | `lib/state/app_state.dart`、`lib/state/sync_state.dart` | `SyncStateHost` 契约 + 设置持久化 + 三项开关默认关闭 | ✅ |
-| T8 | 设置页 UI | `lib/ui/config_pages.dart` | `phase5_sync_ui_test.dart`（14 例）+ G10 入口符号 | ✅ |
-| T9 | fixture 与预检 | `packages/test-fixtures/android/**`、`tools/fixture_server/server.py`、`tools/phase5/check_android_fixture.py` | 路由 8 项 + 8 种故障注入逐一可触发 | ✅ |
-| T10 | 反向验证 | `tools/phase5/verify_reverse_checks.py` | 6 项全部"按预期失败" | ✅ |
+| T8 | 设置页 UI | `lib/ui/config_pages.dart` | `phase5_sync_ui_test.dart`（26 例）+ G10 入口符号 | ✅ |
+| T9 | fixture 与预检 | `packages/test-fixtures/android/**`、`tools/fixture_server/server.py`、`tools/phase5/check_android_fixture.py` | 路由 **11 项**（多源化后含 `/manage/configs` 与 `ac=config&configKey=`）+ 8 种故障注入逐一可触发 | ✅ |
+| T10 | 反向验证 | `tools/phase5/verify_reverse_checks.py` | **7 项**全部"按预期失败"（含多源化新增的网关地址拦截项） | ✅ |
 | T11 | 发布包符号门禁 | `tools/phase5/verify_release_symbols.py` | 12 个 ASCII 符号 + 9 个中文串存在 | ✅ |
 | T12 | 一键验收脚本 | `tools/phase5/run_windows_acceptance.ps1` | 11 项门禁全绿 | ✅ |
 | T13 | L3 集成 | `integration_test/phase5_bridge_flow_test.dart`、`phase5_sync_flow_test.dart`、`phase5_sync_push_flow_test.dart` | 真实窗口 + 真实 HTTP + 真实 SQLite | ✅ |
 | T14 | 证据落盘 | `docs/phase5/evidence/**` | 6 份证据（含 2 张截图） | ✅ |
+| T15 | 多源化改造 | `lib/core/source_key.dart`、`lib/core/android_sources.dart`、`lib/core/history_scope.dart`、`lib/services/{storage,android_bridge_service,sync_client,sync_server}.dart`、`lib/state/{app_state,sync_state}.dart`、`lib/ui/{config_pages,library_pages}.dart` | 多源各成记录 / 历史按源隔离 + 全局开关 / 推送带 `configKey` 落目标源 / 安卓 `active` 全程不变 | ✅ |
+| T16 | 多源化测试 | 新增 `phase5_bridge_multisource`(12)、`phase5_bridge_picker_ui`(3)、`phase6_history_scope_ui`(4)、`source_key_and_history_scope`(16) 四个套件 | 全绿 + `dart analyze` 干净 + fixture 预检 11 路由 | ✅ |
 
 依赖关系：
 
@@ -118,6 +122,8 @@ T7 ← T3 T4 T5 T6
 T8 ← T7
    ↓
 T9 → T10 T11 → T12 → T13 → T14
+后置（后续改造）
+   多源化：T15（PC 产品代码）→ T16（测试与预检扩写）
 ```
 
 ---
@@ -126,14 +132,14 @@ T9 → T10 T11 → T12 → T13 → T14
 
 | # | 门禁 | 命令 | 通过判据 |
 | --- | --- | --- | --- |
-| G1 | 安卓 fixture 预检 | `py -3 tools/phase5/check_android_fixture.py --base <url>` | 路由 8 项 + 故障注入 8 项全通过 |
+| G1 | 安卓 fixture 预检 | `py -3 tools/phase5/check_android_fixture.py --base <url>` | 路由 **11** 项（含多源端点）+ 故障注入 8 项全通过 |
 | G2 | Python 契约 | `py -3 -m unittest tests.test_contracts` | 8 个新增用例通过 |
 | G3 | Schema 校验 | `py -3 scripts/validate_contracts.py` | 无错误 |
 | G4 | 静态检查 | `dart analyze` | 无问题 |
-| G5 | 单元测试 | `flutter test` | 全绿（含 7 个 `phase5_*` 套件，共 1338 例） |
-| G6 | 套件存在性 | 脚本内清单核对 | 8 个套件文件均存在 |
+| G5 | 单元测试 | `flutter test` | 全绿（本机实测 147 个测试文件 2867 例） |
+| G6 | 套件存在性 | 脚本内清单核对 | 12 个套件文件均存在 |
 | G7 | Windows 集成 | `flutter test integration_test/phase5_*_flow_test.dart -d windows` | 3 个套件全绿 |
-| G8 | 反向验证 | `py -3 tools/phase5/verify_reverse_checks.py` | 6 项全部"按预期失败"且还原后工作区干净 |
+| G8 | 反向验证 | `py -3 tools/phase5/verify_reverse_checks.py` | **7 项**全部"按预期失败"且还原后工作区干净 |
 | G9 | 凭据与指纹脱敏 | `py -3 tools/phase4/verify_tmdb_redaction.py` + `py -3 tools/phase5/verify_bridge_redaction.py` | 无凭据/设备指纹原文 |
 | G10 | 发布包符号 | `py -3 tools/phase5/verify_release_symbols.py` | 12 个 ASCII 符号 + 9 个中文串存在，无测试壳污染；产物早于源码时明确报 `stale` |
 | G11 | 产物可运行 | 既有 `debug-artifact-runnable` | Debug 入口是 `lib/main.dart` |
@@ -154,11 +160,11 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 | --- | --- | --- |
 | L1 | `test/phase5_android_bridge_test.dart` | 29 |
 | L1 | `test/phase5_android_sync_test.dart` | 43 |
-| L2 | `test/phase5_android_bridge_service_test.dart` | 17 |
+| L2 | `test/phase5_android_bridge_service_test.dart` | 27 |
 | L2 | `test/phase5_sync_storage_test.dart` | 15 |
 | L2 | `test/phase5_sync_server_test.dart` | 30 |
-| L2 | `test/phase5_sync_client_test.dart` | 18 |
-| L2 | `test/phase5_sync_ui_test.dart` | 14 |
+| L2 | `test/phase5_sync_client_test.dart` | 21 |
+| L2 | `test/phase5_sync_ui_test.dart` | 26 |
 | L3 | `integration_test/phase5_bridge_flow_test.dart` | 4 个用例 / 8 步 |
 | L3 | `integration_test/phase5_sync_flow_test.dart` | 1 个用例 / 8 步 |
 | L3 | `integration_test/phase5_sync_push_flow_test.dart` | 1 个用例 / 6 步 |
@@ -168,6 +174,15 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 | 层 | 套件 | 用例数（实测） |
 | --- | --- | --- |
 | L1 | `test/log_service_test.dart`（站点选择器卡顿修复，§16.4） | 8 |
+
+多源化改造（T15/T16，2026-10-26）新增与扩展的套件：
+
+| 层 | 套件 | 用例数（实测） |
+| --- | --- | --- |
+| L1 | `test/source_key_and_history_scope_test.dart` | 16 |
+| L1 | `test/phase5_bridge_multisource_test.dart` | 12 |
+| L2 | `test/phase6_history_scope_ui_test.dart` | 4 |
+| L2 | `test/phase5_bridge_picker_ui_test.dart` | 3 |
 
 ### 3.2 反向验证（机器校验）
 
@@ -182,6 +197,7 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 | 4 | 哨兵值不做过滤 | `phase5_android_sync_test.dart` |
 | 5 | 删除标记检查被移除 | `phase5_android_sync_test.dart` |
 | 6 | `SyncOptions` 的 `settings` 默认改为 `true` | `phase5_android_sync_test.dart` |
+| 7 | 网关地址拦截改为无条件放行（回退到"给安卓新增桥接源"的缺陷） | `phase5_sync_client_test.dart` |
 
 ---
 
@@ -263,3 +279,58 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 一次 `flutter test` 传多个集成套件时，Windows 桌面设备只能承载一个应用实例，
 第二个套件会报 `Unable to start the app on the device`。验收脚本因此逐套件单独运行
 （与 Phase 1–4 一致）。
+
+---
+
+## 7. 多源化改造（2026-10-26，后续）
+
+设计：`design/04-bridge-multisource.md`。用户诉求原话：
+「桥接后应该是把安卓版的所有源都拉取过来并支持切换，然后历史记录默认按源来隔离默认只显示当前源的
+并参考安卓源新增开关可以开启全局历史记录，历史记录推送时也是推送到对应播放源的下面
+现在反而是给安卓版新增了一个桥接源这是不对的」。
+
+### 7.1 改了什么
+
+| 项 | 之前 | 之后 |
+| --- | --- | --- |
+| 取站点 | 只取安卓**当前激活源** | `GET /manage/configs` 列出全部源，逐源 `ac=config&configKey=<k>` 取站点（`04` §2.2） |
+| 切换 | 无 | 「启用」只切 **PC 本地**记录；**从不**调用安卓切源端点 |
+| 历史 | 一份全局列表 | 默认按源隔离（`source`），新增 `history-scope-switch` 可切 `global`（`04` §4.4） |
+| 推送 | `config.url` = 设备网关地址 → 安卓 `Config.create().insert()` | 载荷带 `configKey`，安卓按 cid 直写（`History.syncTo`），**不切源、不新增行**（`04` §3.4/§4.5） |
+| 存储 | `schemaVersion 6` | `7`：`configs` 加 `source_key`/`bridge_*`；`history` 与 `history_deletions` 带 `source_key` 重建（`04` §4.2） |
+
+### 7.2 跨仓库交付
+
+| 仓库 | 提交 | 内容 |
+| --- | --- | --- |
+| 安卓 `webhtv/dev5` | `d4b965db96` | `VodSiteCatalog` 无副作用解析 + `ac=config&configKey=` + `handle`/`externalize`/`remoteUrl`/`/proxy` 透传（4 文件 +365/−21，`VodApiTest` 34 例全绿） |
+| 安卓 `webhtv/dev5` | `b501538b77` | `History.syncTo(cid,…)` + `Action.syncHistory` 按 `configKey` 写入且不 `load`（4 文件 +146/−11，`HistoryScopeSyncTest` 5 例全绿） |
+
+### 7.3 与原有边界的相容性
+
+| 原则 | 多源化后如何保持 |
+| --- | --- |
+| P1 桥接不复制 | 站点仍由安卓执行，PC 只做 HTTP 客户端；`configKey` 只是坐标，不搬运爬虫 |
+| P2 地址来自请求 | `configKey` 响应的站点 `api` 同样按 `Host` 现算（G1 预检第 9 条断言） |
+| P3 默认关闭、失败不破坏本地 | 导入只新增记录（`makeActive:false`）；单源失败不中断且原样披露分类 |
+| P4 不引入自引用 | 不变 |
+| P5 能力缺口必须披露 | 老安卓缺 `/manage/configs` 时明确降级说明；全部源以**同一分类**失败时冒泡原始分类而非折叠成 `bridgeUnreachable` |
+| Q10 导入不覆盖当前配置 | 不变；多源导入后也不切换 |
+
+### 7.4 已知限制
+
+| 限制 | 处置 |
+| --- | --- |
+| `JsLoader`/`PyLoader` 缓存键只有 `key`（不含 jar 哈希），两源同名 `siteKey` 但不同 jar 会串 | 记为已知限制；CSP 走 `JarLoader`（键含 `md5(jar)`）故主流程安全（`04` §3.5） |
+| 存量伪造的「桥接源」记录 | **不自动删除**（可能是用户手建），由用户在配置页自行清理 |
+| 历史范围开关 | PC 本地偏好，**不写回**安卓 `global_history_mode`（`04` §4.4） |
+
+### 7.5 验证
+
+| 项 | 结果 |
+| --- | --- |
+| fixture 预检 G1 | `PHASE5-ACCEPT android-fixture routes=11 modes=8 failures=0`（`/manage/configs`、两个 `configKey` 源、未知 key 原样回 `msg`、直播配置文档） |
+| 新增 L1/L2 套件 | `source_key_and_history_scope`(16) + `phase5_bridge_multisource`(12) + `phase6_history_scope_ui`(4) + `phase5_bridge_picker_ui`(3) 全绿 |
+| PC 全量单测 | 147 个测试文件分批全绿（2867 例）；`dart analyze lib test integration_test` 干净 |
+| 安卓定向单测 | `VodApiTest` 34 例、`HistoryScopeSyncTest` 5 例全绿（全仓 4597 例中 8 个既有失败与本次改动无命中） |
+| 反向验证 #7 | 放行网关地址拦截后 `phase5_sync_client_test.dart` 必须失败（防回归靶子） |

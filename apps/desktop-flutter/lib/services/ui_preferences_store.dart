@@ -17,7 +17,12 @@
 ///   `Setting.getSearchThread` 默认 20、`clampSearchThread` 夹在 1~100）；
 /// - `historyClickAction`：**点击历史记录的行为**（`detail` 进详情页 /
 ///   `play` 直接播放，上游 `HistoryActivity#onItemClick` 是直接播放，
-///   PC 端默认改为进详情页，见 `docs/phase6/design/01` §4.1）。
+///   PC 端默认改为进详情页，见 `docs/phase6/design/01` §4.1）；
+/// - `historyScope`：**历史记录的可见范围**（`source` 只看当前播放源 /
+///   `global` 看全部源）。默认 `source`：多个源（尤其安卓桥接多源）各自
+///   有同名影片时，混在一起会让「继续播放」跳错源。对齐上游安卓
+///   `Setting.getGlobalHistoryMode`（关闭 / 自动 / 搜索），PC 端只保留
+///   「按源」与「全局」两档。
 ///
 /// 另外管理 `settings.json` **顶层** `player` 段（Phase 9）：
 /// 播放参数（缓冲/硬解/自动连播/失败回退/预加载/片头片尾开关/LUT）。
@@ -28,6 +33,7 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/history_scope.dart';
 import '../core/history_view.dart';
 import '../core/danmaku_settings.dart';
 import '../core/danmaku_style.dart';
@@ -96,6 +102,9 @@ class UiPreferencesStore {
 
   /// 点击历史记录的行为。`null` = 从未设置过，用默认 [UiHistoryClickAction.detail]。
   String? _historyClickAction;
+
+  /// 历史记录可见范围。`null` = 从未设置过，用默认 [UiHistoryScope.source]。
+  String? _historyScope;
 
   /// 屏显开关的**显式**设置；缺席的 id 用 [defaultOsdFlags] 补齐。
   ///
@@ -203,6 +212,12 @@ class UiPreferencesStore {
 
   /// 用户是否显式设置过（决定要不要写盘，与 `themeMode` 同理）。
   bool get hasExplicitHistoryClickAction => _historyClickAction != null;
+
+  /// 生效的历史范围：用户选过就用选的，否则默认只看当前源。
+  String get historyScope => UiHistoryScope.normalize(_historyScope);
+
+  /// 用户是否显式设置过历史范围。
+  bool get hasExplicitHistoryScope => _historyScope != null;
 
   /// 生效的屏显开关：显式设置过的项用用户值，其余用默认。
   Map<String, bool> get osdFlags => normalizeOsdFlags(_osdFlags);
@@ -368,6 +383,13 @@ class UiPreferencesStore {
               clickAction.trim().toLowerCase(),
             )) {
               _historyClickAction = clickAction.trim().toLowerCase();
+            }
+          }
+          final scope = ui['historyScope'];
+          if (scope is String) {
+            // 只接受合法值；手改成别的字符串时回落到默认（按源）。
+            if (UiHistoryScope.values.contains(scope.trim().toLowerCase())) {
+              _historyScope = scope.trim().toLowerCase();
             }
           }
           // 屏显开关：只接受 bool；非法值忽略（该项回落默认）。
@@ -545,6 +567,14 @@ class UiPreferencesStore {
     final normalized = UiHistoryClickAction.normalize(mode);
     if (normalized == _historyClickAction) return Future.value(true);
     _historyClickAction = normalized;
+    return _persist();
+  }
+
+  /// 记住历史记录可见范围。非法值归一化为默认（按源）。
+  Future<bool> rememberHistoryScope(String scope) {
+    final normalized = UiHistoryScope.normalize(scope);
+    if (normalized == _historyScope) return Future.value(true);
+    _historyScope = normalized;
     return _persist();
   }
 
@@ -787,6 +817,9 @@ class UiPreferencesStore {
         // 点击行为同上：只有显式设置过才写，缺席 = 默认 detail。
         final clickAction = _historyClickAction;
         if (clickAction != null) ui['historyClickAction'] = clickAction;
+        // 历史范围：只有显式设置过才写，缺席 = 默认 source。
+        final scope = _historyScope;
+        if (scope != null) ui['historyScope'] = scope;
         // 屏显：只有显式设置过的项才写（缺席 = 默认）。
         if (_osdFlags.isNotEmpty) ui['osd'] = _osdFlags;
         // 按钮排版：两个键各自独立；都缺席时整个 playerButtons 不写。

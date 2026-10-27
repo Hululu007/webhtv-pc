@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/app_error.dart';
+import '../core/history_scope.dart';
 import '../core/history_view.dart';
 import '../services/storage.dart';
 import '../services/tmdb_history.dart';
@@ -44,6 +45,37 @@ const double _historyCaptionHeight = 40;
 ///
 /// 与首页 `_VodCard` 同值同理由：文字区是固定高度，放大时不让步就会溢出格子。
 const double _historyTextScaleMax = 1.25;
+
+/// 历史范围开关：只看当前播放源 / 看全部源。
+///
+/// 桥接后每台安卓设备上的每个源都是一条独立配置记录，站点 key 会重名
+/// （都是 `csp_xxx`），不隔离就会出现跨源串进度。默认按源隔离；
+/// 对齐安卓的 `global_history_mode` 开关（用户反馈 2026-10-26）。
+class _HistoryScopeSwitch extends StatelessWidget {
+  const _HistoryScopeSwitch({required this.state, required this.onChanged});
+
+  final AppState state;
+  final VoidCallback onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final global = state.historyScopeIsGlobal;
+    return Tooltip(
+      message: global ? '当前显示全部播放源的历史' : '当前只显示当前播放源的历史',
+      child: OutlinedButton.icon(
+        key: const ValueKey('history-scope-switch'),
+        onPressed: () async {
+          await state.setHistoryScope(
+            global ? UiHistoryScope.source : UiHistoryScope.global,
+          );
+          onChanged();
+        },
+        icon: Icon(global ? Icons.public : Icons.filter_alt_outlined),
+        label: Text(global ? '全部来源' : '当前来源'),
+      ),
+    );
+  }
+}
 
 class HistoryPage extends StatefulWidget {
   const HistoryPage({super.key, required this.state});
@@ -168,6 +200,13 @@ class _HistoryPageState extends State<HistoryPage> {
               // 多选态下只留「取消」在工具栏，其余动作在下面的多选工具栏里。
               if (_view.mode == HistoryViewMode.none) ...[
                 // 列表为空时**两个删除入口都不渲染**（§3.2）。
+                // 历史范围开关（对齐安卓 `global_history_mode`）：默认只看
+                // **当前播放源**，开了才看全部源。
+                _HistoryScopeSwitch(
+                  state: _state,
+                  onChanged: () => setState(() {}),
+                ),
+                const SizedBox(width: 8),
                 OutlinedButton.icon(
                   key: const ValueKey('history-viewing-report'),
                   onPressed: _openViewingReport,

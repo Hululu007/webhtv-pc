@@ -37,6 +37,7 @@ import '../services/backup_service.dart';
 import '../services/doh_resolver.dart';
 import '../services/following_service.dart';
 import '../services/session_recovery_store.dart';
+import '../core/history_scope.dart';
 import '../core/history_view.dart';
 import '../core/live_settings.dart';
 import '../core/http_api.dart';
@@ -50,6 +51,7 @@ import '../core/player_options.dart';
 import '../core/protocol.dart';
 import '../core/proxy_policy.dart';
 import '../core/realtime_sync.dart';
+import '../core/source_key.dart';
 import '../core/site_group.dart';
 import '../core/site_injection.dart';
 import '../core/site_group_rules.dart';
@@ -1469,6 +1471,49 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     notifyListeners();
     return ok;
   }
+
+  /// 播放历史的可见范围（[UiHistoryScope]）：`source` 只看当前源，
+  /// `global` 看全部源（对齐安卓 `Setting.isGlobalHistoryEnabled` 的开关位）。
+  ///
+  /// 默认 `source`：桥接后每台设备上的每个源都会成为一条配置记录，它们的
+  /// 站点 key 会重名（都是 `csp_xxx`），不按源隔离就会出现"看了 A 源的剧、
+  /// B 源的同一部剧也显示进度"的串源问题。
+  String get historyScope =>
+      _uiPreferences?.historyScope ?? UiHistoryScope.source;
+
+  bool get historyScopeIsGlobal => historyScope == UiHistoryScope.global;
+
+  /// 持久化历史范围偏好。
+  Future<bool> setHistoryScope(String scope) async {
+    final store = _uiPreferences;
+    if (store == null) return false;
+    final ok = await store.rememberHistoryScope(scope);
+    notifyListeners();
+    return ok;
+  }
+
+  /// 当前生效配置的来源标识（见 `core/source_key.dart`）。
+  ///
+  /// 桥接源为 `bridge|<deviceUuid>|<interfaceKey>`，本地导入为
+  /// `local|<origin>`；没有生效配置时为空串。
+  String get activeSourceKey {
+    final record = _activeRecord;
+    if (record == null) return '';
+    final interfaceKey = record.bridgeInterfaceKey.trim();
+    if (interfaceKey.isNotEmpty) {
+      final key = BridgeSourceKey.of(
+        deviceUuid: record.bridgeDevice.trim(),
+        interfaceKey: interfaceKey,
+      );
+      if (key.isNotEmpty) return key;
+    }
+    if (record.sourceKey.isNotEmpty) return record.sourceKey;
+    return LocalSourceKey.of(record.origin);
+  }
+
+  /// 读历史时的来源过滤：空串表示**不**过滤（全局历史）。
+  String get historySourceFilter =>
+      historyScopeIsGlobal ? '' : activeSourceKey;
 
   /// 测试口子：不经 bootstrap 直接装配 UI 偏好 store。
   ///
@@ -3499,6 +3544,9 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         durationMs: item.durationMs,
         completed: item.completed,
         updatedAt: item.updatedAt,
+        // 补图必须写回**该行自己的源**：全局历史模式下列表里混着别的源，
+        // 写当前源会造出一条重复记录。
+        sourceKey: item.sourceKey,
       );
       notifyListeners();
     } catch (error) {
@@ -3542,6 +3590,9 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         episodeId: episodeId,
         positionMs: position.inMilliseconds,
         durationMs: duration.inMilliseconds,
+        // 写入永远带**具体源**：全局历史只是读视图，不能把新进度写成
+        // "无源"的老记录（否则切回按源隔离时就看不见了）。
+        sourceKey: activeSourceKey,
       );
       // 崩溃恢复上下文（P2-8）：与历史同源，但只存标识与进度。
       _recordRecoveryPlayback(
@@ -3579,6 +3630,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         flag: flag,
         episodeId: episodeId,
         episodeName: episodeName,
+        sourceKey: historySourceFilter,
       );
     } catch (error) {
       log.warning('读取播放进度失败:$error', scope: 'history');
@@ -3629,7 +3681,8 @@ class AppState extends ChangeNotifier implements SyncStateHost {
 
   @override
   List<SyncHistoryItem> syncHistoryItems({int limit = 2000}) => [
-    for (final row in recentHistory(limit: limit))
+    // 推送落到**某一个**源，所以只送当前源的历史；全局历史只是读视图。
+    for (final row in recentHistory(limit: limit, sourceKey: activeSourceKey))
       SyncHistoryItem.fromLocal(
         siteKey: row.siteKey,
         vodId: row.vodId,
@@ -3665,10 +3718,19 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     required String origin,
     required AppConfig config,
     required List<String> diagnostics,
+    String deviceUuid = '',
+    String interfaceKey = '',
+    String configUrl = '',
   }) async {
     final database = _database;
     if (database == null) return null;
     try {
+      // 同一台设备上的多个源 origin 全是设备网关地址，按 origin 去重会把第二个源
+      // 覆盖成第一个；因此桥接记录一律带 sourceKey，去重改按 source_key。
+      final sourceKey = BridgeSourceKey.of(
+        deviceUuid: deviceUuid,
+        interfaceKey: interfaceKey,
+      );
       final id = database.saveConfig(
         name: name,
         origin: origin,
@@ -3677,6 +3739,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         siteCount: config.sites.length,
         liveCount: config.lives.length,
         makeActive: false,
+        sourceKey: sourceKey,
+        bridgeDevice: deviceUuid,
+        bridgeInterfaceKey: interfaceKey,
+        bridgeConfigUrl: configUrl,
       );
       database.saveConfigSites(id, config.sites);
       _configs = database.listConfigs();
@@ -3717,6 +3783,22 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     final uri = Uri.tryParse(origin);
     if (uri == null || uri.host.isEmpty) return null;
     if (!syncState.isPeerAuthorized(uri.host)) return null;
+    // 桥接记录的 origin 是**设备网关地址**，绝不能当 config.url 发给安卓——
+    // 老协议下安卓会 Config.find(url) 查不到就 insert 一行，凭空多出"桥接源"，
+    // 还会顺带 VodConfig.load 切走当前配置。改为只发该源的 interfaceKey，
+    // 安卓据此直接写目标源的 cid（见 dev5 Action.syncHistory）。
+    final configKey = record.bridgeInterfaceKey.trim();
+    if (configKey.isNotEmpty) {
+      // 桥接源：只认源标识，url 留该源自己的订阅地址（可能为空，安卓不读它）。
+      return jsonEncode({
+        'id': record.id,
+        'type': 0,
+        'name': record.name,
+        'configKey': configKey,
+        'url': record.bridgeConfigUrl.trim(),
+      });
+    }
+    // 本地导入的配置：origin 本身就是该源自己的订阅地址，沿用老协议。
     return jsonEncode({
       'id': record.id,
       'type': 0,
@@ -3818,7 +3900,8 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       for (final site in _config?.sites ?? const <Site>[]) site.key,
     ];
     final recentlyActive = <String>[];
-    for (final row in recentHistory(limit: 200)) {
+    // 轮询要的是"这台设备上最近播过的站点"，与历史可见范围无关 → 显式不过滤。
+    for (final row in recentHistory(limit: 200, sourceKey: '')) {
       if (!recentlyActive.contains(row.siteKey)) {
         recentlyActive.add(row.siteKey);
       }
@@ -3833,22 +3916,32 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     return selected ?? known;
   }
 
-  List<PlaybackHistory> recentHistory({int limit = 100}) {
+  /// 按 [historyScope] 过滤的播放历史（默认只看当前源）。
+  ///
+  /// [sourceKey] 传空串表示"不过滤"，用于明确要看全部源的场景
+  /// （例如给安卓轮询站点 key 时判断"最近播过哪些站点"）。
+  List<PlaybackHistory> recentHistory({int limit = 100, String? sourceKey}) {
     final database = _database;
     if (database == null) return const [];
     try {
-      return database.recentHistory(limit: limit);
+      return database.recentHistory(
+        limit: limit,
+        sourceKey: sourceKey ?? historySourceFilter,
+      );
     } catch (error) {
       log.warning('读取播放历史失败：$error', scope: 'history');
       return const [];
     }
   }
 
-  List<PlaybackHistory> searchHistory(String keyword) {
+  List<PlaybackHistory> searchHistory(String keyword, {String? sourceKey}) {
     final database = _database;
     if (database == null) return const [];
     try {
-      return database.searchHistory(keyword);
+      return database.searchHistory(
+        keyword,
+        sourceKey: sourceKey ?? historySourceFilter,
+      );
     } catch (_) {
       return const [];
     }
@@ -3859,8 +3952,13 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     notifyListeners();
   }
 
-  void clearHistory() {
-    _database?.clearHistory();
+  /// 清空播放历史。
+  ///
+  /// 按源隔离时只清当前源（别的源的记录不该被顺手抹掉）；
+  /// 全局历史模式下清全部。`clearAll` 供「清空全部」入口显式指定。
+  void clearHistory({bool clearAll = false}) {
+    final scope = clearAll ? '' : historySourceFilter;
+    _database?.clearHistory(sourceKey: scope);
     // 「清空历史」同时清季度进度，但**保留**匹配与绑定（`03` §6.5）。
     _database?.clearTmdbSeasonProgress();
     log.info('已清空播放历史（配置未受影响）', scope: 'history');

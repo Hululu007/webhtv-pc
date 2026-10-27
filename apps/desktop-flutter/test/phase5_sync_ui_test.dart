@@ -16,6 +16,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:webhtv_pc/core/android_bridge.dart';
+import 'package:webhtv_pc/core/android_sources.dart';
 import 'package:webhtv_pc/core/app_error.dart';
 import 'package:webhtv_pc/core/http_api.dart';
 import 'package:webhtv_pc/core/protocol.dart';
@@ -63,10 +64,38 @@ class FakeBridge extends AndroidBridgeService {
     return device;
   }
 
+  /// `/manage/configs` 的假返回：默认一个源（模拟单源设备）。
+  ///
+  /// 多源导入路径（`importSites` → `fetchSources` → 逐源取站点）先读这张
+  /// 清单，所以这里不覆写就等于让测试去连真实网络。
+  List<AndroidSource> sources = const [
+    AndroidSource(
+      interfaceKey: 'fake-source-key',
+      name: '假源',
+      url: 'http://192.168.50.9:9978/sub',
+      active: true,
+    ),
+  ];
+
+  /// 覆写成 `false` 可模拟老安卓（没有 `/manage/configs`）。
+  bool hasSourceCatalog = true;
+
+  @override
+  Future<AndroidSourceCatalog> fetchSources(String base) async {
+    if (!hasSourceCatalog) {
+      throw AppError(
+        AppErrorKind.bridgeNoGateway,
+        '安卓设备版本过旧：缺少配置清单接口（/manage/configs 不存在）',
+      );
+    }
+    return AndroidSourceCatalog(sources: sources);
+  }
+
   @override
   Future<BridgeConversion> fetchGatewayConfig(
     String base, {
     String? selfBase,
+    String? interfaceKey,
     void Function(BridgeStage stage)? onStage,
   }) async {
     fetchCalls++;
@@ -587,23 +616,39 @@ void main() {
       expect(httpClient.requests, isEmpty);
       expect(pageText(tester), contains('config.url'));
 
-      // origin 就是该对端地址后，推送发出且带上明细。
+      // 换成桥接记录（带源标识）后推送发出，且**不再把网关地址当 config.url**。
       // 必须走 `activateConfigRecord`：`syncConfigJson()` 读的是 AppState 里的
       // 生效记录，直接写库不会刷新它（这正是"推送前要选对配置"的用户动作）。
       final recordId = state.database!.saveConfig(
-        name: '安卓桥接',
+        name: '安卓桥接 · 源 A',
         origin: 'http://192.168.50.9:9978',
         json: const {'sites': <Object?>[]},
         makeActive: false,
+        sourceKey: 'bridge|fake-android-uuid|source-a',
+        bridgeDevice: 'fake-android-uuid',
+        bridgeInterfaceKey: 'source-a',
+        bridgeConfigUrl: 'https://sub.example/a.json',
       );
       await runIo(tester, () => state.activateConfigRecord(recordId));
       await tapIo(tester, find.text('推送到设备'));
 
+      expect(state.syncState.lastError, isNull);
       expect(httpClient.requests, hasLength(1));
-      final request = httpClient.requests.single;
+      final request = httpClient.requests.single as http.Request;
       expect(request.url.queryParameters['mode'], '1');
       expect(request.url.queryParameters['type'], 'history');
       expect(request.url.queryParameters['do'], 'sync');
+      // 载荷必须是「源标识 + 该源自己的订阅地址」，绝不能是网关地址。
+      final payload =
+          jsonDecode(Uri.splitQueryString(request.body)['config']!)
+              as Map<String, Object?>;
+      expect(payload['configKey'], 'source-a');
+      expect(payload['url'], 'https://sub.example/a.json');
+      expect(
+        Uri.splitQueryString(request.body)['configKey'],
+        'source-a',
+        reason: 'configKey 必须作为独立表单字段透传给安卓（按源写库）',
+      );
       expect(state.syncState.lastStats?.applied, 2);
       expect(pageText(tester), contains('applied=2'));
     });

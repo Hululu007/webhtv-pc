@@ -54,7 +54,8 @@ Future<SyncServer> startServer({
       deviceName: 'WebHTV PC',
       isEnabled: () => enabled,
       isPeerAuthorized: (_) => peerAuthorized,
-      onHistory: (_) async => const SyncMergeStats.empty(),
+      onHistory: (_, {String sourceKey = ''}) async =>
+          const SyncMergeStats.empty(),
       onKeep: (_) async => const SyncMergeStats.empty(),
       onBackup: (_, _) async => const SyncSettings.empty(),
       realtimePull: ({required int since, required int limit}) =>

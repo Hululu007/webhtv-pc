@@ -399,4 +399,98 @@ void main() {
       expect(joined, contains('live.json'));
     });
   });
+
+  group('配置清单与按源取站点（方案 B：把安卓全部源拉过来并支持切换）', () {
+    Map<String, Object?> manageConfigsWithSources() => {
+      'items': [
+        {
+          'type': 0,
+          'name': '源A',
+          'url': 'https://a.example/catvod/index.js.md5',
+          'interfaceKey': 'key-a',
+          'time': 1700000000000,
+          'active': false,
+        },
+        {
+          'type': 0,
+          'name': '源B',
+          'url': 'https://b.example/config.json',
+          'interfaceKey': 'key-b',
+          'time': 1700000001000,
+          'active': true,
+        },
+        {
+          'type': 1,
+          'url': 'https://example.com/sub/live.json',
+          'interfaceKey': 'key-live',
+          'active': true,
+        },
+      ],
+    };
+
+    test('GET /manage/configs 并只保留点播源', () async {
+      client.route('/manage/configs', manageConfigsWithSources());
+      final catalog = await service.fetchSources(reachable);
+
+      expect(client.requests.single.path, endsWith('/manage/configs'));
+      expect(catalog.sources, hasLength(2));
+      expect(
+        catalog.sources.map((s) => s.interfaceKey),
+        ['key-a', 'key-b'],
+      );
+      expect(catalog.active?.interfaceKey, 'key-b');
+      expect(catalog.byInterfaceKey('key-a')?.displayName, '源A');
+    });
+
+    test('缺 interfaceKey 的点播源被跳过并给出可见诊断', () async {
+      client.route('/manage/configs', {
+        'items': [
+          {'type': 0, 'url': 'https://a.example/legacy.json', 'name': '老安卓'},
+        ],
+      });
+      final catalog = await service.fetchSources(reachable);
+
+      expect(catalog.isEmpty, isTrue);
+      expect(catalog.diagnostics.join('\n'), contains('interfaceKey'));
+    });
+
+    test('/manage/configs 不存在 → bridgeNoGateway（版本过旧）', () async {
+      await expectLater(
+        service.fetchSources(reachable),
+        throwsA(isA<AppError>().having(
+          (e) => e.kind,
+          'kind',
+          AppErrorKind.bridgeNoGateway,
+        )),
+      );
+    });
+
+    test('带 interfaceKey 时请求 configKey 参数（向后兼容：不带则不出现）', () async {
+      client.route(
+        '/vod/api',
+        withHost(readFixture('android/gateway-config.json'), reachable),
+      );
+      await service.fetchGatewayConfig(reachable, interfaceKey: 'key-b');
+      final uri = client.requests.single;
+      expect(uri.queryParameters['ac'], 'config');
+      expect(uri.queryParameters['configKey'], 'key-b');
+
+      client.requests.clear();
+      await service.fetchGatewayConfig(reachable);
+      expect(
+        client.requests.single.queryParameters.containsKey('configKey'),
+        isFalse,
+        reason: '老安卓不认识 configKey；当前激活源仍走原路径',
+      );
+    });
+
+    test('清单日志只给条数与标识前缀，不含订阅地址', () async {
+      client.route('/manage/configs', manageConfigsWithSources());
+      await service.fetchSources(reachable);
+      final joined = log.lines.join('\n');
+      expect(joined, contains('sources=2'));
+      expect(joined, contains('key-b'));
+      expect(joined, isNot(contains('b.example')));
+    });
+  });
 }
