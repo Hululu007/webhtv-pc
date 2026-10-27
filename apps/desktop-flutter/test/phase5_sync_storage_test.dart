@@ -349,6 +349,113 @@ void main() {
     });
   });
 
+  group('历史作品身份列：只加法迁移、只由真实值覆盖（design/05 §4）', () {
+    test('三列存在，旧行升级后身份为空（不回填猜测的 TMDB）', () {
+      final db = AppDatabase.inMemory();
+      db.upsertHistory(
+        siteKey: 'csp_Media',
+        vodId: 'demo-001',
+        vodName: '示例剧集',
+        flag: '线路一',
+        episodeName: '第1集',
+        episodeId: 'http://h/ep-1.m3u8',
+        positionMs: 1000,
+        durationMs: 2700000,
+        updatedAt: kDefaultTime,
+      );
+      final row = db.recentHistory().single;
+      expect(row.vodYear, '');
+      expect(row.tmdbId, 0);
+      expect(row.mediaType, '');
+      expect(row.hasTmdbIdentity, isFalse);
+      db.dispose();
+    });
+
+    test('后续写入不带身份时，已有的身份不被抹掉', () {
+      final db = AppDatabase.inMemory();
+      void write({String vodYear = '', int tmdbId = 0, String mediaType = ''}) {
+        db.upsertHistory(
+          siteKey: 'csp_Media',
+          vodId: 'demo-001',
+          vodName: '示例剧集',
+          flag: '线路一',
+          episodeName: '第1集',
+          episodeId: 'http://h/ep-1.m3u8',
+          positionMs: 1000,
+          durationMs: 2700000,
+          updatedAt: kDefaultTime,
+          vodYear: vodYear,
+          tmdbId: tmdbId,
+          mediaType: mediaType,
+        );
+      }
+
+      // 播放器写入真实身份（player_page 的 _persistProgress 传的就是这两个值）。
+      write(vodYear: '2024', tmdbId: 1399, mediaType: 'tv');
+      var row = db.recentHistory().single;
+      expect(row.vodYear, '2024');
+      expect(row.tmdbId, 1399);
+      expect(row.mediaType, 'tv');
+
+      // 安卓推来的记录不带身份：位置前进，身份必须保留。
+      write();
+      row = db.recentHistory().single;
+      expect(row.vodYear, '2024', reason: '同步记录没有年份，不得抹掉本地已绑定的年份');
+      expect(row.tmdbId, 1399, reason: 'TMDB 0 表示「不知道」，不是「清空」');
+      expect(row.mediaType, 'tv');
+
+      // 拿到新的真实身份时照常覆盖（用户换了匹配结果）。
+      write(vodYear: '2025', tmdbId: 550, mediaType: 'movie');
+      row = db.recentHistory().single;
+      expect(row.tmdbId, 550);
+      expect(row.mediaType, 'movie');
+      expect(row.vodYear, '2025');
+      db.dispose();
+    });
+
+    test('媒体类型只认 movie/tv：大小写归一，坏值落库为空串', () {
+      final db = AppDatabase.inMemory();
+      db.upsertHistory(
+        siteKey: 'csp_Media',
+        vodId: 'demo-001',
+        vodName: '示例剧集',
+        flag: '线路一',
+        episodeName: '第1集',
+        episodeId: 'http://h/ep-1.m3u8',
+        positionMs: 1000,
+        durationMs: 2700000,
+        updatedAt: kDefaultTime,
+        tmdbId: 1399,
+        mediaType: 'TV',
+      );
+      // 大小写不敏感（`normalizeMediaTypeValue` 先 toLowerCase），但落库统一小写。
+      final row = db.recentHistory().single;
+      expect(row.mediaType, 'tv');
+      expect(row.hasTmdbIdentity, isTrue);
+
+      // 不认识的类型收敛为空串：留个坏值会让聚合键分裂出第三种命名空间
+      // （tmdb|TV|1399 与 tmdb|tv|1399 是两张卡）。
+      db.upsertHistory(
+        siteKey: 'csp_Media',
+        vodId: 'demo-001',
+        vodName: '示例剧集',
+        flag: '线路一',
+        episodeName: '第1集',
+        episodeId: 'http://h/ep-1.m3u8',
+        positionMs: 1000,
+        durationMs: 2700000,
+        updatedAt: kDefaultTime + 1,
+        tmdbId: 1399,
+        mediaType: 'person',
+      );
+      final bad = db.recentHistory().single;
+      expect(bad.mediaType, 'tv', reason: '坏值不覆盖已有的合法身份');
+      expect(normalizeMediaTypeValue('person'), '');
+      expect(normalizeMediaTypeValue(' Movie '), 'movie');
+      db.dispose();
+    });
+  });
+
   group('同步索引与删除标记索引（design/02 §4.3）', () {
     test('historySyncIndex 以 (siteKey,vodId,flag,episodeId) 为键', () {
       final db = AppDatabase.inMemory();

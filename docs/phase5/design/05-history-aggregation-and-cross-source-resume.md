@@ -305,16 +305,23 @@ DetailPage
 | --- | --- |
 | 既有断言随 v8 更新 | `phase5_sync_storage_test.dart`（`schemaVersion` → 8）、`phase9_storage_test.dart` |
 | `flutter analyze lib test integration_test` | `No issues found!` |
-| PC 全量单测 | 151 个测试文件分 6 批 × `-j 4` 全绿（约 2930 例） |
+| PC 全量单测 | 151 个测试文件分 3 批 × `-j 4` 全绿（1217 + 1047 + 670 例） |
 
 ### 9.3 反向验证（防回归靶子）
 
-| 靶子 | 去掉后必须失败的断言 |
+每一条都**实跑过**：改坏实现 → 跑对应套件确认失败 → 还原 → 复跑确认全绿。
+
+| 靶子（改坏哪里） | 实际失败的断言（实测输出） |
 | --- | --- |
-| `_splitByYear` 的「≥2 个不同年份才拆」 | `phase5_history_grouping_test.dart`「桶内只有一个年份时不拆」 |
-| `migrate` 第一条规则（`!sameEpisode` → `null`） | 「不是同一集 → 不迁移」与「跨源不是同一集 → null」 |
-| `resolveResumeStart` 的 `fallback` 优先 | 「同源 fallback 命中时原样返回（行为与改造前一致）」 |
-| `upsertHistory` 的条件覆盖 | 身份被空值抹掉后，聚合退化为按片名（`phase5_history_grouping_test` 的一方有身份不误合） |
+| `_splitByYear` 把 `years.length <= 1` 放宽成 `years.isEmpty` | `phase5_history_grouping_test`「桶内只有一个年份、其余记录无年份时也不拆」→ `Expected: <1> Actual: <2>`（`+15 -1`） |
+| `ResumePositionPolicy.migrate` 删掉 `if (!sameEpisode) return null;` | `phase5_resume_migration_test` `+23 -1` 与 `phase6_resume_playback_test` `+16 -1` 同时失败 |
+| `resolveResumeStart` 删掉 `if (fallback != null) return fallback;` | `phase6_resume_playback_test`「同源 fallback 命中时原样返回」+ `phase6_detail_resume_test`「有历史且有进度 → 文案『继续播放 · <集名>』」「桥接线路（显示名 ≠ 源线路名）→ 仍能续播」，共 `+55 -3` |
+| `upsertHistory` 的 `ON CONFLICT` 改回无条件覆盖 | `phase5_sync_storage_test`「后续写入不带身份时，已有的身份不被抹掉」→ `Expected: '2024' Actual: ''` 与 `Expected: 'tv' Actual: ''`（`+16 -2`） |
+
+第 1 条靶子第一次尝试时**没能失败**（`+15` 全绿）：当时的用例只有「桶内两个记录
+同一年份」，放宽实现后它们仍然同桶。补了「一个记录有年份 + 两条无年份」这一形态
+才抓住差异——那正是实际数据里最常见的形态（安卓推来的记录无年份、PC 本地播放的
+有年份）。这条教训写在这里：**反向验证本身也要被验证**。
 
 ---
 
