@@ -327,6 +327,53 @@ bool _sameEpisodeByNumber(String source, String target) {
   return a == sourceEpisodeNumber(target);
 }
 
+/// 目标站点某一部作品的集数（取最长那条线路的集数；0 = 无法判定）。
+///
+/// 只用于候选排序的次要权重与展示，**不参与**自动播放否决（PC 侧没有
+/// 「集数不一致就拒绝」的规则，安卓 §10.4 同样不把集数当否决项）。
+int episodeCountOf(List<VodPlayLine> lines) {
+  var count = 0;
+  for (final line in lines) {
+    if (line.episodes.length > count) count = line.episodes.length;
+  }
+  return count;
+}
+
+/// 目标站点的这部剧里是否存在「原记录那一集」。
+///
+/// 这是跨源自动播放的**硬条件**（对齐安卓 §10.4 的 `hasTargetEpisode`）：
+/// 集对不上的候选即使 TMDB 完全一致也不能自动播——否则用户点「继续观看」
+/// 会被送到一部同名片的第一集，进度迁移也必然被 [resumeEpisodeMatches]
+/// 拒掉，只剩一次白跑。
+///
+/// **实现刻意直接复用 [resumeEpisodeMatches]**，而不是另写一套「像不像同一集」
+/// 的启发式：候选阶段说「有」，播放阶段就必须也判「是同一集」，否则用户会先
+/// 被自动送进详情页、再在播放时被迁移规则拒掉（白跑一次，还从 0 开始）。
+/// 逐集试一遍的代价可忽略（一部剧通常几十到几百集、一两次线路），而且
+/// 这样两边判定才**永远不会**分叉。
+///
+/// 副作用是保守：单集作品（电影）若片名/集名/集号都对不上线索，这里判 false
+/// ⇒ 不自动播，交给用户手动选。宁可少一次自动跳转，不可播错集。
+bool candidateHasResumeEpisode({
+  required List<VodPlayLine> lines,
+  required ResumeSeed seed,
+}) {
+  for (final line in lines) {
+    for (var index = 0; index < line.episodes.length; index++) {
+      if (resumeEpisodeMatches(
+        lines: lines,
+        seed: seed,
+        targetLine: line,
+        targetEpisodeIndex: index,
+        targetEpisodeName: line.episodes[index].name,
+      )) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /// 把「原记录的进度」换算成**目标集**的起始位置（跨源续播的完整策略入口）。
 ///
 /// [targetDurationMs] 传播放器已有的时长（0 = 未知）；未知时策略沿用绝对位置。

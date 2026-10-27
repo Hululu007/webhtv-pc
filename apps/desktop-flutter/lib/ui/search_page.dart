@@ -22,6 +22,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../core/history_view.dart';
 import '../core/hot_rank_layout.dart';
 import '../core/protocol.dart';
 import '../core/search_result_filter.dart';
@@ -56,6 +57,7 @@ class SearchPage extends StatefulWidget {
     required this.state,
     this.initialKeyword,
     this.identityHint,
+    this.resumeSeed,
   });
 
   final AppState state;
@@ -65,6 +67,12 @@ class SearchPage extends StatefulWidget {
 
   /// 身份提示（`tmdbId`），便于搜索结果自动匹配（`04` §6.2）。
   final TmdbIdentity? identityHint;
+
+  /// 待迁移的续播种子（跨源续播的降级入口带入，`design/05` §7.4）。
+  ///
+  /// 不带的话，用户从「未找到可可靠续播的播放源」点进全局搜索、挑中一条结果后，
+  /// 进度上下文就丢了，只能从头播——而这正是他点「继续观看」想避免的事。
+  final ResumeSeed? resumeSeed;
 
   @override
   State<SearchPage> createState() => _SearchPageState();
@@ -384,7 +392,13 @@ class _SearchPageState extends State<SearchPage> {
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => DetailPage(state: _state, vod: vod),
+        // 续播上下文原样带下去：没有它，从「未找到可可靠续播的播放源」
+        // 走全局搜索选中的结果会从头播（`design/05` §7.4）。
+        builder: (_) => DetailPage(
+          state: _state,
+          vod: vod,
+          resumeSeed: widget.resumeSeed,
+        ),
       ),
     );
   }

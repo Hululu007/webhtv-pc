@@ -359,7 +359,9 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 | 存储 | `schemaVersion 7` | `8`；`upsertHistory` 用条件覆盖，空值不抹掉已绑定身份 |
 | 来源标注 | 无 | 组内含其他源时显示来源 chip；多源显示「{n} 个其他来源」；老记录「来源未知」（`05` §6） |
 | 跨源播放 | 直接 SnackBar 结束 | 两条路径：原站点仍在 → 直接进详情页；否则在**当前源内**搜索匹配，无高置信候选则交给用户（`05` §7） |
-| 续播进度 | 跨源一律从头 | `ResumeSeed` 随历史卡带入详情页，`resolveResumeStart` 判定同一集后按 `ResumePositionPolicy.migrate` 换算（`05` §7.2） |
+| 续播进度 | 跨源一律从头 | `ResumeSeed` 随历史卡带入详情页，`resolveResumeStart` 判定同一集后按 `ResumePositionPolicy.migrate` 换算；`PlayerPage._load` 再用目标集真实时长重算一次并摘掉种子（`05` §7.2/§7.3） |
+| 跨源候选 | 列表阶段一律当作「有目标集」 | **两阶段**：详情探测后回填 `hasTargetEpisode`/`episodeCount`，预算 12、失败保持 false（`05` §7） |
+| 全局搜索兜底 | 只带片名，选完片从头播 | `SearchPage(resumeSeed:)` → `_openResult` 透传给 `DetailPage`，进度仍按同一集迁移（`05` §7） |
 
 ### 8.2 三条硬边界
 
@@ -373,8 +375,7 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 
 | 限制 | 处置 |
 | --- | --- |
-| 详情页拿不到目标集时长（`targetDurationMs` 传 0） | 走绝对毫秒；`migrate` 的比例分支已实现且有用例，接入点在 `PlayerPage._load` 拿到 `_controller.duration` 之后（`05` §10） |
-| 候选 `hasTargetEpisode` 在列表阶段恒 `true`、`episodeCount` 恒 0 | 「找到目标集优先」的排序权重暂不生效；需加载详情后回填（安卓 §11 的两阶段解析） |
+| 详情探测预算封顶 12 条 | 目标集只在更靠后的候选上时退化为让用户手选；PC 侧暂无 `SiteHealthStore` 可参与排序（`05` §10） |
 | 搜索关键词只用原生片名 | 跨源 TMDB 绑定属另一 `config_id`，取它会串缓存（`_searchKeywordOf` 注释） |
 | 已删除配置只能给短标识 | 显示为 `bridge:ac2d474b` 而非名字；保留配置墓碑可解 |
 
@@ -382,8 +383,8 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 
 | 项 | 结果 |
 | --- | --- |
-| 新增套件 | `phase5_history_grouping_test`、`phase5_resume_migration_test`、`phase5_history_aggregation_ui_test`、`phase6_resume_playback_test`、`phase6_detail_resume_test` 追加组全绿 |
-| PC 全量单测 | 151 个测试文件分 6 批 × `-j 4` 全绿（约 2930 例） |
+| 新增套件 | `phase5_history_grouping_test`、`phase5_resume_migration_test`、`phase5_history_aggregation_ui_test`、`phase5_history_cross_source_test`、`phase6_resume_playback_test`（含比例换算与接线锁）、`phase6_detail_resume_test` 追加组全绿 |
+| PC 全量单测 | 151 个测试文件分 3 批 × `-j 4` 全绿（1217 + 1047 + 684 例） |
 | 静态分析 | `flutter analyze lib test integration_test` → `No issues found!` |
-| 反向验证靶子 | 去掉「≥2 个不同年份才拆」/「`!sameEpisode` → null」/「`fallback` 优先」/「`upsert` 条件覆盖」任一项，对应用例必须失败（`05` §9.3） |
+| 反向验证靶子 | 去掉「≥2 个不同年份才拆」/「`!sameEpisode` → null」/「`fallback` 优先」/「`upsert` 条件覆盖」/「候选回填 `hasTargetEpisode`」/「兜底传 `resumeSeed`」/「播放器用真实时长重算」任一项，对应用例必须失败（`05` §9.3） |
 

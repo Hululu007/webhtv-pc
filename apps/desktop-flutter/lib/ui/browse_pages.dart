@@ -1506,6 +1506,11 @@ class _DetailPageState extends State<DetailPage> {
       episodeId: episode.url,
       episodeName: episode.name,
     );
+    // `targetDurationMs` 传 0：详情页拿不到目标集的真实时长（要 `open()` 成功
+    // 才有），纯逻辑层对 0 的约定是「走绝对毫秒」。真正的比例换算交给播放器
+    // ——种子的副本会随 `PlaybackRequest.resumeSeed` 一起下去，播放器拿到
+    // `_controller.duration` 后重算一次（`player_page.dart` 的
+    // `_effectiveStartPosition`）。这里算出的值同时也是首屏按钮文案的依据。
     return resolveResumeStart(
       lines: lines,
       seed: widget.resumeSeed,
@@ -1630,6 +1635,9 @@ class _DetailPageState extends State<DetailPage> {
               subtitleHeaders:
                   decision.assetHeaders?.asRequestHeaders ?? const {},
               tmdb: identity.hasIdentity ? identity : null,
+              // 种子随请求一起下去，由播放器拿到目标集真实时长后重算比例
+              // （见 `_resumeStartFor` 注释与 `PlaybackRequest.resumeSeed`）。
+              resumeSeed: widget.resumeSeed,
             ),
           ),
         ),

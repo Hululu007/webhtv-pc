@@ -15,6 +15,7 @@ import 'package:window_manager/window_manager.dart';
 import '../core/app_error.dart';
 import '../core/danmaku.dart';
 import '../core/danmaku_match.dart';
+import '../core/history_view.dart';
 import '../core/lut.dart';
 import '../core/osd_config.dart';
 import '../core/osd_diagnostics.dart';
@@ -69,6 +70,7 @@ class PlaybackRequest {
     this.subtitleHeaders = const {},
     this.danmaku = const [],
     this.tmdb,
+    this.resumeSeed,
   }) : episodeTarget = episodeTarget ?? url,
        playbackFlag = playbackFlag ?? flag;
 
@@ -118,6 +120,17 @@ class PlaybackRequest {
   final int episodeIndex;
   final String? vodPic;
 
+  /// 待迁移的续播种子（跨源续播用，`docs/phase5/design/05` §7.3）。
+  ///
+  /// 为什么播放器还要收一次：比例换算需要**目标集的真实时长**，而目标集要
+  /// `open()` 成功后才拿得到（[_load] 里 `_controller.duration`）。详情页算出的
+  /// [startPosition] 只能按绝对毫秒给（它拿不到时长），两源同一集时长差很大时
+  /// 会落到中段甚至片尾。带上种子后由播放器用真实时长重算一遍。
+  ///
+  /// 这是**一次性交接**：首次恢复成功后即被清掉（见 [_load]），换集与
+  /// 「从最新进度续播」也必须清掉，否则会把上一集的种子套到新集上。
+  final ResumeSeed? resumeSeed;
+
   /// 地址已是最终可播地址（直播频道），无需经站点播放入口解析。
   ///
   /// 直播源的 `urls` 直接在本地就是媒体地址，走解析器只会多余地请求站点；
@@ -136,6 +149,8 @@ class PlaybackRequest {
     bool clearStartPosition = false,
     List<SubtitleInfo>? subtitles,
     List<DanmakuSource>? danmaku,
+    ResumeSeed? resumeSeed,
+    bool clearResumeSeed = false,
   }) {
     return PlaybackRequest(
       url: url ?? this.url,
@@ -154,6 +169,8 @@ class PlaybackRequest {
       startPosition: clearStartPosition
           ? null
           : (startPosition ?? this.startPosition),
+      // 与 `startPosition` 一样是「一次性交接」：显式清除优先，其次是新值。
+      resumeSeed: clearResumeSeed ? null : (resumeSeed ?? this.resumeSeed),
       playLines: playLines,
       episodeIndex: episodeIndex ?? this.episodeIndex,
       vodPic: vodPic,
@@ -747,7 +764,16 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     // 弹幕（§21 Phase 3）：拉取并启用弹幕。同样不得阻断播放。
     await _configureDanmaku();
     // 进度恢复：仅对同一剧集且位置有效时执行（§10.3 播放恢复）。
-    final start = _request.startPosition;
+    final start = _effectiveStartPosition();
+    // 种子是**一次性交接**：无论重算成功与否，落定后都要清掉，否则下一次
+    // `_load()`（失败重试、换线路）会把同一颗种子再套一遍，甚至套到别的集上。
+    if (_request.resumeSeed != null || start != _request.startPosition) {
+      _request = _request.copyWith(
+        startPosition: start,
+        clearStartPosition: start == null,
+        clearResumeSeed: true,
+      );
+    }
     if (start != null &&
         start > Duration.zero &&
         start < _controller.duration) {
@@ -762,6 +788,37 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     _skipArmed = true;
     _maybeAutoSkip();
     _startProgressSaver();
+  }
+
+  /// 本次加载实际要 seek 的位置：优先用「待迁移种子 + 目标集真实时长」重算。
+  ///
+  /// 为什么不能直接信 [PlaybackRequest.startPosition]：详情页算它时拿不到
+  /// 目标集的真实时长（要 `open()` 成功才有），只能按绝对毫秒搬运；两个源
+  /// 同一集的时长差很大时（同一部剧不同剪辑/片头长度）绝对毫秒会落到中段甚至
+  /// 片尾，片尾还会被 `endingGuard` 拦成「从头开始」。这里拿到
+  /// `_controller.duration` 后再走一次同一套策略，就能落进比例换算分支。
+  ///
+  /// 重算失败（不是同一集、位置无效、时长未知）时退回详情页给的值：那一路
+  /// 只可能给出「绝对毫秒」，不会比这里更差。
+  Duration? _effectiveStartPosition() {
+    final base = _request.startPosition;
+    final seed = _request.resumeSeed;
+    if (seed == null) return base;
+    final line = _lineOf(_request.flag);
+    final index = _request.episodeIndex;
+    if (line == null || index < 0 || index >= line.episodes.length) return base;
+    return resolveResumeStart(
+          lines: _request.playLines,
+          seed: seed,
+          targetLine: line,
+          targetEpisodeIndex: index,
+          targetEpisodeName: line.episodes[index].name,
+          targetDurationMs: _controller.duration.inMilliseconds,
+          // 同源精确值已在详情页作为 `fallback` 消费过；这里只做比例换算，
+          // 故不重复传入（否则会短路掉重算）。
+          fallback: null,
+        ) ??
+        base;
   }
 
   /// 应用播放参数与 LUT（Phase 9）。
@@ -2177,11 +2234,14 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     if (await windowManager.isFullScreen()) await _toggleFullscreen();
   }
 
-  List<VodEpisode> get _episodes {
+  List<VodEpisode> get _episodes => _lineOf(_request.flag)?.episodes ?? const [];
+
+  /// 按**展示名**找线路（`_request.flag` 与线路下拉用的都是展示名）。
+  VodPlayLine? _lineOf(String flag) {
     for (final line in _request.playLines) {
-      if (line.flag == _request.flag) return line.episodes;
+      if (line.flag == flag) return line;
     }
-    return const [];
+    return null;
   }
 
   String _playbackFlagFor(String displayFlag) {
@@ -2288,6 +2348,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
           headers: _request.directUrl ? _request.headers : null,
           episodeIndex: episodeIndex,
           clearStartPosition: true,
+          // 种子属于**原记录那一集**：换集后必须一起清掉，否则会被当成
+          // 「这一集也要按原进度续播」而把用户丢到新集的中段。
+          clearResumeSeed: true,
           subtitles: subtitles,
           danmaku: danmaku,
         );
@@ -2346,7 +2409,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       scope: 'player',
     );
     setState(() {
-      _request = _request.copyWith(startPosition: latest);
+      // 这里查到的就是**这一集**的最新进度，比种子更准；种子必须清掉，
+      // 否则 `_load()` 会拿种子再算一次把它覆盖掉。
+      _request = _request.copyWith(
+        startPosition: latest,
+        clearResumeSeed: true,
+      );
     });
     await _load();
   }

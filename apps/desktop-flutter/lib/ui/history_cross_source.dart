@@ -23,9 +23,11 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../core/history_view.dart';
 import '../core/protocol.dart';
 import '../core/resume_matching.dart';
 import '../core/resume_migration.dart';
+import '../services/site_service.dart';
 import '../services/storage.dart';
 import '../state/app_state.dart';
 import 'browse_pages.dart';
@@ -97,7 +99,10 @@ Future<void> openHistoryFromOtherSource(
     messenger.hideCurrentSnackBar();
     if (!context.mounted) return;
 
-    final candidates = <ResumeCandidate>[
+    // 第一阶段：列表阶段只能拿到片名/年份，先按它们粗筛（安卓 §11 两阶段
+    // 解析）。`hasTargetEpisode` 此时一律为 false——**不能**预置成 true，
+    // 否则「目标集不存在」的候选也会通过 `pickAutoPlayable` 被自动播放。
+    final listed = <ResumeCandidate>[
       for (final entry in outcome.results)
         if (entry.succeeded)
           for (final vod in entry.result!.list.take(4))
@@ -107,20 +112,34 @@ Future<void> openHistoryFromOtherSource(
               vodId: vod.vodId,
               vodName: vod.vodName,
               vodYear: vod.vodYear?.trim() ?? '',
-              episodeCount: 0,
-              // 详情尚未加载，此刻只知道「搜索结果里有这一条」；
-              // 目标集是否存在要等加载详情后再判定（见 _playOnSite）。
-              hasTargetEpisode: true,
             ),
     ];
-    if (candidates.isEmpty) {
+    if (listed.isEmpty) {
       _toast(context, '未在当前播放源中找到「${item.vodName}」');
       if (context.mounted) await _offerGlobalSearch(context, state, item);
       return;
     }
 
+    // 第二阶段：只对**等级够格**的候选加载详情，回填集数与「目标集是否存在」。
+    // 限制条数是为了不让一次续播打出十几请求（安卓 §11：每站 ≤2、全局 ≤12）。
+    final candidates = await _enrichCandidates(
+      state,
+      request,
+      listed,
+      seed: resumeSeedOf(item),
+    );
+    if (!context.mounted) return;
+
     final ranked = rankCandidates(request, candidates);
     final pick = pickAutoPlayable(ranked);
+    // 没有任何候选能接上这一集：主动说清楚「片找到了但集对不上」，
+    // 否则用户会以为自动匹配没工作。
+    if (pick == null && context.mounted) {
+      final anyAuto = ranked.any(
+        (row) => MatchConfidence.canAutoPlay(row.confidence),
+      );
+      if (anyAuto) _toast(context, '已找到同名作品，但没有对应的集，请在详情页手动选择');
+    }
     if (pick != null) {
       final site = config.sites
           .where((candidate) => candidate.key == pick.siteKey)
@@ -182,6 +201,81 @@ Future<void> _playOnSite(
   );
 }
 
+/// 第二阶段解析：给候选补上 `episodeCount` 与 `hasTargetEpisode`。
+///
+/// 为什么必须做：`pickAutoPlayable` 要求 `hasTargetEpisode`，而搜索结果里
+/// **没有**线路信息——只有加载详情才知道这部剧有没有那一集。少了这一步，
+/// 「同名片但只有 1 集」的候选会被当成能续播，用户点「继续观看」后进度迁移
+/// 必然被 `resumeEpisodeMatches` 拒掉，落得从头播（正是要修的缺口）。
+///
+/// 两个刻意的收窄：
+/// 1. 只查**等级够格**的候选（TMDB/年份粗筛后），不把搜索结果全打一遍详情；
+/// 2. 单条详情失败只降级该候选（`hasTargetEpisode: false`），不中断整次续播。
+///
+/// 限制条数上限 [maxDetailProbes] 与安卓 §11 的「全局 ≤12 候选」一致。
+Future<List<ResumeCandidate>> _enrichCandidates(
+  AppState state,
+  ResumeRequest request,
+  List<ResumeCandidate> listed, {
+  required ResumeSeed seed,
+}) async {
+  final service = state.siteService;
+  if (service == null) return listed;
+  final config = state.config;
+  if (config == null) return listed;
+
+  // 先按第一阶段等级排序，保证被截断掉的是最不像的那些。
+  final ranked = rankCandidates(request, listed);
+  final enriched = <ResumeCandidate>[];
+  var probes = 0;
+  for (final row in ranked) {
+    final candidate = row.candidate;
+    final site = config.sites
+        .where((item) => item.key == candidate.siteKey)
+        .firstOrNull;
+    if (site == null) {
+      enriched.add(candidate);
+      continue;
+    }
+    if (probes >= maxDetailProbes) {
+      // 探测预算用尽：原样保留（等级仍参与排序，但 hasTargetEpisode 为
+      // false，不会被自动播放选中）。宁可让用户手选，不可赌一把播错集。
+      enriched.add(candidate);
+      continue;
+    }
+    probes++;
+    try {
+      final detail = await service.detail(site, candidate.vodId);
+      // `detail` 返回的是 `SiteResult`（folder 分享链会有多条），线路要
+      // 逐条摊平；直接用 `firstOrNull` 会漏掉 folder 的分集线路。
+      final lines = <VodPlayLine>[
+        for (final vod in detail.value.list) ...SiteService.playLinesOf(vod),
+      ];
+      enriched.add(
+        ResumeCandidate(
+          siteKey: candidate.siteKey,
+          siteName: candidate.siteName,
+          vodId: candidate.vodId,
+          vodName: candidate.vodName,
+          vodYear: candidate.vodYear,
+          tmdbId: candidate.tmdbId,
+          mediaType: candidate.mediaType,
+          episodeCount: episodeCountOf(lines),
+          hasTargetEpisode: candidateHasResumeEpisode(lines: lines, seed: seed),
+        ),
+      );
+    } catch (_) {
+      // 详情失败只影响这一个候选：保持 hasTargetEpisode=false 即可，
+      // 不把它升格成「能续播」。
+      enriched.add(candidate);
+    }
+  }
+  return enriched;
+}
+
+/// 一次续播最多探测多少个候选的详情（安卓 §11 的全局候选上限）。
+const int maxDetailProbes = 12;
+
 /// 搜索关键词：优先用片名本身（站点的搜索接口认片名，不认已清洗的标题）。
 ///
 /// 为什么先原生片名再清洗：安卓 §10.3 的优先级是「规范标题 → 缓存标题 →
@@ -229,6 +323,8 @@ Future<void> _offerGlobalSearch(
       builder: (_) => SearchPage(
         state: state,
         initialKeyword: _searchKeywordOf(item),
+        // 续播上下文一起带进全局搜索：用户挑中一条结果后仍按同一集迁移进度。
+        resumeSeed: resumeSeedOf(item),
       ),
     ),
   );

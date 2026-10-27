@@ -194,12 +194,23 @@ chip 用主题色（`tertiaryContainer`）而不是固定半透明白/黑：chip
 
 - **只在当前配置的站点里搜**（`!site.hide && site.searchable`）。这是用户选型 ③ 的落地：
   绝不 `activateConfigRecord`——那会把整个 App 弹到另一个源上。
-- 每站只取前 4 条搜索结果（`take(4)`），构造 `ResumeCandidate`。
+- 每站只取前 4 条搜索结果（`take(4)`），构造 `ResumeCandidate`。**列表阶段不写
+  `hasTargetEpisode`**——那时还没加载详情，预置 `true` 等于赌一把。
+- **两阶段解析**（安卓 §11 同）：`_enrichCandidates` 对排好序的候选逐个 `detail()`，
+  用返回的线路摊平后回填 `episodeCount` 与 `hasTargetEpisode`
+  （`candidateHasResumeEpisode` 与播放阶段共用 `resumeEpisodeMatches`，判定永不分叉）。
+  探测预算 `maxDetailProbes = 12`；预算用尽或详情失败都**保持 `false`**，
+  宁可让用户手选，不可赌一把播错集。
 - 搜索期间必须给可见反馈（SnackBar「该记录不在当前播放源，正在当前源中匹配…」），
   否则 12s 的搜索期间界面像卡死（安卓 §7.3 的同一条要求：加载态不可静默）。
+- 有高置信候选但**都没有那一集**时，不弹「未找到播放源」，而是提示
+  「已找到同名作品，但没有对应的集，请在详情页手动选择」。
 - 无高置信候选时**不自动播放**，弹 `history-cross-source-dialog`：
   「未找到可可靠续播的播放源」+ 按钮「打开全局搜索」（`history-cross-source-open-search`）
-  → `SearchPage(initialKeyword: 片名)`。
+  → `SearchPage(initialKeyword: 片名, resumeSeed: 原记录进度)`。
+  种子必须一起带过去：用户从全局搜索里挑中一条结果后，`_openResult` 把它再传给
+  `DetailPage`，进度仍然按同一集迁移；否则「搜索 → 选片」这条最常用的兜底路径
+  会静默回到从头播。
 
 ### 7.1 候选评级 `core/resume_matching.dart`
 
@@ -245,14 +256,21 @@ chip 用主题色（`tertiaryContainer`）而不是固定半透明白/黑：chip
 历史卡（聚合/逐集）
   └─ _openBySetting
        ├─ 当前源 → _openDetail(item)                        ┐
-       └─ 其他源 → openHistoryFromOtherSource               │ 两条路径都传
-                     └─ _playOnSite(...) → DetailPage(...)  ┘ resumeSeed: resumeSeedOf(item)
+       └─ 其他源 → openHistoryFromOtherSource               │ 三条路径都传
+                     ├─ _playOnSite(...) → DetailPage(...)  │ resumeSeed: resumeSeedOf(item)
+                     └─ 全局搜索兜底 → SearchPage(resumeSeed:) ┘
+SearchPage
+  └─ _openResult → DetailPage(..., resumeSeed: widget.resumeSeed)
 DetailPage
   ├─ _history：resumeSeed 非空则**用它合成**一条 PlaybackHistory（带 positionMs/durationMs）
   ├─ _resumeStartFor(vod, lines, line, episodeIndex)
   │     = resolveResumeStart(seed:, targetLine:, targetEpisodeIndex:, targetEpisodeName:, targetDurationMs: 0, fallback: resumePositionFor(...))
   ├─ 首屏按钮文案 _heroPlayLabel → 与 _play 共用 _resumeStartFor（文案与行为不会漂移）
-  └─ _play(...) → PlaybackRequest(startPosition: resume)
+  └─ _play(...) → PlaybackRequest(startPosition: resume, resumeSeed: widget.resumeSeed)
+PlayerPage
+  ├─ _load() 恢复段前：_effectiveStartPosition()
+  │     = resolveResumeStart(seed:, targetDurationMs: _controller.duration.inMilliseconds, fallback: null) ?? startPosition
+  └─ 一次性交接：算完即 copyWith(startPosition:, clearResumeSeed: true)
 ```
 
 三个关键设计点：
@@ -266,11 +284,16 @@ DetailPage
    定位不到原记录那一集时**只比集号**，比不出就 `false`（不猜）。
    集号排在集名前面：跨源换站后集名常带站点自己的前后缀（`第03集` vs `03`），
    但集号是作品本身的身份。
-3. **`targetDurationMs` 目前传 0**：详情页拿不到目标集的真实时长（要 open 视频才有）。
-   纯逻辑层对 0 的约定是「走绝对毫秒」，因此本轮**不做比例换算**。
-   比例分支的实现与单测都已就位（`_splitByYear` 之外的 `migrate` 用例覆盖），
-   接进播放器只需在 `PlaybackRequest` 加一个「待迁移种子」字段并在 `_load` 拿到
-   `_controller.duration` 后重算——见 §10。
+3. **比例换算发生在播放器里，且只发生一次**：详情页拿不到目标集的真实时长
+   （要 open 视频才有），所以 `_resumeStartFor` 的 `targetDurationMs` 仍传 `0`
+   （走绝对毫秒，先给首屏文案一个确定的答案）。真正的重算在
+   `PlayerPage._load()`：open 成功后 `_controller.duration` 已知，
+   `_effectiveStartPosition()` 用真实时长调一次 `resolveResumeStart`，
+   然后立刻 `copyWith(startPosition: 新值, clearResumeSeed: true)` 把种子摘掉
+   ——「一次性交接」保证换集、失败重试、直播换线都不会把旧种子再迁移一遍
+   （后三者都走 `clearStartPosition: true`）。
+   同源路径不受影响：`startPosition` 由 `resumePositionFor` 精确给出，
+   `resumeSeed` 为 `null` 时 `_effectiveStartPosition` 原样返回 `startPosition`。
 
 ---
 
@@ -283,7 +306,8 @@ DetailPage
 | 改写入模型（一张卡一行） | 会破坏 `04` 的唯一键与安卓推送的合并语义，见 §2 方案 C |
 | 回写安卓的 `global_history_mode` / 聚合开关 | `04` Q15 已定：PC 本地偏好，安卓只是容器 |
 | 跨配置聚合 TMDB 缓存 | 跨源 TMDB 绑定属于另一个 `config_id`，取它会串缓存 |
-| 在列表阶段发网络请求判候选 | 会让「看全部」变成 N 次请求；候选判定只用已取到的搜索结果 |
+| 在**列表阶段**发网络请求判候选 | 会让「看全部」变成 N 次请求。探测只发生在**用户点了某一条跨源记录之后**，且预算封顶 `maxDetailProbes = 12` |
+| 把探测失败当成「能续播」 | 详情失败/预算用尽一律保持 `hasTargetEpisode: false`，宁可让用户手选 |
 
 ---
 
@@ -298,6 +322,8 @@ DetailPage
 | `test/phase5_history_aggregation_ui_test.dart` | 默认聚合 1 张卡 + `{n} 条` 角标；切逐集变 2 张；全局范围带来源名；按源范围只当前源 |
 | `test/phase6_resume_playback_test.dart` | `locateResumeEpisode`（flag 命中 / 集入口全库唯一 / 不唯一返回 null / 空列表）、`resumeEpisodeMatches`（同集、换站集名带前后缀仍算同集、集号不同、定位不到且集号解析不出、单集作品）、`resolveResumeStart`（fallback 优先、跨源同集迁移、不同集不迁移、无种子、`positionMs=0`、已播完、贴片尾）、`resumeSeedOf` 字段搬运 |
 | `test/phase6_detail_resume_test.dart`（追加 group） | 跨源种子接进播放链路：本机无历史仍显示「继续播放 · 第2集」、不同集回落「播放第一集」、已播完不迁移 |
+| `test/phase5_history_cross_source_test.dart` | 跨源路径二的**两阶段探测**（端到端，注入 `http.BaseClient`）：只有「有第 2 集」的站点被自动选中（站A 在前，硬编码 `true` 就会选错）、两站都没有那一集时弹 `history-cross-source-dialog` 且不自动播、全局搜索兜底把 `resumeSeed` 带进 `SearchPage` |
+| `test/phase6_resume_playback_test.dart`（追加两个 group） | `resolveResumeStart` 用目标集真实时长做比例换算（2h 目标 → 540000ms；差 60s 仍在容差内走绝对；`targetDurationMs=0` 退化绝对；比例落片尾 → `null`）+ 源码级接线锁（`PlayerPage` 的 `resumeSeed` 字段、`clearResumeSeed`、`_effectiveStartPosition()`、`targetDurationMs: _controller.duration.inMilliseconds`，`DetailPage` 的 `resumeSeed: widget.resumeSeed`） |
 
 ### 9.2 回归
 
@@ -305,7 +331,7 @@ DetailPage
 | --- | --- |
 | 既有断言随 v8 更新 | `phase5_sync_storage_test.dart`（`schemaVersion` → 8）、`phase9_storage_test.dart` |
 | `flutter analyze lib test integration_test` | `No issues found!` |
-| PC 全量单测 | 151 个测试文件分 3 批 × `-j 4` 全绿（1217 + 1047 + 670 例） |
+| PC 全量单测 | 151 个测试文件分 3 批 × `-j 4` 全绿（1217 + 1047 + 684 例） |
 
 ### 9.3 反向验证（防回归靶子）
 
@@ -317,6 +343,9 @@ DetailPage
 | `ResumePositionPolicy.migrate` 删掉 `if (!sameEpisode) return null;` | `phase5_resume_migration_test` `+23 -1` 与 `phase6_resume_playback_test` `+16 -1` 同时失败 |
 | `resolveResumeStart` 删掉 `if (fallback != null) return fallback;` | `phase6_resume_playback_test`「同源 fallback 命中时原样返回」+ `phase6_detail_resume_test`「有历史且有进度 → 文案『继续播放 · <集名>』」「桥接线路（显示名 ≠ 源线路名）→ 仍能续播」，共 `+55 -3` |
 | `upsertHistory` 的 `ON CONFLICT` 改回无条件覆盖 | `phase5_sync_storage_test`「后续写入不带身份时，已有的身份不被抹掉」→ `Expected: '2024' Actual: ''` 与 `Expected: 'tv' Actual: ''`（`+16 -2`） |
+| `_enrichCandidates` 把 `hasTargetEpisode` 回填改回硬编码 `true` | `phase5_history_cross_source_test`「第二阶段探测：只有『有第 2 集』的那个站点会被自动选中」→ `Expected: 'csp_b' Actual: 'csp_a'`（`+0 -1`） |
+| `_offerGlobalSearch` 不再给 `SearchPage` 传 `resumeSeed` | `phase5_history_cross_source_test`「全局搜索兜底把续播上下文带进搜索页」→ `Expected: not null Actual: <null>`（`+2 -1`） |
+| `PlayerPage._effectiveStartPosition` 的 `targetDurationMs` 改回常量 `0` | `phase6_resume_playback_test`「接线锁 · 播放器用 open 之后的真实时长重算」→ `Expected: true Actual: <false>`（`+28 -1`） |
 
 第 1 条靶子第一次尝试时**没能失败**（`+15` 全绿）：当时的用例只有「桶内两个记录
 同一年份」，放宽实现后它们仍然同桶。补了「一个记录有年份 + 两条无年份」这一形态
@@ -327,10 +356,20 @@ DetailPage
 
 ## 10. 已知限制
 
+以下三条是**这一轮补齐**的（前两条曾是缺口，现在已有实现与用例）：
+
+| 项 | 状态 |
+| --- | --- |
+| 比例换算 | **已补齐**。详情页仍传 `targetDurationMs: 0`（拿不到目标集时长），`PlayerPage._load` 用 `_controller.duration` 重算一次并摘掉种子 |
+| 候选 `hasTargetEpisode` | **已补齐**。`_enrichCandidates` 逐条 `detail()` 后由 `candidateHasResumeEpisode` 回填；预算 12、失败保持 `false` |
+| 候选 `episodeCount` | **已补齐**。同一次探测顺带回填（当前不参与自动判定，仅用于展示与后续扩展） |
+| 全局搜索兜底 | **已补齐**。`SearchPage` 收 `resumeSeed` 并在 `_openResult` 传给 `DetailPage` |
+
+仍然存在的限制：
+
 | 限制 | 影响 | 后续 |
 | --- | --- | --- |
-| `targetDurationMs` 恒为 0 | 两源同一集时长差很大时，仍用绝对毫秒（可能落到目标集的中段/片尾，片尾会被 `endingGuard` 拦成「从头」） | 在 `PlaybackRequest` 加待迁移种子，`PlayerPage._load` 拿到 `_controller.duration` 后重算；`migrate` 的比例分支已实现且有用例 |
-| 候选 `hasTargetEpisode` 在列表阶段恒 `true` | 「找到目标集优先」的排序权重在跨源路径上暂时不生效 | 加载详情后回填（安卓 §11 的两阶段解析） |
-| 候选 `episodeCount` 恒 0 | 不影响自动判定（PC 未使用集数做否决） | 同上 |
+| 探测预算封顶 12 | 搜索结果极多且目标集只在第 13 个候选上时，会退化成让用户手选 | 可按站点健康评分排序后再截断（安卓有 `SiteHealthStore`，PC 暂无） |
+| 比例换算只发生在「open 成功之后」 | open 失败重试走 `_resumeFromLatestProgress`，那条路径用的是本机精确历史，不受影响；但若用户手动换集，种子已摘掉、不会重新按比例迁移（正确行为：换集就该从头） | 无 |
 | 搜索关键词只用原生片名 | 未用 TMDB 缓存标题；理由见 `_searchKeywordOf` 注释：跨源 TMDB 绑定属另一 `config_id` | 可选：接入跨配置的标题缓存 |
 | `historySourceLabel` 对已删除配置只能给短标识 | 显示为 `bridge:ac2d474b` 形式而不是名字 | 保留配置墓碑 |
