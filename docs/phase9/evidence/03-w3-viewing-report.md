@@ -64,6 +64,7 @@ phase6_history_folder_detail_test: folder 详情（3 条）
 ## 4. 复现
 
 ```powershell
-puro -e webhtv -p apps/desktop-flutter dart analyze
-puro -e webhtv -p apps/desktop-flutter flutter test test/phase9_viewing_report_test.dart
+cd apps/desktop-flutter   # puro 的 -p 不改工作目录，必须先进工程目录
+puro -e webhtv dart analyze
+puro -e webhtv flutter test test/phase9_viewing_report_test.dart
 ```

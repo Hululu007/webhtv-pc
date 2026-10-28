@@ -29,14 +29,18 @@ L1/L2 必须能在无显示器环境跑；L3 用 `flutter test <suite> -d window
 ## 2. 工具链
 
 ```powershell
+# 必须在 apps/desktop-flutter 内执行：puro 的 -p/--dir 不改 flutter 的工作目录，
+# 只有 cd 会。在仓库根跑会报 `Expected to find project root in current working directory.`
+cd apps/desktop-flutter
+
 # 静态检查
-puro -e webhtv -p apps/desktop-flutter dart analyze
+puro -e webhtv dart analyze
 
 # 单元 + Widget
-puro -e webhtv -p apps/desktop-flutter flutter test
+puro -e webhtv flutter test
 
 # 单个集成套件（Windows 真实窗口）
-puro -e webhtv -p apps/desktop-flutter flutter test integration_test/phase9_<name>_flow_test.dart -d windows
+puro -e webhtv flutter test integration_test/phase9_<name>_flow_test.dart -d windows
 ```
 
 - `TEMP`/`TMP` 指向仓库内临时目录（media-kit 的 NativeReferenceHolder 会占用 `%TEMP%`，Phase 8 已踩坑）。

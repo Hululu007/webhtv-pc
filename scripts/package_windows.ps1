@@ -14,7 +14,7 @@
 #   pwsh -File scripts/package_windows.ps1 `
 #     -BuildDir apps/desktop-flutter/build/windows/x64/runner/Release `
 #     -OutputDir dist `
-#     -Version 0.1.0 -BuildNumber 1 -Channel dev `
+#     -Version 0.1.0 -BuildNumber 1 -Channel stable `
 #     -Commit (git rev-parse HEAD) -FlutterVersion 3.47.5
 
 [CmdletBinding()]

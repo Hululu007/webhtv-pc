@@ -108,23 +108,25 @@ WebHTV-PC-<version>[-beta]-windows-x64/
 
 ```powershell
 # 1. 构建（与 CI 相同的版本注入）
+# 必须先 cd 进工程目录：puro 的 --dir / -p 都**不会**改 flutter 的工作目录，
+# 只有 cd 真的会。实测 puro 1.5.0（Flutter 3.47.5）：
+#   puro --dir apps/desktop-flutter -e webhtv flutter build windows --release
+#     → Error: No pubspec.yaml file found.
+#   puro -e webhtv -p apps/desktop-flutter flutter pub get
+#     → Expected to find project root in current working directory.（exit 1）
+# 因此下面这行 cd 是必需的，不要为了少一行把它换成 --dir/-p。
 cd apps/desktop-flutter
-puro -e webhtv -p . flutter build windows --release --dart-define=APP_VERSION=0.1.0
+puro -e webhtv flutter build windows --release --dart-define=APP_VERSION=0.1.0
 
-# 等价写法（**不必先 cd**）：
-#   puro --dir apps/desktop-flutter -e webhtv flutter build windows --release --dart-define=APP_VERSION=0.1.0
-# 注意：`-p <目录>` 只是选定 puro 环境所绑定的工程，**不会**改 flutter 的工作目录。
-# 在仓库根执行 `puro -e webhtv -p . flutter build windows` 必然报
-# `Error: No pubspec.yaml file found.`——因为仓库根的 pubspec 在 apps/desktop-flutter。
 # 构建前先确认没有同名进程正在运行：Release 产物被占用时 cmake install 会以
 # `file INSTALL cannot copy file ... Permission denied` 失败（error MSB3073）。
 
-# 2. 打包
+# 2. 打包（正式版必须 -Channel stable；只有 beta/dev 才会在文件名里加后缀）
 cd ../..
 pwsh -File scripts/package_windows.ps1 `
   -BuildDir apps/desktop-flutter/build/windows/x64/runner/Release `
   -OutputDir dist `
-  -Version 0.1.0 -BuildNumber 1 -Channel dev `
+  -Version 0.1.0 -BuildNumber 1 -Channel stable `
   -Commit (git rev-parse HEAD) -ShortCommit (git rev-parse --short=7 HEAD) `
   -FlutterVersion 3.47.5
 
