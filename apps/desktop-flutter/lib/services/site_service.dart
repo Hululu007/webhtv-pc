@@ -134,12 +134,16 @@ class SiteService {
   }
 
   /// 详情（§8.3）。
-  Future<SiteCallResult<SiteResult>> detail(Site site, String vodId) async {
+  Future<SiteCallResult<SiteResult>> detail(
+    Site site,
+    String vodId, {
+    VodIdentityHint? identity,
+  }) async {
     final runtime = router.runtimeFor(site);
     return _call(
       site.key,
       HealthAction.detail,
-      () => runtime.detail(site, vodId),
+      () => runtime.detail(site, vodId, identity: identity),
     );
   }
 

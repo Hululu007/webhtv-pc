@@ -245,7 +245,14 @@ Future<List<ResumeCandidate>> _enrichCandidates(
     }
     probes++;
     try {
-      final detail = await service.detail(site, candidate.vodId);
+      final detail = await service.detail(
+        site,
+        candidate.vodId,
+        identity: VodIdentityHint(
+          vodId: candidate.vodId,
+          vodName: candidate.vodName,
+        ),
+      );
       // `detail` 返回的是 `SiteResult`（folder 分享链会有多条），线路要
       // 逐条摊平；直接用 `firstOrNull` 会漏掉 folder 的分集线路。
       final lines = <VodPlayLine>[

@@ -556,6 +556,123 @@ void main() {
     });
   });
 
+  group('详情身份兜底（VodIdentityHint）', () {
+    // 实测 Hxq（嗷呜配置里的网盘聚合 spider）详情返回的 vod_id/vod_name 都是
+    // 空串，但其余字段齐全；请求本身带着 ids，所以身份是确定的而不是猜测。
+    const hint = VodIdentityHint(vodId: 'Bkp_OaNRYo16PHUsPQWv5', vodName: '热烈的告别');
+
+    test('详情恰好一条且 id/name 为空时按请求上下文回填', () {
+      final result = HttpApiResponseParser.parse(
+        jsonEncode({
+          'list': [
+            {
+              'vod_id': '',
+              'vod_name': '',
+              'vod_remarks': '更新至第8集·共12集',
+              'vod_play_from': '免费分享',
+              'vod_play_url': r'1$http://x/e1#2$http://x/e2',
+            },
+          ],
+        }),
+        siteKey: 'k',
+        identity: hint,
+      );
+      expect(result.list, hasLength(1));
+      final vod = result.list.first;
+      expect(vod.vodId, 'Bkp_OaNRYo16PHUsPQWv5');
+      expect(vod.vodName, '热烈的告别');
+      // 其余字段必须原样保留，不能被兜底逻辑抹掉。
+      expect(vod.vodRemarks, '更新至第8集·共12集');
+      expect(vod.vodPlayFrom, '免费分享');
+      expect(parsePlayLines(vod.vodPlayFrom, vod.vodPlayUrl), hasLength(1));
+    });
+
+    test('上游已填的 id/name 不被请求上下文覆盖', () {
+      final result = HttpApiResponseParser.parse(
+        jsonEncode({
+          'list': [
+            {'vod_id': 'real-id', 'vod_name': '真实片名'},
+          ],
+        }),
+        siteKey: 'k',
+        identity: hint,
+      );
+      expect(result.list.first.vodId, 'real-id');
+      expect(result.list.first.vodName, '真实片名');
+    });
+
+    test('上游只缺其中一个字段时只补缺的那个', () {
+      final result = HttpApiResponseParser.parse(
+        jsonEncode({
+          'list': [
+            {'vod_id': 'real-id', 'vod_name': ''},
+          ],
+        }),
+        siteKey: 'k',
+        identity: hint,
+      );
+      expect(result.list.first.vodId, 'real-id');
+      expect(result.list.first.vodName, '热烈的告别');
+    });
+
+    test('条目数 >1 时不回填（否则多条会被写成同一个 id）', () {
+      final error = _captureError(
+        () => HttpApiResponseParser.parse(
+          jsonEncode({
+            'list': [
+              {'vod_id': '', 'vod_name': ''},
+              {'vod_id': '', 'vod_name': ''},
+            ],
+          }),
+          siteKey: 'k',
+          identity: hint,
+        ),
+      );
+      expect(error.kind, AppErrorKind.siteParse);
+    });
+
+    test('不带 identity 时行为与改造前一致（列表接口不回填）', () {
+      final error = _captureError(
+        () => HttpApiResponseParser.parse(
+          jsonEncode({
+            'list': [
+              {'vod_id': '', 'vod_name': ''},
+            ],
+          }),
+          siteKey: 'k',
+        ),
+      );
+      expect(error.kind, AppErrorKind.siteParse);
+    });
+
+    test('{code:0,data:{list}} 信封内的单条也回填', () {
+      final result = HttpApiResponseParser.parse(
+        jsonEncode({
+          'code': 0,
+          'data': {
+            'list': [
+              {'vod_id': '', 'vod_name': ''},
+            ],
+          },
+        }),
+        siteKey: 'k',
+        identity: hint,
+      );
+      expect(result.list.first.vodId, 'Bkp_OaNRYo16PHUsPQWv5');
+    });
+
+    test('XML 详情恰好一条时也回填', () {
+      final result = HttpApiResponseParser.parse(
+        '<rss><list id=""><name></name><note>更新至第3集</note></list></rss>',
+        siteKey: 'k',
+        identity: hint,
+      );
+      expect(result.list, hasLength(1));
+      expect(result.list.first.vodId, 'Bkp_OaNRYo16PHUsPQWv5');
+      expect(result.list.first.vodRemarks, '更新至第3集');
+    });
+  });
+
   group('多线路与多剧集（§8.4）', () {
     test('vod_play_from/vod_play_url 解析为多线路多剧集', () {
       final result = HttpApiResponseParser.parse(

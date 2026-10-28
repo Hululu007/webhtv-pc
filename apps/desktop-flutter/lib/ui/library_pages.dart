@@ -237,7 +237,14 @@ class _HistoryPageState extends State<HistoryPage> {
         final parent = Vod(vodId: item.vodId, vodName: item.vodName);
         final result = parent.isFolder
             ? await service.folderDetail(site, parent)
-            : await service.detail(site, item.vodId);
+            : await service.detail(
+                site,
+                item.vodId,
+                identity: VodIdentityHint(
+                  vodId: item.vodId,
+                  vodName: item.vodName,
+                ),
+              );
         if (result.value.list.isEmpty) continue;
         final poster = result.value.list.first.vodPic;
         if (poster == null || poster.trim().isEmpty) continue;

@@ -66,7 +66,11 @@ abstract class SiteRuntime {
     Map<String, String> filters,
   });
 
-  Future<SiteResult> detail(Site site, String vodId);
+  Future<SiteResult> detail(
+    Site site,
+    String vodId, {
+    VodIdentityHint? identity,
+  });
 
   Future<SiteResult> search(
     Site site, {
@@ -118,8 +122,11 @@ class UnsupportedRuntime implements SiteRuntime {
   }) async => throw _error(site.key, 'category');
 
   @override
-  Future<SiteResult> detail(Site site, String vodId) async =>
-      throw _error(site.key, 'detail');
+  Future<SiteResult> detail(
+    Site site,
+    String vodId, {
+    VodIdentityHint? identity,
+  }) async => throw _error(site.key, 'detail');
 
   @override
   Future<SiteResult> search(
@@ -202,9 +209,13 @@ class HttpApiRuntime implements SiteRuntime {
   }
 
   @override
-  Future<SiteResult> detail(Site site, String vodId) {
+  Future<SiteResult> detail(
+    Site site,
+    String vodId, {
+    VodIdentityHint? identity,
+  }) {
     final call = _build(site, HttpApiAction.detail, vodId: vodId);
-    return client.execute(call, siteKey: site.key);
+    return client.execute(call, siteKey: site.key, identity: identity);
   }
 
   @override

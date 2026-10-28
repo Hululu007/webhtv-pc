@@ -214,6 +214,7 @@ class CatHttpClient {
   Future<SiteResult> call(
     CatHttpCall call, {
     required String siteKey,
+    VodIdentityHint? identity,
   }) async {
     final http.Response response;
     try {
@@ -273,7 +274,12 @@ class CatHttpClient {
     }
 
     final text = utf8.decode(response.bodyBytes, allowMalformed: true);
-    return decode(text, siteKey: siteKey, route: call.route);
+    return decode(
+      text,
+      siteKey: siteKey,
+      route: call.route,
+      identity: identity,
+    );
   }
 
   /// 解析响应信封（§9.4）。
@@ -281,6 +287,7 @@ class CatHttpClient {
     String body, {
     required String siteKey,
     required String route,
+    VodIdentityHint? identity,
   }) {
     final trimmed = body.trim();
     if (trimmed.isEmpty) {
@@ -358,16 +365,26 @@ class CatHttpClient {
         details: {'route': route},
       );
     }
-    return _toResult(map, siteKey: siteKey, route: route);
+    return _toResult(
+      map,
+      siteKey: siteKey,
+      route: route,
+      identity: identity,
+    );
   }
 
   SiteResult _toResult(
     Map<String, Object?> map, {
     required String siteKey,
     required String route,
+    VodIdentityHint? identity,
   }) {
     // 复用 HTTP API 的 Result 解析语义，保证两条链路的字段解释一致（§8.3）。
-    return HttpApiResponseParser.parse(jsonEncode(map), siteKey: siteKey);
+    return HttpApiResponseParser.parse(
+      jsonEncode(map),
+      siteKey: siteKey,
+      identity: identity,
+    );
   }
 }
 

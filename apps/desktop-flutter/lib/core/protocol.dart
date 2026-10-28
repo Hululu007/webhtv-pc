@@ -869,6 +869,49 @@ const String bridgeFolderVodIdPrefix = 'atvp_detail:';
 bool isBridgeFolderVodId(String vodId) =>
     vodId.startsWith(bridgeFolderVodIdPrefix);
 
+/// 详情请求已经知道的条目身份，用于回填上游漏填的 `vod_id`/`vod_name`。
+///
+/// 为什么需要：实测 Hxq（嗷呜配置里的网盘聚合 spider）详情返回的
+/// `vod_id`/`vod_name` 都是空串，而 `vod_remarks`/`vod_actor`/`vod_content`/
+/// `vod_play_from`/`vod_play_url` 齐全。丢掉整条会让详情页直接报
+/// 「列表条目缺少 vod_id/vod_name」打不开，但这次请求本身就带着 `ids`，
+/// 请求上下文是**确定**的身份，不属于猜测。
+///
+/// 使用边界：只在「详情返回恰好一条」时回填；列表/分类/搜索一律不回填，
+/// 否则所有条目会被写成同一个 id。
+class VodIdentityHint {
+  const VodIdentityHint({required this.vodId, this.vodName = ''});
+
+  final String vodId;
+  final String vodName;
+
+  bool get isEmpty => vodId.trim().isEmpty && vodName.trim().isEmpty;
+
+  @override
+  String toString() => 'VodIdentityHint($vodId, $vodName)';
+}
+
+/// 用 [hint] 回填条目里缺失的 `vod_id`/`vod_name`，其余字段原样保留。
+///
+/// 只补「缺失」的字段：上游偶尔只填其中一个（例如有 `vod_name` 没有
+/// `vod_id`），已填的值永远优先，不被请求上下文覆盖。
+Object? withVodIdentity(Object? value, VodIdentityHint hint) {
+  if (value is! Map) return value;
+  final map = <String, Object?>{
+    for (final entry in value.entries) entry.key.toString(): entry.value,
+  };
+  final id = asNonEmptyString(map['vod_id']) ?? asNonEmptyString(map['vodId']);
+  if (id == null && hint.vodId.trim().isNotEmpty) {
+    map['vod_id'] = hint.vodId;
+  }
+  final name =
+      asNonEmptyString(map['vod_name']) ?? asNonEmptyString(map['vodName']);
+  if (name == null && hint.vodName.trim().isNotEmpty) {
+    map['vod_name'] = hint.vodName;
+  }
+  return map;
+}
+
 /// 影视条目。
 class Vod {
   Vod({

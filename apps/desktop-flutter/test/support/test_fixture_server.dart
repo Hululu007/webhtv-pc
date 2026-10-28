@@ -624,6 +624,23 @@ class TestFixtureServer {
         await _fixtureJson(request, 'http/result-msg.json');
         return;
       }
+      if (parameters['ids'] == 'blank-1') {
+        // 上游漏填身份的详情样本：实测 Hxq（网盘聚合 spider）就长这样，
+        // vod_id/vod_name 空串但其余字段齐全（缺陷复现 2026-10-28）。
+        await _json(request, {
+          'list': [
+            {
+              'vod_id': '',
+              'vod_name': '',
+              'vod_remarks': '更新至第8集·共12集',
+              'vod_content': '剧情简介',
+              'vod_play_from': '免费分享',
+              'vod_play_url': '第1集\$$baseUrl/media/sample.m3u8',
+            },
+          ],
+        });
+        return;
+      }
       await _fixtureJson(request, 'http/detail.json');
       return;
     }

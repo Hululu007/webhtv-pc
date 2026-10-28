@@ -622,6 +622,24 @@ void main() {
       expect(error.message, contains('维护中'));
     });
 
+    test('详情漏填 vod_id/vod_name 时用请求上下文兜底（Hxq 回归锁）', () async {
+      // 不带身份：整条被判无效，历史行为保持不变（列表接口绝不回填）。
+      final error = await _capture(() => service.detail(site(), 'blank-1'));
+      expect(error.kind, AppErrorKind.siteParse);
+
+      // 带身份：本次请求知道 id/片名，详情页能打开且线路照常可用。
+      final detail = await service.detail(
+        site(),
+        'blank-1',
+        identity: const VodIdentityHint(vodId: 'blank-1', vodName: '热烈的告别'),
+      );
+      final vod = detail.value.list.first;
+      expect(vod.vodId, 'blank-1');
+      expect(vod.vodName, '热烈的告别');
+      expect(vod.vodRemarks, '更新至第8集·共12集');
+      expect(SiteService.playLinesOf(vod), isNotEmpty);
+    });
+
     test('播放决策记录健康统计与耗时（§14.2）', () async {
       final decision = await service.resolvePlayback(
         site: site(),

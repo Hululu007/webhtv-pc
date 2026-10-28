@@ -37,6 +37,8 @@ DESIGN_DOCS = [
     "docs/phase5/design/02-android-sync-protocol.md",
     "docs/phase5/design/03-bridge-test-and-acceptance.md",
     "docs/phase5/design/04-bridge-multisource.md",
+    "docs/phase5/design/05-history-aggregation-and-cross-source-resume.md",
+    "docs/phase5/design/06-detail-identity-fallback.md",
 ]
 
 MAIN_DOC = "docs/webhtv-pc-design.md"

@@ -383,7 +383,11 @@ abstract final class HttpApiResponseParser {
   /// - HTML 错误页必须识别为 [AppErrorKind.siteParse]（§7.4.3、§8.4）；
   /// - `{code: 0, data: ...}` 解包 `data`；`{code: 非0, msg}` 返回业务错误（§9.4）；
   /// - `msg` 非空时向上抛出业务错误，不转换为空列表（§7.4.3）。
-  static SiteResult parse(String body, {required String siteKey}) {
+  static SiteResult parse(
+    String body, {
+    required String siteKey,
+    VodIdentityHint? identity,
+  }) {
     final text = body.trimLeft();
     if (text.isEmpty) {
       throw AppError(
@@ -401,14 +405,20 @@ abstract final class HttpApiResponseParser {
     }
 
     if (text.startsWith('{')) {
-      return _parseJsonObject(_decodeJson(text, siteKey), siteKey: siteKey);
+      return _parseJsonObject(
+        _decodeJson(text, siteKey),
+        siteKey: siteKey,
+        identity: identity,
+      );
     }
     if (text.startsWith('[')) {
       final decoded = _decodeJson(text, siteKey);
-      return SiteResult(list: _parseVodList(decoded, siteKey: siteKey));
+      return SiteResult(
+        list: _parseVodList(decoded, siteKey: siteKey, identity: identity),
+      );
     }
     if (text.startsWith('<')) {
-      return _parseXml(text, siteKey: siteKey);
+      return _parseXml(text, siteKey: siteKey, identity: identity);
     }
     // 播放入口可能直接返回纯文本 URL。
     if (_looksLikeBareUrl(text)) {
@@ -438,6 +448,7 @@ abstract final class HttpApiResponseParser {
   static SiteResult _parseJsonObject(
     Object? decoded, {
     required String siteKey,
+    VodIdentityHint? identity,
   }) {
     final map = asMap(decoded);
 
@@ -455,7 +466,7 @@ abstract final class HttpApiResponseParser {
       final data = map['data'];
       if (data is List) {
         return SiteResult(
-          list: _parseVodList(data, siteKey: siteKey),
+          list: _parseVodList(data, siteKey: siteKey, identity: identity),
           msg: message,
         );
       }
@@ -463,6 +474,7 @@ abstract final class HttpApiResponseParser {
         final result = _parseJsonObject(
           data,
           siteKey: siteKey,
+          identity: identity,
         );
         return message == null ? result : result.copyWith(msg: message);
       }
@@ -484,7 +496,7 @@ abstract final class HttpApiResponseParser {
         .map(VodClass.fromJson)
         .whereType<VodClass>()
         .toList();
-    final list = _parseVodList(map['list'], siteKey: siteKey);
+    final list = _parseVodList(map['list'], siteKey: siteKey, identity: identity);
     final filters = _parseFilters(map['filters']);
 
     return SiteResult(
@@ -569,14 +581,27 @@ abstract final class HttpApiResponseParser {
     return result;
   }
 
-  static List<Vod> _parseVodList(Object? value, {required String siteKey}) {
+  static List<Vod> _parseVodList(
+    Object? value, {
+    required String siteKey,
+    VodIdentityHint? identity,
+  }) {
+    final items = asList(value);
+    // 只有「详情请求恰好返回一条」才允许用请求上下文补齐缺失字段：详情页是
+    // 按 vod_id 打开单条作品的，条目数 >1 说明这不是详情响应（或站点返回了
+    // 整页列表），此时补同一份 id 会把多条写成同一条。
+    final hint = identity != null && !identity.isEmpty && items.length == 1
+        ? identity
+        : null;
     final list = <Vod>[];
-    for (final item in asList(value)) {
-      final vod = Vod.fromJson(item);
+    for (final item in items) {
+      final vod = Vod.fromJson(
+        hint == null ? item : withVodIdentity(item, hint),
+      );
       if (vod == null) continue;
       list.add(vod);
     }
-    if (list.isEmpty && asList(value).isNotEmpty) {
+    if (list.isEmpty && items.isNotEmpty) {
       throw AppError(
         AppErrorKind.siteParse,
         '列表条目缺少 vod_id/vod_name',
@@ -587,7 +612,11 @@ abstract final class HttpApiResponseParser {
   }
 
   /// XML API（`type=0`）：结构为 `<rss><class>…</class><list>…</list></rss>`。
-  static SiteResult _parseXml(String text, {required String siteKey}) {
+  static SiteResult _parseXml(
+    String text, {
+    required String siteKey,
+    VodIdentityHint? identity,
+  }) {
     XmlDocument document;
     try {
       document = XmlDocument.parse(text);
@@ -617,8 +646,13 @@ abstract final class HttpApiResponseParser {
       if (cls != null) classes.add(cls);
     }
 
+    final listElements = root.findElements('list').toList();
+    final hint =
+        identity != null && !identity.isEmpty && listElements.length == 1
+        ? identity
+        : null;
     final list = <Vod>[];
-    for (final element in root.findElements('list')) {
+    for (final element in listElements) {
       // XML API 字段名与 Result JSON 字段名不同，这里显式映射，
       // 避免用 `vod_<xml标签>` 的机械拼接把 note/des 丢成未知字段。
       final attributes = <String, Object?>{
@@ -654,7 +688,9 @@ abstract final class HttpApiResponseParser {
           attributes['vod_play_url'] = urls.join(r'$$$');
         }
       }
-      final vod = Vod.fromJson(attributes);
+      final vod = Vod.fromJson(
+        hint == null ? attributes : withVodIdentity(attributes, hint),
+      );
       if (vod != null) list.add(vod);
     }
 
@@ -729,7 +765,11 @@ class HttpApiClient {
 
   void close() => _client.close();
 
-  Future<SiteResult> execute(HttpApiCall call, {required String siteKey}) async {
+  Future<SiteResult> execute(
+    HttpApiCall call, {
+    required String siteKey,
+    VodIdentityHint? identity,
+  }) async {
     // 只进日志的请求上下文：动作 + 脱敏 URL + 参数名（不含取值，§9.3.1）。
     final diagnostic = 'action=${call.action ?? "unknown"} ${call.summary}';
     final http.Response response;
@@ -787,7 +827,11 @@ class HttpApiClient {
 
     final body = _decodeResponseText(response);
     try {
-      return HttpApiResponseParser.parse(body, siteKey: siteKey);
+      return HttpApiResponseParser.parse(
+        body,
+        siteKey: siteKey,
+        identity: identity,
+      );
     } on AppError catch (error, stackTrace) {
       // 解析层只认 siteKey；不补上下文的话，「站源请求失败」无法区分是
       // 详情、分类还是播放哪一次请求（用户反馈 2026-10-20）。

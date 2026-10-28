@@ -1,13 +1,14 @@
 # Phase 5 计划（安卓桥接：T4 站点接入 + 历史/设置同步）
 
-- 状态：**已完成**（设计 `design/00`–`design/05` + 实现 T1–T14 全部落地；`PHASE5-ACCEPT result=PASS gates=all`）
-- 日期：2026-10-08（多源化改造 2026-10-26，见 §7；历史聚合与跨源续播 2026-10-27，见 §8）
+- 状态：**已完成**（设计 `design/00`–`design/06` + 实现 T1–T14 全部落地；`PHASE5-ACCEPT result=PASS gates=all`）
+- 日期：2026-10-08（多源化改造 2026-10-26，见 §7；历史聚合与跨源续播 2026-10-27，见 §8；详情身份兜底 2026-10-28，见 §9）
 - 后续验证：[T4 网盘分集与播放代理（2026-10-10）](evidence/t4-folder-playback.md)
 - 后续验证：[桥接线路标准化为普通线路（2026-10-11）](evidence/t4-standard-bridge-lines.md)
 - 后续验证：[站点选择器打开卡顿修复（2026-10-12）](evidence/site-picker-latency.md)
 - 后续改造：[安卓桥接多源化与历史按源隔离（2026-10-26）](design/04-bridge-multisource.md)
 - 后续改造：[历史同名聚合与跨源续播（2026-10-27）](design/05-history-aggregation-and-cross-source-resume.md)
-- 对应设计文档章节：本目录 `design/00`–`design/05`、`docs/webhtv-pc-design.md` §21（Phase 5 生态与同步）、§22.1、§28（安卓桥接）
+- 缺陷修复：[详情身份兜底（2026-10-28）](design/06-detail-identity-fallback.md)
+- 对应设计文档章节：本目录 `design/00`–`design/06`、`docs/webhtv-pc-design.md` §21（Phase 5 生态与同步）、§22.1、§28（安卓桥接）
 - 上游：`docs/phase4/README.md`（Phase 4 已完成：TMDB 元数据增强）
 - 上游参考工程：`webhtv/默影视`（Android，`F:\Workspace\webtv3\webhtv`，实测设备 `192.168.50.3:5559`）
 
@@ -85,7 +86,8 @@ Android 侧已经暴露出 **T4 本机网关**（`c388619629`：`feat(server): a
 | D4 | 测试与验收 | `design/03-bridge-test-and-acceptance.md` | L1/L2/L3 分层、fixture 与 8 种故障注入、4 个套件、11 项门禁、7 项反向验证 |
 | D5 | 多源化（后续，2026-10-26） | `design/04-bridge-multisource.md` | 方案 B 取舍、`configKey` 端点、按源隔离历史、推送落源、降级矩阵 |
 | D6 | 历史聚合与跨源续播（后续，2026-10-27） | `design/05-history-aggregation-and-cross-source-resume.md` | 三档聚合读视图、存储 v8 身份列、来源标注、跨源两路径、进度迁移 9 条规则 |
-| D7 | 主设计文档回填 | `docs/webhtv-pc-design.md` §21 + §22.1 + §23 + §26 + §28 | 章节号连续、交叉引用可解析 |
+| D7 | 详情身份兜底（缺陷修复，2026-10-28） | `design/06-detail-identity-fallback.md` | 根因双证据、`VodIdentityHint` 穿透链、只在「详情 + 恰好一条」回填、四条边界、7+1 用例 |
+| D8 | 主设计文档回填 | `docs/webhtv-pc-design.md` §21 + §22.1 + §23 + §26 + §28 | 章节号连续、交叉引用可解析 |
 
 ### 2.2 实施阶段
 
@@ -387,4 +389,57 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 | PC 全量单测 | 151 个测试文件分 3 批 × `-j 4` 全绿（1217 + 1047 + 684 例） |
 | 静态分析 | `flutter analyze lib test integration_test` → `No issues found!` |
 | 反向验证靶子 | 去掉「≥2 个不同年份才拆」/「`!sameEpisode` → null」/「`fallback` 优先」/「`upsert` 条件覆盖」/「候选回填 `hasTargetEpisode`」/「兜底传 `resumeSeed`」/「播放器用真实时长重算」任一项，对应用例必须失败（`05` §9.3） |
+
+---
+
+## 9. 详情身份兜底（2026-10-28，缺陷修复）
+
+设计：`design/06-detail-identity-fallback.md`。触发是用户真机日志：
+「嗷呜」配置下 `Hxq`（上游 `type=3` 网盘聚合 spider `csp_HxqAmns`）的详情页空白，
+日志 `siteParse: 列表条目缺少 vod_id/vod_name`，而同站点首页与搜索都正常。
+
+### 9.1 根因（实测闭合）
+
+| 环节 | 事实 |
+| --- | --- |
+| 现场抓包 | `GET /vod/api?ac=detail&ids=Bkp_OaNRYo16PHUsPQWv5&key=Hxq&configKey=425e3994…` → HTTP 200，`list[0]` 的 `vod_id`/`vod_name` 是**空串**，而 `vod_remarks`/`vod_actor`/`vod_content`/`vod_play_from`/`vod_play_url` 齐全 |
+| 上游定义 | 配置源里 `{"key":"Hxq","type":3,"api":"csp_HxqAmns"}`，spider 返回的 `Vod` 没写 id/name；网关 `vodJson()` 用 `prop(item,"vod_id", vod.getId())` 把 `null` 写成空串 |
+| PC 侧 | `Vod.fromJson` 要求 id 与 name 都非空，否则返回 `null`；`_parseVodList` 因此抛 `siteParse` |
+
+信息并不缺——`ids=` 就是请求方给出的身份，只是没被用上。
+
+### 9.2 改了什么
+
+| 项 | 之前 | 之后 |
+| --- | --- | --- |
+| 解析入口 | `parse(body, {siteKey})` | 多一个可选 `VodIdentityHint? identity`（`06` §4.1） |
+| 回填条件 | — | **详情 + 恰好一条**：`identity != null && !identity.isEmpty && items.length == 1`（`06` §4.2） |
+| 穿透链 | — | `SiteService.detail` → `SiteRuntime` 4 个实现 → `HttpApiClient.execute` / `CatHttpClient.call` → `_parseJsonObject`/`_parseXml` → `_parseVodList`（`06` §4.3） |
+| 调用点 | — | `AppState.loadDetail`、`AppState._resolveFollowingLines`、`library_pages`（历史补海报）、`history_cross_source`（候选探测）；`folderDetail` 不传 |
+
+### 9.3 三条硬边界
+
+| 边界 | 理由 |
+| --- | --- |
+| 列表/分类/搜索**绝不**回填 | 那是推断不是已知；多条写成同一 `vod_id` 会让整页崩掉（`06` §4.2） |
+| 已填值永不覆盖 | 站点自己给的 id 才是权威 |
+| 不改安卓 `formatContent` | 安卓是运行容器，改它还得再走一次发版；信息本来就在请求里（`06` §3） |
+
+### 9.4 已知限制
+
+| 限制 | 处置 |
+| --- | --- |
+| 只补 id/name，不补 `vod_pic` | 这类站点详情页仍无海报；补图需先确认「用搜索结果的图」不会错配 |
+| 兜底依赖调用方传对 `vodName` | id 一定对、能播；名字传错只会显示错名 |
+| 可选参数漏传在编译期无声 | 必须靠「调用点 grep + 端到端回归锁」两道锁（`06` §6.3 第 4 条靶子） |
+
+### 9.5 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 新增用例 | `core_protocol_test` 新 group 7 例（含 XML 与 `{code:0,data:{list}}` 信封）、`config_and_site_test` Hxq 回归锁 1 例、fixture 新增 `ids=blank-1` 路由 |
+| PC 全量单测 | 151 个测试文件分 3 批 × `-j 4` 全绿（1218 + 1054 + 684 例） |
+| 静态分析 | `flutter analyze lib test integration_test` → `No issues found!` |
+| 反向验证靶子 | 去掉 `withVodIdentity` → `+74 -3`；去掉「恰好一条」守卫 → `+76 -1`；`HttpApiRuntime.detail` 不传 identity → `config_and_site_test` `+40 -1` |
+
 

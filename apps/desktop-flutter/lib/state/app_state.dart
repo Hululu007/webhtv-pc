@@ -3443,7 +3443,13 @@ class AppState extends ChangeNotifier implements SyncStateHost {
               vod,
               isCurrent: () => runId == _detailRunId,
             )
-          : await service.detail(site, vod.vodId);
+          : await service.detail(
+              site,
+              vod.vodId,
+              // 详情请求自带 ids：上游漏填 vod_id/vod_name 时用它兜底，
+              // 否则整条被丢弃、详情页报「列表条目缺少 vod_id/vod_name」。
+              identity: VodIdentityHint(vodId: vod.vodId, vodName: vod.vodName),
+            );
       if (runId != _detailRunId) {
         // 已被更新的请求（或已离开详情页）取代：结果直接丢弃，不写回状态。
         log.debug(
@@ -4525,7 +4531,11 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         .where((candidate) => candidate.key == item.siteKey)
         .firstOrNull;
     if (site == null) return null;
-    final result = await service.detail(site, item.vodId);
+    final result = await service.detail(
+      site,
+      item.vodId,
+      identity: VodIdentityHint(vodId: item.vodId, vodName: item.vodName),
+    );
     if (result.value.list.isEmpty) return null;
     final vod = result.value.list.first;
     return [

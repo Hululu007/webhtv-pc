@@ -79,8 +79,9 @@ class SidecarRuntime implements SiteRuntime {
 
   Future<SiteResult> _invoke(
     String method,
-    Map<String, Object?> params,
-  ) async {
+    Map<String, Object?> params, {
+    VodIdentityHint? identity,
+  }) async {
     final host = await _ensureHost();
     final requestId = _nextRequestId();
     _inflight[requestId] = host;
@@ -90,7 +91,7 @@ class SidecarRuntime implements SiteRuntime {
         params: params,
         requestId: requestId,
       );
-      return _toSiteResult(result, method: method);
+      return _toSiteResult(result, method: method, identity: identity);
     } on SpiderError catch (error) {
       log?.warning(
         'sidecar 调用失败 site=${site.key} method=$method ${error.logLine}',
@@ -103,7 +104,11 @@ class SidecarRuntime implements SiteRuntime {
   }
 
   /// 把 sidecar 返回的 Result 归一化为宿主模型（§8.3）。
-  SiteResult _toSiteResult(Object? value, {required String method}) {
+  SiteResult _toSiteResult(
+    Object? value, {
+    required String method,
+    VodIdentityHint? identity,
+  }) {
     if (value is! Map) {
       throw AppError(
         AppErrorKind.siteParse,
@@ -112,7 +117,11 @@ class SidecarRuntime implements SiteRuntime {
       );
     }
     // 复用 HTTP API 的字段解释，保证两条链路语义一致。
-    return HttpApiResponseParser.parse(jsonEncode(value), siteKey: site.key);
+    return HttpApiResponseParser.parse(
+      jsonEncode(value),
+      siteKey: site.key,
+      identity: identity,
+    );
   }
 
   /// 取消该站点全部在途调用（§9.5「UI 取消后不得再向已取消页面投递结果」）。
@@ -146,8 +155,11 @@ class SidecarRuntime implements SiteRuntime {
   });
 
   @override
-  Future<SiteResult> detail(Site site, String vodId) =>
-      _invoke(SpiderMethod.detail, {'id': vodId});
+  Future<SiteResult> detail(
+    Site site,
+    String vodId, {
+    VodIdentityHint? identity,
+  }) => _invoke(SpiderMethod.detail, {'id': vodId}, identity: identity);
 
   @override
   Future<SiteResult> search(
@@ -200,6 +212,7 @@ class CatHttpSiteRuntime implements SiteRuntime {
     String? keyword,
     Map<String, String> filters = const {},
     String? flag,
+    VodIdentityHint? identity,
   }) async {
     final builder = CatHttpRequestBuilder(
       api: site.api,
@@ -226,7 +239,7 @@ class CatHttpSiteRuntime implements SiteRuntime {
       }
     }
     try {
-      return await client.call(call, siteKey: site.key);
+      return await client.call(call, siteKey: site.key, identity: identity);
     } on SpiderError catch (error) {
       throw error.toAppError(detail: 'route=$route site=${site.key}');
     }
@@ -250,8 +263,11 @@ class CatHttpSiteRuntime implements SiteRuntime {
   );
 
   @override
-  Future<SiteResult> detail(Site site, String vodId) =>
-      _call(site, CatHttpRoute.detail, vodId: vodId);
+  Future<SiteResult> detail(
+    Site site,
+    String vodId, {
+    VodIdentityHint? identity,
+  }) => _call(site, CatHttpRoute.detail, vodId: vodId, identity: identity);
 
   @override
   Future<SiteResult> search(
