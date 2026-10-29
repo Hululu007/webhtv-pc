@@ -11,6 +11,7 @@ import '../core/history_aggregation.dart';
 import '../core/history_grouping.dart';
 import '../core/history_scope.dart';
 import '../core/history_view.dart';
+import '../services/history_poster_repair.dart';
 import '../services/storage.dart';
 import '../services/tmdb_history.dart';
 import '../state/app_state.dart';
@@ -243,12 +244,15 @@ class _HistoryPageState extends State<HistoryPage> {
     return null;
   }
 
-  /// 旧版本历史没有保存海报：打开历史页时按 vod_id 后台补齐，避免用户看到一屏
-  /// 破图占位。只处理前 12 条且按作品去重，不阻塞历史页首帧。
+  /// 旧版本历史没有保存海报：打开历史页时后台补齐，避免用户看到一屏破图占位。
+  /// 只处理前 12 条且按作品去重，不阻塞历史页首帧。
+  ///
+  /// 取图交给 [HistoryPosterRepair] 的三级回退：这里只负责挑候选、写结果、
+  /// 重画。**为什么不能只查生效配置**：历史里混着别的播放源，它们的站点在
+  /// 自己那份配置里，按生效配置找不到站点时补图就整条被跳过（原缺陷）。
   Future<void> _repairMissingPosters() async {
     final service = _state.siteService;
-    final config = _state.config;
-    if (service == null || config == null) return;
+    if (service == null) return;
     final candidates = <PlaybackHistory>[];
     final seen = <String>{};
     for (final item in _items) {
@@ -257,38 +261,21 @@ class _HistoryPageState extends State<HistoryPage> {
       if (seen.add(key)) candidates.add(item);
       if (candidates.length >= 12) break;
     }
+    if (candidates.isEmpty) return;
+    final repair = HistoryPosterRepair(
+      siteService: service,
+      configForSourceKey: _state.configForSourceKey,
+      cachedTmdbPosterUrl: (siteKey, vodId) =>
+          _state.cachedTmdbPosterUrl(siteKey: siteKey, vodId: vodId),
+      fallbackConfig: _state.config,
+    );
     var changed = false;
     for (final item in candidates) {
-      Site? site;
-      for (final candidate in config.sites) {
-        if (candidate.key == item.siteKey) {
-          site = candidate;
-          break;
-        }
-      }
-      if (site == null) continue;
-      try {
-        // `vod_tag` 不在历史里；`Vod.isFolder` 会按 id 前缀补出 folder 语义，
-        // 这里不再重复一遍前缀判断（详情页走的是同一个判定）。
-        final parent = Vod(vodId: item.vodId, vodName: item.vodName);
-        final result = parent.isFolder
-            ? await service.folderDetail(site, parent)
-            : await service.detail(
-                site,
-                item.vodId,
-                identity: VodIdentityHint(
-                  vodId: item.vodId,
-                  vodName: item.vodName,
-                ),
-              );
-        if (result.value.list.isEmpty) continue;
-        final poster = result.value.list.first.vodPic;
-        if (poster == null || poster.trim().isEmpty) continue;
-        _state.updateHistoryPoster(item, poster);
-        changed = true;
-      } catch (_) {
-        // 单条旧记录补图失败不影响历史列表和继续播放。
-      }
+      // 单条旧记录补图失败不影响历史列表和继续播放。
+      final poster = await repair.posterFor(item);
+      if (poster == null || poster.trim().isEmpty) continue;
+      _state.updateHistoryPoster(item, poster);
+      changed = true;
     }
     if (changed && mounted) setState(() {});
   }

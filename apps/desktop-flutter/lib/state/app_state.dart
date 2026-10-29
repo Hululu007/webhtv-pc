@@ -3595,6 +3595,33 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     }
   }
 
+  /// 按 `source_key` 取那份配置（只读）。
+  ///
+  /// 历史补图要用记录**自己的**配置找站点：跨源记录挂在非生效配置上，拿
+  /// [config] 会找不到站点，补图永远不执行。空 `sourceKey`（迁移前老记录）
+  /// 返回 null，由调用方退回生效配置。
+  AppConfig? configForSourceKey(String sourceKey) {
+    final key = sourceKey.trim();
+    if (key.isEmpty) return null;
+    try {
+      return _database?.configBySourceKey(key)?.config;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 跨配置读 TMDB 缓存海报（只读，不暴露数据库）。
+  String? cachedTmdbPosterUrl({required String siteKey, required String vodId}) {
+    try {
+      return _database?.tmdbPosterUrlAcrossConfigs(
+        siteKey: siteKey,
+        vodId: vodId,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 记录播放进度（§15.2）。
   ///
   /// `siteKey` 显式传入而不依赖当前选中站点：命令行播放、历史恢复等场景下

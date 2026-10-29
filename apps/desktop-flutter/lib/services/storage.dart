@@ -1876,6 +1876,27 @@ class AppDatabase {
     return rows.isEmpty ? null : rows.first;
   }
 
+  /// 跨配置读取 TMDB 缓存里的海报地址。
+  ///
+  /// 为什么忽略 [configId]：历史记录可能属于**非生效配置**（桥接源、被切换
+  /// 掉的源），而 `DatabaseTmdbMatchStore` 被 `config_id` 绑在生效配置上，
+  /// 读不到那些行。补图的场景只关心「这张图有没有」，不关心它当初属于哪份
+  /// 配置，所以这里不按配置收窄——按 `manual` 优先、再按新到旧取第一条。
+  String? tmdbPosterUrlAcrossConfigs({
+    required String siteKey,
+    required String vodId,
+  }) {
+    final rows = _db.select(
+      'SELECT poster_url FROM tmdb_matches WHERE site_key=? AND vod_id=? '
+      "AND poster_url IS NOT NULL AND TRIM(poster_url)<>'' "
+      'ORDER BY manual DESC, matched_at DESC LIMIT 1;',
+      [siteKey, vodId],
+    );
+    if (rows.isEmpty) return null;
+    final poster = (rows.first['poster_url'] as String?)?.trim();
+    return (poster == null || poster.isEmpty) ? null : poster;
+  }
+
   /// 写入匹配结论（按唯一键 upsert）。
   void upsertTmdbMatch({
     required int configId,
