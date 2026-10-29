@@ -195,6 +195,7 @@ class RealtimeEngineHost {
     required this.siteKeys,
     required this.probeCapability,
     required this.readSite,
+    required this.resolveSourceKey,
     required this.mergeHistory,
     required this.heartbeat,
     required this.localHistoryByMatchKey,
@@ -219,8 +220,22 @@ class RealtimeEngineHost {
   })
   readSite;
 
+  /// 该设备本轮拉取的源归属；判不出来必须是空串（实现方不得猜）。
+  ///
+  /// 是**设备级**而不是「设备 + 站点」：安卓的 `/api/playback/history` 只按
+  /// `VodConfig.getCid()`（设备的当前激活配置）查库，siteKey 只是站点过滤，
+  /// 不参与选源——一轮里所有站点的记录都来自同一个源。
+  ///
+  /// 异步：归属要看 `/manage/configs` 的 `active`，那是一次设备请求。
+  final Future<String> Function({required String deviceBase}) resolveSourceKey;
+
   /// 合并一批条目并落库，返回统计。
-  final Future<SyncMergeStats> Function(List<SyncHistoryItem> items)
+  ///
+  /// [sourceKey] 是本次拉取批次的源归属，为空表示无法判定（不猜）。
+  final Future<SyncMergeStats> Function(
+    List<SyncHistoryItem> items, {
+    required String sourceKey,
+  })
   mergeHistory;
 
   /// 心跳探测（`/manage/session` → `/device` 降级链由实现方负责）。
@@ -698,6 +713,10 @@ class RealtimeSyncEngine {
 
     final localIndex = host.localHistoryByMatchKey();
 
+    // 源归属是**设备级**的（安卓按当前激活配置的 cid 查库），整轮只解析一次：
+    // 每个站点都去问一次既浪费一次设备请求，又可能在同一轮里得到两种答案。
+    String? batchSourceKey;
+
     for (final siteKey in keys) {
       if (unauthorized) break;
       try {
@@ -731,7 +750,12 @@ class RealtimeSyncEngine {
         }
         if (read.items.isEmpty) continue;
 
-        final stats = await host.mergeHistory(read.items);
+        // 真的拿到记录才解析归属：空轮（安卓没在播）不该付一次设备请求。
+        batchSourceKey ??= await host.resolveSourceKey(deviceBase: base);
+        final stats = await host.mergeHistory(
+          read.items,
+          sourceKey: batchSourceKey,
+        );
         applied += stats.applied;
         skipped += stats.skipped;
         // 合并阶段的失败是**暂时性**的（写库异常，下轮重试有意义）→

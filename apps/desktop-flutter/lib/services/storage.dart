@@ -1329,12 +1329,15 @@ class AppDatabase {
   /// 默认视图里的「当前源」由 UI 层从当前激活配置推导后传进来——
   /// 存储层不猜「哪个源是当前源」，否则同一份数据在两种上下文里会有两种含义。
   ///
-  /// 迁移前的空 `source_key` 行在该源视图里**照样可见**（未归属 ≠ 别源），
-  /// 否则用户升级后打开当前源会看到历史凭空清空。
+  /// 空 `source_key` 行（迁移前的老记录、实时同步写入的记录）**只**出现在
+  /// 全局视图里：按源隔离时把它们放进来，用户会在「当前来源」下看到一堆
+  /// 无法归属的「来源未知」卡片，而这正是用户 2026-10-28 反馈的缺陷。
+  /// 严格过滤的代价是老记录暂时从按源视图消失——全局视图仍然可见，且它
+  /// 一旦被播放或被 `_adoptLegacyHistoryRow` 收编就自动归属到具体源。
   List<PlaybackHistory> recentHistory({int limit = 100, String sourceKey = ''}) =>
       _db
           .select(
-            'SELECT * FROM history WHERE (? = \'\' OR source_key = ? OR source_key = \'\') '
+            'SELECT * FROM history WHERE (? = \'\' OR source_key = ?) '
             'ORDER BY updated_at DESC LIMIT ?;',
             [sourceKey, sourceKey, limit],
           )
@@ -1353,7 +1356,7 @@ class AppDatabase {
     return _db
         .select(
           'SELECT * FROM history '
-          'WHERE (? = \'\' OR source_key = ? OR source_key = \'\') '
+          'WHERE (? = \'\' OR source_key = ?) '
           'AND (instr(vod_name, ?) > 0 OR instr(episode_name, ?) > 0) '
           'ORDER BY updated_at DESC LIMIT ?;',
           [sourceKey, sourceKey, keyword, keyword, limit],
@@ -1402,7 +1405,7 @@ class AppDatabase {
     // ── 第 1 步：精确（旧行为，语义不变；sourceKey 为空则不按源过滤） ──
     final exact = _db.select(
       'SELECT * FROM history WHERE site_key=? AND vod_id=? '
-      'AND (? = \'\' OR source_key = ? OR source_key = \'\') '
+      'AND (? = \'\' OR source_key = ?) '
       'AND (? IS NULL OR flag = ?) AND (? IS NULL OR episode_id = ?) '
       'ORDER BY updated_at DESC LIMIT 1;',
       [siteKey, vodId, sourceKey, sourceKey, flag, flag, episodeId, episodeId],
@@ -1418,7 +1421,7 @@ class AppDatabase {
     // ── 第 2 步：按集名兜底（同步记录的 episode_id 是哈希，只能靠集名对上） ──
     final byName = _db.select(
       'SELECT * FROM history WHERE site_key=? AND vod_id=? '
-      'AND (? = \'\' OR source_key = ? OR source_key = \'\') '
+      'AND (? = \'\' OR source_key = ?) '
       'AND (? IS NULL OR flag = ?) AND episode_name = ? '
       'ORDER BY updated_at DESC LIMIT 1;',
       [siteKey, vodId, sourceKey, sourceKey, flag, flag, name],

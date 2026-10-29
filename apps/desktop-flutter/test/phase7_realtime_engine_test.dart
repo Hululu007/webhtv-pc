@@ -165,6 +165,17 @@ class FakeHost {
   final List<String> heartbeatCalls = [];
   int probeCalls = 0;
   final List<List<SyncHistoryItem>> merged = [];
+
+  /// 这一轮要归属的源：测试按需给出，缺省为空串（不归属）。
+  ///
+  /// 归属是设备级的（安卓按当前激活配置查库），所以每轮只解析一次。
+  String resolvedSourceKey = '';
+
+  /// 解析归属的次数：用来断言「整轮只问一次设备」。
+  int resolveSourceKeyCalls = 0;
+
+  /// 每次合并时收到的来源，按调用顺序记录。
+  final List<String> mergedSourceKeys = [];
   Map<String, SyncHistoryItem> localByMatchKey = const {};
 
 /// 用真实日历毫秒值（引擎只把它当"现在"打点）。
@@ -197,8 +208,13 @@ class FakeHost {
                 endpoint: capability,
               );
         },
-    mergeHistory: (items) async {
+    resolveSourceKey: ({required String deviceBase}) async {
+      resolveSourceKeyCalls++;
+      return resolvedSourceKey;
+    },
+    mergeHistory: (items, {required String sourceKey}) async {
       merged.add(items);
+      mergedSourceKeys.add(sourceKey);
       final stats = mergeStats[items.first.siteKey];
       if (stats != null) return stats;
       return SyncMergeStats(
@@ -772,6 +788,47 @@ void main() {
       expect(result, isNull);
       expect(host.readCalls, isEmpty);
       expect(engine.cursor, 0);
+    });
+  });
+
+  group('源归属（用户 2026-10-28：历史页出现「来源未知」）', () {
+    test('E37 · 归属透传给合并，且整轮只解析一次（设备级）', () async {
+      host.resolvedSourceKey = 'bridge|dev-uuid-0001|a';
+      host.siteKeys = ['A', 'B'];
+      host.reads['A'] = RealtimeSiteReadResult(items: [item(siteKey: 'A')]);
+      host.reads['B'] = RealtimeSiteReadResult(items: [item(siteKey: 'B')]);
+      engine.start();
+      await engine.pollNow();
+
+      expect(host.mergedSourceKeys, [
+        'bridge|dev-uuid-0001|a',
+        'bridge|dev-uuid-0001|a',
+      ]);
+      expect(
+        host.resolveSourceKeyCalls,
+        1,
+        reason: '同一轮里两个站点问两次设备，既浪费请求又可能得到两种答案',
+      );
+    });
+
+    test('E38 · 全轮无记录 → 不解析归属（不白付一次设备请求）', () async {
+      host.resolvedSourceKey = 'bridge|dev-uuid-0001|a';
+      host.siteKeys = ['A'];
+      host.reads['A'] = const RealtimeSiteReadResult(items: []);
+      engine.start();
+      await engine.pollNow();
+
+      expect(host.resolveSourceKeyCalls, 0);
+      expect(host.mergedSourceKeys, isEmpty);
+    });
+
+    test('E39 · 解析不出归属 → 透传空串（不猜，落到「全部来源」）', () async {
+      host.siteKeys = ['A'];
+      host.reads['A'] = RealtimeSiteReadResult(items: [item(siteKey: 'A')]);
+      engine.start();
+      await engine.pollNow();
+
+      expect(host.mergedSourceKeys, ['']);
     });
   });
 

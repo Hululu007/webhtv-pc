@@ -128,6 +128,10 @@ void main() {
       positionMs: positionMs,
       durationMs: durationMs,
       updatedAt: updatedAt,
+      // 归属到**当前生效源**：这些用例锁的是点击分流，不是来源范围。
+      // 不写源就会落成空 source_key，而按源隔离的视图里空来源记录不可见
+      // （用户 2026-10-28 要求严格过滤「来源未知」），卡片会直接找不到。
+      sourceKey: state.activeSourceKey,
     );
   }
 

@@ -120,6 +120,9 @@ void main() {
       episodeId: 'baidu@1',
       positionMs: 30000,
       durationMs: 100000,
+      // 同 phase6_history_page_test：种子必须归属到当前生效源，
+      // 否则空来源记录在按源隔离的视图里不可见。
+      sourceKey: state.activeSourceKey,
     );
   }
 

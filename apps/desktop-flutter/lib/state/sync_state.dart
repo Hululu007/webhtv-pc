@@ -36,6 +36,7 @@ import '../core/app_error.dart';
 import '../core/playback_identity.dart';
 import '../core/protocol.dart';
 import '../core/realtime_sync.dart';
+import '../core/source_key.dart';
 import '../services/android_bridge_service.dart';
 import '../services/android_read_client.dart';
 import '../services/log_service.dart';
@@ -858,11 +859,60 @@ class SyncState extends ChangeNotifier {
     if (!engine.isRunning) engine.start();
   }
 
+  /// 判定这次实时拉取的历史该归属哪个源。
+  ///
+  /// 归属是**设备级**的，不是「设备 + 站点」：安卓的 `/api/playback/history`
+  /// 只按 `VodConfig.getCid()`（设备**当前激活**的那份配置）查库，站点只是
+  /// 过滤条件，响应里也没有任何配置标识。所以唯一可靠的答案是「设备此刻
+  /// 激活的是哪个源」，也就是 `/manage/configs` 里 `active=true` 的那一项。
+  ///
+  /// 判不出来就返回空串（**不猜**）：空来源的记录只会在「全部来源」里出现，
+  /// 而猜错会把进度写进别的源——那是串源，比如实显示的「来源未知」严重得多。
+  ///
+  /// 三种情况都会返回空串：
+  /// - 基址对不上任何已知设备（用户手填了别的地址）；
+  /// - 设备连不上，或老安卓没有 `/manage/configs`（清单里没有 `active`）；
+  /// - 归属本身无法成立（缺设备 uuid 或接口标识）。
+  Future<String> _resolveRealtimeSourceKey({required String deviceBase}) async {
+    final base = normalizeBase(deviceBase);
+    if (base.isEmpty) return '';
+    final deviceUuid = _deviceUuidOfBase(base);
+    if (deviceUuid.isEmpty) return '';
+    final AndroidSourceCatalog catalog;
+    try {
+      catalog = await _bridge.fetchSources(base);
+    } on AppError catch (error) {
+      // 设备掉线是常态（手机可能关着）：这轮不归属，下轮再判，
+      // 不能因为一次取不到清单就把整轮拉取打断。
+      log.debug('实时归属：取配置清单失败 ${error.logLine}', scope: 'realtime');
+      return '';
+    }
+    final active = catalog.active;
+    if (active == null) return '';
+    return BridgeSourceKey.of(
+      deviceUuid: deviceUuid,
+      interfaceKey: active.interfaceKey,
+    );
+  }
+
+  /// 设备基址 → 已登记设备的 uuid；对不上返回空串。
+  String _deviceUuidOfBase(String base) {
+    for (final entry in _deviceHistory) {
+      if (normalizeBase(entry.address) == base) return entry.uuid.trim();
+    }
+    for (final peer in _peers) {
+      if (normalizeBase(peer.address) == base) return peer.uuid.trim();
+    }
+    return '';
+  }
+
   /// 引擎的 I/O 端口（`design/01` §4、`design/02` §3）。
   RealtimeEngineHost _buildRealtimeHost() => RealtimeEngineHost(
     deviceBase: () => realtimeDeviceBase,
     siteKeys: ({required bool all}) =>
         host.syncSiteKeys(all: all, limit: realtimeDefaultSiteLimit),
+    resolveSourceKey: ({required String deviceBase}) =>
+        _resolveRealtimeSourceKey(deviceBase: deviceBase),
     probeCapability: (base) async {
       // 缓存 60 s（`design/01` §4.1）：默认 60 s 轮询下，等于每轮只探一次。
       final cached = _realtimeCapability.read(DateTime.now());
@@ -903,9 +953,12 @@ class SyncState extends ChangeNotifier {
                 result.failures.isEmpty,
           );
         },
-    mergeHistory: (items) async {
+    mergeHistory: (items, {required String sourceKey}) async {
       final stats = _mergeHistory(
         SyncHistoryParseResult(items: items, failures: const []),
+        // 必须带来源：不带就落成空 source_key，历史页「当前来源」里会冒出
+        // 一堆「来源未知」卡片（用户 2026-10-28 反馈的缺陷）。
+        sourceKey: sourceKey,
       );
       if (stats.applied > 0) {
         // 落库后要把内存视图刷新：否则历史页要等用户手动刷新才看得到。

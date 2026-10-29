@@ -13,7 +13,9 @@
 /// 2. 历史**默认按源隔离**：切到 A 源只看到 A 源的进度，切到 B 源只看 B 源；
 /// 3. 「全部来源」开关打开后才跨源显示（对齐安卓 `global_history_mode`）；
 /// 4. 清空历史只清当前源，不误删别的源；
-/// 5. 推送给安卓的载荷带该源的 `configKey`，且历史只含当前源。
+/// 5. 推送给安卓的载荷带该源的 `configKey`，且历史只含当前源；
+/// 6. 实时从安卓拉来的进度带该设备**当前激活源**的标识（否则历史页
+///    「当前来源」里会冒出「来源未知」卡片，用户反馈 2026-10-28）。
 library;
 
 import 'dart:convert';
@@ -22,19 +24,67 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webhtv_pc/core/android_bridge.dart';
 import 'package:webhtv_pc/core/android_sources.dart';
+import 'package:webhtv_pc/core/android_sync.dart';
 import 'package:webhtv_pc/core/app_error.dart';
 import 'package:webhtv_pc/core/history_scope.dart';
+import 'package:webhtv_pc/core/protocol.dart';
+import 'package:webhtv_pc/core/realtime_sync.dart';
 import 'package:webhtv_pc/core/source_key.dart';
+import 'package:webhtv_pc/services/android_read_client.dart';
 import 'package:webhtv_pc/services/app_paths.dart';
 import 'package:webhtv_pc/services/log_service.dart';
 import 'package:webhtv_pc/state/app_state.dart';
 
 import 'support/fake_sources_bridge.dart';
 
+/// 假只读客户端：路径 A 的读取全部由测试接管（本文件不触网）。
+class _FakeReadClient extends AndroidReadClient {
+  _FakeReadClient() : super(log: LogService());
+
+  /// 下一次 `readHistory` 返回的记录（每条站点查询都返回同一批）。
+  List<SyncHistoryItem> items = const [];
+
+  /// 非空时 `probePullCapability` 直接抛这个错误。
+  AppError? probeFailure;
+
+  int readCalls = 0;
+
+  @override
+  Future<AndroidPullProbe> probePullCapability(String deviceBase) async {
+    final failure = probeFailure;
+    if (failure != null) throw failure;
+    return const AndroidPullProbe(
+      capability: RealtimePullCapability.history,
+      historyStatusCode: 200,
+      currentStatusCode: null,
+    );
+  }
+
+  @override
+  Future<AndroidHistoryReadResult> readHistory({
+    required String deviceBase,
+    required String siteKey,
+    required RealtimePullCapability capability,
+    int limit = realtimeDefaultSiteLimit,
+    Map<String, SyncHistoryItem> localByMatchKey = const {},
+  }) async {
+    readCalls++;
+    return AndroidHistoryReadResult(
+      siteKey: siteKey,
+      items: items,
+      failures: const [],
+      updatedAtSource: UpdatedAtSource.updatedAt,
+      skippedAsUnchanged: 0,
+      endpoint: capability,
+    );
+  }
+}
+
 void main() {
   late Directory tempDir;
   late AppState state;
   late FakeSourcesBridge bridge;
+  late _FakeReadClient readClient;
 
   const device = AndroidDevice(
     uuid: 'dev-uuid-0001',
@@ -46,12 +96,14 @@ void main() {
   setUp(() async {
     tempDir = await Directory.systemTemp.createTemp('webhtv-multisource');
     bridge = FakeSourcesBridge();
+    readClient = _FakeReadClient();
     state = AppState(
       paths: AppPaths.resolve(
         overrides: {'roaming': tempDir.path, 'local': tempDir.path},
       ),
       log: LogService(),
       androidBridgeService: bridge,
+      androidReadClient: readClient,
     );
     await state.bootstrap();
   });
@@ -104,6 +156,109 @@ void main() {
     );
   }
 
+  group('实时拉取的源归属（用户 2026-10-28：历史页出现「来源未知」）', () {
+    /// 把桥接源 A 存成一条记录并设为当前配置（站点 key 用 csp_a）。
+    Future<void> activateSourceA() async {
+      final id = await state.saveBridgeConfig(
+        name: '源 A',
+        origin: device.reachableBase,
+        config: AppConfig(
+          sites: [
+            Site(key: 'csp_a', name: '站A', type: 3, api: 'http://x/a'),
+          ],
+        ),
+        diagnostics: const [],
+        deviceUuid: device.uuid,
+        interfaceKey: 'a',
+      );
+      expect(id, isNotNull);
+      expect(await state.activateConfigRecord(id!), isTrue);
+      expect(state.activeSourceKey, 'bridge|dev-uuid-0001|a');
+      await state.setHistoryScope(UiHistoryScope.source);
+    }
+
+    /// 让实时拉取有设备可指（peer 地址 = 设备网关）。
+    Future<void> preparePull() async {
+      readClient.items = const [
+        SyncHistoryItem(
+          siteKey: 'csp_a',
+          vodId: '/v/1',
+          vodName: '示例剧',
+          flag: '线路一',
+          episodeName: '第01集',
+          episodeId: 'http://x/1',
+          positionMs: 1000,
+          durationMs: 10000,
+          updatedAt: 1700000000000,
+        ),
+      ];
+      await state.syncState.authorizePeer(device);
+    }
+
+    test('拉来的进度落在设备当前激活源上，历史页「当前来源」看得到它', () async {
+      await activateSourceA();
+      await preparePull();
+
+      await state.syncState.manualPullRecentRecords();
+
+      expect(readClient.readCalls, greaterThan(0));
+      expect(
+        state.database!.recentHistory(sourceKey: 'bridge|dev-uuid-0001|a'),
+        hasLength(1),
+        reason: '拉来的记录必须带设备当前激活源的标识',
+      );
+      final visible = state.recentHistory();
+      expect(visible, hasLength(1));
+      expect(visible.single.sourceKey, 'bridge|dev-uuid-0001|a');
+      expect(
+        state.historySourceLabel(visible.single.sourceKey),
+        isNull,
+        reason: '它就是当前源，不该被标成别的源；更不该显示「来源未知」',
+      );
+    });
+
+    test('归属跟设备当前激活源走，不按站点清单反查', () async {
+      await activateSourceA();
+      // 设备此刻激活的是 B：同一个站点 key 在 A/B 里都存在（多义），
+      // 反查站点清单会拒绝归属，而设备自己说了算。
+      bridge.sources = const [
+        AndroidSource(interfaceKey: 'a', name: '源 A', url: 'https://s/a.json'),
+        AndroidSource(
+          interfaceKey: 'b',
+          name: '源 B',
+          url: 'https://s/b.json',
+          active: true,
+        ),
+      ];
+      await preparePull();
+
+      await state.syncState.manualPullRecentRecords();
+
+      expect(
+        state.database!.recentHistory(sourceKey: 'bridge|dev-uuid-0001|b'),
+        hasLength(1),
+      );
+      expect(state.recentHistory(), isEmpty, reason: '它属于 B 源，不该出现在 A 源视图');
+    });
+
+    test('判不出归属时落空来源：只在「全部来源」里出现，不猜', () async {
+      await activateSourceA();
+      // 老安卓没有 /manage/configs：拿不到「当前激活的是哪个源」。
+      bridge.hasSourceCatalog = false;
+      await preparePull();
+
+      await state.syncState.manualPullRecentRecords();
+
+      expect(state.recentHistory(), isEmpty);
+      expect(
+        state.database!.recentHistory(sourceKey: ''),
+        hasLength(1),
+        reason: '判不出归属只能落空来源（宁可看不见，也不能串到别的源）',
+      );
+      await state.setHistoryScope(UiHistoryScope.global);
+      expect(state.recentHistory(), hasLength(1));
+    });
+  });
   group('同一设备多个源各自成记录（不再新增"桥接源"）', () {
     test('两个源生成两条记录，来源标识互不相同且都能被 sourceKey 找到', () async {
       final a = seedRecord(interfaceKey: 'a', name: '源 A');

@@ -134,6 +134,55 @@ void main() {
     return a;
   }
 
+  testWidgets('空来源记录不出现在「当前来源」里（用户 2026-10-28 反馈）', (tester) async {
+    await seedTwoSources();
+    // 空 source_key = 迁移前老记录 / 实时同步写入的记录。
+    seedHistory(
+      sourceKey: '',
+      vodName: '无源老记录',
+      siteKey: 'csp_a',
+      updatedAt: 3000,
+    );
+
+    await pumpHistory(tester);
+
+    expect(find.text('A源剧集'), findsOneWidget);
+    expect(
+      find.text('无源老记录'),
+      findsNothing,
+      reason: '按源隔离时不得把无法归属的记录混进来（会显示成「来源未知」）',
+    );
+    expect(
+      find.textContaining('来源未知'),
+      findsNothing,
+      reason: '当前来源视图里不应出现「来源未知」角标',
+    );
+
+    // 全局视图仍然可见：严格过滤不是丢数据，只是换视图。
+    // 必须走 tapScope（内夹 runAsync 窗口）：直接 await setHistoryScope
+    // 会在假时钟下等真实写盘，整条用例挂死到超时。
+    await tapScope(tester);
+    expect(find.text('无源老记录'), findsOneWidget);
+  });
+
+  test('搜索同样不返回空来源记录（否则搜索页会翻出它们）', () async {
+    await seedTwoSources();
+    seedHistory(
+      sourceKey: '',
+      vodName: '无源老记录',
+      siteKey: 'csp_a',
+      updatedAt: 3000,
+    );
+
+    expect(state.searchHistory('记录').map((item) => item.vodName), isEmpty);
+
+    await state.setHistoryScope(UiHistoryScope.global);
+    expect(
+      state.searchHistory('记录').map((item) => item.vodName),
+      ['无源老记录'],
+    );
+  });
+
   testWidgets('默认只显示当前播放源的历史（跨源不串）', (tester) async {
     await seedTwoSources();
     expect(

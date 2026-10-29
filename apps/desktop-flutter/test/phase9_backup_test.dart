@@ -198,6 +198,9 @@ void main() {
         episodeId: 'E1',
         positionMs: 120000,
         durationMs: 240000,
+        // 归属到当前生效源：importConfig 之后 activeSourceKey 非空，
+        // 而按源隔离的视图不显示空来源记录（用户 2026-10-28 要求严格过滤）。
+        sourceKey: state.activeSourceKey,
       );
     }
 

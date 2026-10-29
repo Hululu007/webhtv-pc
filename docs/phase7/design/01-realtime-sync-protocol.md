@@ -86,6 +86,21 @@ lib/ui/config_pages.dart               UI：开关、周期选择、手动拉取
 | 本地历史里的 `site_key` | 用户自己播过的站点 |
 | 安卓 `/vod/api?ac=config` 的站点 | 用户点「刷新站点」后更新 |
 
+**这批记录属于哪个源**（2026-10-28 补）：响应里**没有任何配置标识**——安卓
+`/api/playback/history` 只按 `VodConfig.getCid()`（设备**当前激活**的那份配置）查库，
+`siteKey` 只是站点过滤。所以归属是**设备级**的，而且只能靠 `/manage/configs` 的
+`active` 项反推：
+
+| 项 | 规则 |
+| --- | --- |
+| 时机 | 每轮**只解析一次**，且**只在真的拿到记录之后**（空轮不付一次设备请求）；同轮所有站点共用同一个答案 |
+| 判据 | `GET /manage/configs` → `active=true` 的 `interfaceKey` → `bridge\|<deviceUuid>\|<interfaceKey>` |
+| 判不出 | 设备地址对不上已登记设备 / 设备掉线 / 老安卓没有 `/manage/configs` → 落 **`source_key=''`**（不猜） |
+| 落库 | `mergeHistory(items, sourceKey:)` → `_writeSyncHistory` → `upsertHistory(sourceKey:)`；非空时先 `_adoptLegacyHistoryRow` 收编同键的空来源老行 |
+
+不猜的理由：猜错等于**串源**（进度写进别的源），比历史页多一张「来源未知」卡片严重得多。
+空来源的记录只在「全部来源」视图里出现（`phase5/design/05` §6.1）。
+
 **轮询量控制**：站点可能上百个。默认**只轮询"最近活跃"的站点**（本地历史里
 有记录的 + 用户手动勾选的），上限 20 个；UI 提供「轮询全部站点」开关（默认关）
 并显示"将产生 N 次请求/周期"。这条是硬要求：170 站点 × 60 s = 每分钟 170 次

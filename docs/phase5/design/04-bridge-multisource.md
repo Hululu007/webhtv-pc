@@ -164,7 +164,7 @@ jar/js/py 同名冲突是既有隐患，记为已知限制（`01` §9）。
 | 默认 | `UiHistoryScope.source`：只显示**当前源**的历史 |
 | 开关 | `history-scope-switch`（当前来源 / 全部来源），持久化在 `settings.json` 的 `ui.historyScope` |
 | 读历史 | `historySourceFilter`：全局模式为空串（不过滤），否则 `activeSourceKey` |
-| 升级前的老记录 | `source_key=''`，在**任意源视图**下都可见，首次写入时被收编为该源 |
+| 升级前的老记录 | `source_key=''`，**只在「全部来源」可见**；按源视图严格只认当前源，首次写入时被收编为该源（`05` §6.1，2026-10-28 修正） |
 | 清空 | `clearHistory({clearAll})`：默认只清当前源 |
 | 与安卓的关系 | **PC 本地偏好，不写回安卓** 的 `global_history_mode`（安卓只是容器） |
 

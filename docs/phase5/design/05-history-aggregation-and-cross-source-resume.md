@@ -166,7 +166,7 @@ media_type = CASE WHEN excluded.media_type = '' THEN history.media_type ELSE exc
 | 一个其他源 | 该源的配置名（`historySourceLabel`） |
 | 多个其他源 | `{n} 个其他来源` |
 | 名字都解析不出 | `其他来源` |
-| 组内混有 `source_key = ''` 且无其他源 | `来源未知`（迁移前的老记录） |
+| 组内混有 `source_key = ''` 且无其他源 | `来源未知`（迁移前的老记录，**只在「全部来源」里出现**，见 §6.1） |
 
 `AppState.historySourceLabel(sourceKey)` 的解析顺序：空串 → `null`（不是「别的源」，
 是「不知道来源」）；`== activeSourceKey` → `null`；配置表中命中 → 配置名 → `origin`；
@@ -177,6 +177,27 @@ chip 用主题色（`tertiaryContainer`）而不是固定半透明白/黑：chip
 
 聚合数量角标 `{n} 条`（`history-group-count-{id}`）只在 `group.aggregated` 时显示，
 让用户一眼看出这张卡是合并过的。删除态下两个角标都不渲染（删除态是「另一个模式」，对齐安卓）。
+
+### 6.1 按源视图严格过滤（2026-10-28 修复）
+
+用户反馈（`m00004`）：「最近观看筛选过滤有问题，我选的当前来源结果还是看到了其他未知来源的」——
+截图里「当前来源」下有一整屏 `来源未知` 卡片。
+
+根因有两层，**都不在 UI 层**，只改 `library_pages.dart` 治不好：
+
+| 层 | 缺陷 | 修法 |
+| --- | --- | --- |
+| 读 | 四处按源 SQL 写成 `(? = '' OR source_key = ? OR source_key = '')`，**故意**放空来源行进来（旧理由是"未归属 ≠ 别源"，怕升级后历史凭空清空） | 改成 `(? = '' OR source_key = ?)`：`recentHistory` / `searchHistory` / `findHistory`（精确 + 按集名兜底） |
+| 写 | 实时拉取的历史合并时不带来源，**每一行都落成 `source_key = ''`** | 拉取循环按设备当前激活源解析归属（`phase7/design/01` §3.1） |
+
+严格过滤的代价与兜底：
+
+- 老记录（升级前的 `source_key = ''`）**暂时从按源视图消失**，「全部来源」里仍然可见；
+- 它一旦被播放（`recordProgress` 带 `activeSourceKey`）或被实时同步写入，
+  `_adoptLegacyHistoryRow` 就地把 `source_key = ''` 的行改成当前源，此后进入按源视图；
+- **宁可不显示，不可猜源**：猜错等于串源，比一张「来源未知」卡片严重得多。
+
+`来源未知` 这个文案因此只保留在「全部来源」视图里——那里它说的是真话（确实不知道来源）。
 
 ---
 
