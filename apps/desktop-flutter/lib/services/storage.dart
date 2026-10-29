@@ -1344,6 +1344,25 @@ class AppDatabase {
           .map(PlaybackHistory.fromRow)
           .toList();
 
+  /// 历史行数（[sourceKey] 为空 = 全部；非空 = 只数该源）。
+  ///
+  /// 用途只有一个：「当前来源」为空时，页面上要能说清**是不是真的没历史**。
+  /// 没有这个计数就只能写「暂无播放记录」，而按源严格过滤后它常常是假话
+  /// （全部来源里明明有一屏）。
+  int historyCount({String sourceKey = ''}) => _db.select(
+    'SELECT COUNT(*) AS c FROM history WHERE (? = \'\' OR source_key = ?);',
+    [sourceKey, sourceKey],
+  ).first['c'] as int;
+
+  /// 归属不到任何源的历史行数（`source_key = ''`）。
+  ///
+  /// 这些行是迁移前的老记录和实时同步时判不出来源的记录，**只**出现在
+  /// 全局视图里（见 [recentHistory]）。空态要用它说清「当前来源为空」到底
+  /// 是没记录，还是记录在但归属不到源。
+  int unclaimedHistoryCount() => _db.select(
+    'SELECT COUNT(*) AS c FROM history WHERE source_key = \'\';',
+  ).first['c'] as int;
+
   /// 历史搜索：按片名与剧集名做包含匹配（§15.2）。
   ///
   /// 使用 `instr()` 而不是 `LIKE`：`instr` 是纯子串匹配，用户输入的 `%`、`_`、`\`

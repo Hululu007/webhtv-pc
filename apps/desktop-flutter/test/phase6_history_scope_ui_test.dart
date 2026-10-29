@@ -234,6 +234,64 @@ void main() {
     expect(find.text('B源剧集'), findsNothing);
   });
 
+  testWidgets('当前来源空、全部来源有记录时，空态说清原因并给直达开关', (tester) async {
+    final a = seedRecord('a', '源 A');
+    seedRecord('b', '源 B');
+    // 当前源（A）没有任何记录，但 B 源和一条无来源老记录都在库里。
+    seedHistory(
+      sourceKey: sourceB,
+      vodName: 'B源剧集',
+      siteKey: 'csp_b',
+      updatedAt: 2000,
+    );
+    seedHistory(
+      sourceKey: '',
+      vodName: '无源老记录',
+      siteKey: 'csp_a',
+      updatedAt: 3000,
+    );
+    await state.activateConfigRecord(a);
+
+    await pumpHistory(tester);
+
+    expect(
+      find.text('当前来源暂无记录'),
+      findsOneWidget,
+      reason: '按源过滤后页面为空不等于没历史，写「暂无播放记录」是假话',
+    );
+    expect(
+      find.textContaining('2 条记录'),
+      findsOneWidget,
+      reason: '必须说清全部来源里还剩多少条，用户才知道不是数据丢了',
+    );
+    expect(find.textContaining('1 条归属不到具体播放源'), findsOneWidget);
+    expect(find.text('B源剧集'), findsNothing);
+
+    final showAll = find.byKey(const ValueKey('history-empty-show-all'));
+    expect(showAll, findsOneWidget, reason: '空态必须给唯一出路，否则用户只能自己找工具栏');
+    await tester.tap(showAll);
+    for (var round = 0; round < 20; round++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 16)),
+      );
+    }
+    await tester.pumpAndSettle();
+
+    expect(state.historyScope, UiHistoryScope.global);
+    expect(find.text('B源剧集'), findsOneWidget);
+    expect(find.text('无源老记录'), findsOneWidget);
+  });
+
+  testWidgets('真的没有任何历史时，空态保持原文案', (tester) async {
+    seedRecord('a', '源 A');
+    await pumpHistory(tester);
+
+    expect(find.text('暂无播放记录'), findsOneWidget);
+    expect(find.text('当前来源暂无记录'), findsNothing);
+    expect(find.byKey(const ValueKey('history-empty-show-all')), findsNothing);
+  });
+
   test('范围偏好落盘（重启后保持）', () async {
     // 纯状态层用例（不用 testWidgets）：`bootstrap`/`setHistoryScope` 都是真实
     // 文件 I/O，放进假时钟里会一直不完成。

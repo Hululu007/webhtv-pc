@@ -3985,6 +3985,34 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     }
   }
 
+  /// 历史行数；[sourceKey] 传空串表示"数全部源"。
+  ///
+  /// 与 [recentHistory] 的区别只在用途：这里要回答的是"到底有没有历史"，
+  /// 不是"要显示哪些历史"。空态需要后者——按源视图为空时，页面得知道
+  /// 全部来源里还剩多少条，才说得清"不是没记录，是这些记录归属不到源"。
+  int historyCount({String? sourceKey}) {
+    final database = _database;
+    if (database == null) return 0;
+    try {
+      return database.historyCount(sourceKey: sourceKey ?? historySourceFilter);
+    } catch (error) {
+      log.warning('统计播放历史失败：$error', scope: 'history');
+      return 0;
+    }
+  }
+
+  /// 归属不到任何源的历史行数（迁移前老记录 + 判不出来源的同步记录）。
+  int unclaimedHistoryCount() {
+    final database = _database;
+    if (database == null) return 0;
+    try {
+      return database.unclaimedHistoryCount();
+    } catch (error) {
+      log.warning('统计无来源历史失败：$error', scope: 'history');
+      return 0;
+    }
+  }
+
   List<PlaybackHistory> searchHistory(String keyword, {String? sourceKey}) {
     final database = _database;
     if (database == null) return const [];

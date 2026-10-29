@@ -359,7 +359,7 @@ pwsh -File tools/phase5/run_windows_acceptance.ps1 -ProbeRealDevice 192.168.50.3
 | 历史列表 | 一集一张卡 | 三档聚合（默认 `tmdb` / `none` 逐集 / `title` 按片名），工具栏开关 `history-aggregation-switch`（`05` §3） |
 | 作品身份 | 历史行只有片名 | 加 `vod_year`/`tmdb_id`/`media_type`，纯加法迁移；**旧行不回填**（`05` §4） |
 | 存储 | `schemaVersion 7` | `8`；`upsertHistory` 用条件覆盖，空值不抹掉已绑定身份 |
-| 来源标注 | 无 | 组内含其他源时显示来源 chip；多源显示「{n} 个其他来源」；老记录「来源未知」（`05` §6）——按源视图严格过滤后，空来源行**只在「全部来源」里出现**（`05` §6.1） |
+| 来源标注 | 无 | 组内含其他源时显示来源 chip；多源显示「{n} 个其他来源」；老记录「来源未知」（`05` §6）——按源视图严格过滤后，空来源行**只在「全部来源」里出现**，空态也随之分流成「当前来源暂无记录 + 查看全部来源」（`05` §6.1） |
 | 跨源播放 | 直接 SnackBar 结束 | 两条路径：原站点仍在 → 直接进详情页；否则在**当前源内**搜索匹配，无高置信候选则交给用户（`05` §7） |
 | 续播进度 | 跨源一律从头 | `ResumeSeed` 随历史卡带入详情页，`resolveResumeStart` 判定同一集后按 `ResumePositionPolicy.migrate` 换算；`PlayerPage._load` 再用目标集真实时长重算一次并摘掉种子（`05` §7.2/§7.3） |
 | 跨源候选 | 列表阶段一律当作「有目标集」 | **两阶段**：详情探测后回填 `hasTargetEpisode`/`episodeCount`，预算 12、失败保持 false（`05` §7） |

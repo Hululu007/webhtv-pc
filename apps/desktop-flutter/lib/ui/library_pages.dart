@@ -194,6 +194,42 @@ class _HistoryPageState extends State<HistoryPage> {
       ? _state.recentHistory()
       : _state.searchHistory(_keyword);
 
+  /// 空态。
+  ///
+  /// 「当前来源」按源严格过滤（`05` §6.1）之后，页面为空**不等于**没有历史：
+  /// 全部来源里可能还有一屏看不见的记录，也可能全是归属不到源的老记录。
+  /// 这时还写「暂无播放记录 / 播放任意剧集后会自动记录进度」就是假话，用户
+  /// 会反复播放却始终看不到新记录——2026-10-28 反馈的另一面。
+  Widget _emptyHistory() {
+    final global = _state.historyScopeIsGlobal;
+    final total = global ? 0 : _state.historyCount(sourceKey: '');
+    if (_keyword.isNotEmpty || global || total == 0) {
+      return const EmptyState(
+        icon: Icons.history_outlined,
+        title: '暂无播放记录',
+        message: '播放任意剧集后会自动记录进度。',
+      );
+    }
+    final unclaimed = _state.unclaimedHistoryCount();
+    return EmptyState(
+      icon: Icons.history_outlined,
+      title: '当前来源暂无记录',
+      message: unclaimed > 0
+          ? '全部来源里还有 $total 条记录，其中 $unclaimed 条归属不到具体播放源'
+                '（迁移前的老记录，或同步时判不出来源），只在「全部来源」里显示。'
+          : '全部来源里还有 $total 条记录，来自其他播放源。',
+      action: TextButton.icon(
+        key: const ValueKey('history-empty-show-all'),
+        onPressed: () async {
+          await _state.setHistoryScope(UiHistoryScope.global);
+          if (mounted) setState(() {});
+        },
+        icon: const Icon(Icons.public, size: 18),
+        label: const Text('查看全部来源'),
+      ),
+    );
+  }
+
   /// 把聚合投影里的代表记录还原成**真实的** PlaybackHistory。
   ///
   /// 为什么需要还原：HistoryGroupInput 是 core/ 的标量投影（不依赖
@@ -460,11 +496,7 @@ class _HistoryPageState extends State<HistoryPage> {
         ],
         Expanded(
           child: groups.isEmpty
-              ? const EmptyState(
-                  icon: Icons.history_outlined,
-                  title: '暂无播放记录',
-                  message: '播放任意剧集后会自动记录进度。',
-                )
+              ? _emptyHistory()
               // 列数必须由**内容区**宽度推出，而不是 `MediaQuery` 的整窗宽：
               // 壳层左侧有 `NavigationRail`(76) + `VerticalDivider`(1)，整窗宽
               // 会比内容区宽 77px，列数就会比首页海报墙多算（`design/01` §2.2

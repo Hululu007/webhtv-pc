@@ -120,11 +120,16 @@ class EmptyState extends StatelessWidget {
     required this.title,
     this.message,
     this.icon = Icons.inbox_outlined,
+    this.action,
   });
 
   final String title;
   final String? message;
   final IconData icon;
+
+  /// 空态下的唯一出路（例如「历史页当前来源为空，但别的源有记录」时
+  /// 直接给一个切到全部来源的按钮）。默认没有——多数空态确实无事可做。
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
@@ -159,6 +164,10 @@ class EmptyState extends StatelessWidget {
                   ),
                 ),
               ),
+            ],
+            if (action != null) ...[
+              const SizedBox(height: AppSpace.sm),
+              action!,
             ],
           ],
         ),
