@@ -77,7 +77,8 @@ Future<void> main(List<String> args) async {
     isEnabled: () => true,
     // V3 的鉴权走 token（安卓侧填同一个），因此白名单一律放行。
     isPeerAuthorized: (_) => true,
-    onHistory: (_) async => const SyncMergeStats.empty(),
+    onHistory: (_, {String sourceKey = ''}) async =>
+        const SyncMergeStats.empty(),
     onKeep: (_) async => const SyncMergeStats.empty(),
     onBackup: (_, _) async => const SyncSettings.empty(),
     realtimePull: ({required int since, required int limit}) {
