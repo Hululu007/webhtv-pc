@@ -209,8 +209,13 @@ shortcuts[const SingleActivator(LogicalKeyboardKey.escape)] = () {
 **每一项都有非右键的等价路径**（`design/00` §5 第 10 条）：
 顶栏「更多」菜单、控制栏按钮或快捷键。右键菜单**不是唯一入口**。
 
-**屏显子菜单里 `traffic` 置灰**（`enabled: id != OsdFlag.traffic`），
+**屏显子菜单里 `traffic` 当时置灰**（`enabled: id != OsdFlag.traffic`），
 标签写「网速（未采集）」—— 见 `evidence/05-differences.md` 第 2 条。
+
+> **更正（后续变化）**：现在 7 项**全部可点**、标签统一为「网速」
+> （`player_page.dart` 的 `for (final id in OsdFlag.values)` 直接建项，
+> 没有 `enabled` 特判；中文名由 `_osdLabelOf` 给出，`traffic` → 「网速」）。
+> 原因见 `evidence/05-differences.md` 第 2 条的「更正 2」。
 
 ## 5. 一级子菜单的构造期拒绝
 

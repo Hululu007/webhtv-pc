@@ -37,8 +37,10 @@ import '../services/danmaku_service.dart';
 import '../services/live_danmaku_session.dart';
 import '../services/subtitle_match_service.dart';
 import '../state/app_state.dart';
+import 'advanced_settings_page.dart';
 import 'app.dart';
 import 'common.dart';
+import 'subtitle_settings_page.dart';
 import 'danmaku_overlay.dart';
 import 'player_button_config_page.dart';
 import 'player_context_menu.dart';
@@ -2477,6 +2479,20 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     )] = () {
       unawaited(_manualSkip(SkipAction.outro));
     };
+    // 右键菜单的键盘入口：菜单里的 37 行主项（LUT、音轨、视频轨、标记片头
+    // 片尾等）没有别的入口，只靠鼠标右键就等于把它们对键盘用户关掉了。
+    //
+    // **为什么不改 `buildPlayerShortcuts`**：那是 `app.dart` 里的共享纯函数，
+    // 签名被多个页面锁定，改它要把「本页才有的菜单」概念塞进公共 API；
+    // 而本页已经在它返回的 map 上做追加（上面 Alt+[ / Alt+] 就是先例），
+    // 沿用同一条路风险最小。
+    //
+    // 这三个激活器在 `buildPlayerShortcuts` 里都没有登记（那张表只有
+    // space/←/→/↑/↓/M/[/]/F11/F/Esc，见 `app.dart:1372-1384`），所以直接
+    // 赋值不会覆盖既有绑定。
+    for (final activator in _contextMenuActivators) {
+      shortcuts[activator] = _openContextMenuAtCenter;
+    }
 
     if (_controller.isCompleted) {
       // 连播**不**在这里触发（`design/03` §4.1 D1）：
@@ -2573,6 +2589,23 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                               ),
                               if (_controller.isLoading)
                                 const Positioned.fill(child: LoadingBlock()),
+                              // 缓冲中提示：与加载态同一层（画面之上、屏显与控制
+                              // 浮层之下），且判据互斥——加载阶段已经有上面那个
+                              // 全屏圈，再叠一个就是两个圈（判据见
+                              // [showBufferingIndicator]）。
+                              //
+                              // 放这一层而不是控制浮层里：浮层隐藏时（opacity 0 +
+                              // IgnorePointer）缓冲提示仍必须可见——卡顿时用户
+                              // 恰恰看不到控制栏。
+                              if (showBufferingIndicator(
+                                isBuffering: _controller.isBuffering,
+                                isLoading: _controller.isLoading,
+                              ))
+                                Positioned.fill(
+                                  child: PlayerBufferingIndicator(
+                                    percent: _controller.bufferingPercent,
+                                  ),
+                                ),
                               if (_loadError != null)
                                 Positioned.fill(
                                   child: Center(
@@ -2608,6 +2641,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                         duration: _controller.duration,
                         isLive: _request.directUrl,
                         now: _osdNow,
+                        bytesPerSecond: _controller.bytesPerSecond,
                         diagnostics: _osdDiagnosticsRows(),
                         environment: _osdEnvironmentRows(),
                       ),
@@ -2703,8 +2737,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         overflow: TextOverflow.ellipsis,
       ),
       actions: [
-        // 播放中真正会**反复碰**的三个留在外面：
-        // 字幕轨、弹幕开关、全屏。
+        // 播放中真正会**反复碰**的两个留在外面：字幕轨、弹幕开关。
+        // 「全屏」不在这里——它归底部控制条（一个动作只有一个家）。
         IconButton(
           tooltip: '字幕轨',
           icon: const Icon(Icons.subtitles_outlined),
@@ -2717,10 +2751,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
           ),
           onPressed: _toggleDanmaku,
         ),
-        // 全屏**不在这里**：它归底部控制条（一个动作只有一个家）。
-        // 顶栏常驻、底部栏会随不活动隐藏，所以把「轨道类」留在顶栏、
-        // 「播放/显示类」放底部栏——两边不再重复同一个动作。
-        // 其余五个是**设一次**或**出问题时才用**的，收进溢出菜单。
+        // 其余是**设一次**或**出问题时才用**的，收进溢出菜单。
         //
         // 原来这 8 个图标同尺寸、同字重、平铺成一行，扫视时找不到落点
         // （用户反馈 2026-10-11：「图标也处理吧」）。分组依据是**使用
@@ -2729,6 +2760,28 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         // 注意：字幕轨与弹幕的 tooltip 被集成测试按**精确串**查找并直接
         // `tap`（`subtitle_flow_test.dart`、`danmaku_flow_test.dart`），
         // 所以它们**不能**被收进菜单——收进去测试就点不到了。
+        //
+        // ## 「更多」为什么只剩 5 项
+        //
+        // 右键菜单收编全量设置后，两处大面积重复会让「一个动作只有一个家」
+        // 失效。但「更多」不能删：右键是鼠标专属，键盘/触控板用户需要
+        // 一条不走右键的路径（`design/04` §4.3）。
+        //
+        // 留下的 5 项判据是**「右键之外还有没有别的入口」**，而不是使用频率：
+        // 它们在整棵 UI 树里**只有**右键菜单和这里两处入口，删掉「更多」
+        // 就变成「只有鼠标能到达」——
+        // - 字幕样式 / 弹幕设置：纯样式偏好，顶栏只有字幕轨与弹幕**开关**；
+        // - 画面比例与缩放：底部控制条只放「全屏」，比例归菜单；
+        // - 媒体信息：没有任何页面复制这份数据；
+        // - 快捷键说明：它本身就是「键盘用户的说明书」，只能从 UI 进。
+        //
+        // 去掉的 5 项在别处**另有**入口，不算失去路径：
+        // - 音轨 / 视频轨 → 右键「声音」「轨道」组；单轨时底部控制条也没有
+        //   可切内容，留一个点了只弹说明的入口没有意义；
+        // - 循环与定时 → 右键「播放 → 循环与定时…」；
+        // - LUT 滤镜 → 右键「画面 → LUT 滤镜…」；
+        // - 播放诊断 → 设置 › 日志页顶部的「最近播放诊断」卡片
+        //   （`diagnostics_pages.dart:676` 的 `_PlaybackDiagnosticsCard`）。
         PopupMenuButton<_PlayerMenuAction>(
           tooltip: '更多',
           icon: const Icon(Icons.more_vert),
@@ -2738,20 +2791,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                 _showSubtitleStyleSettings();
               case _PlayerMenuAction.danmakuSettings:
                 _showDanmakuSettings();
-              case _PlayerMenuAction.trackAudio:
-                _showTrackMenu(PlayerTrackKind.audio);
-              case _PlayerMenuAction.trackVideo:
-                _showTrackMenu(PlayerTrackKind.video);
-              case _PlayerMenuAction.playbackMode:
-                _showPlaybackModeSheet();
-              case _PlayerMenuAction.lut:
-                _showLutSettings();
               case _PlayerMenuAction.videoFit:
                 _showVideoFitSettings();
               case _PlayerMenuAction.mediaInfo:
                 _showMediaInfo();
-              case _PlayerMenuAction.diagnostics:
-                _showDiagnostics();
               case _PlayerMenuAction.shortcuts:
                 _showShortcutHelp();
             }
@@ -2768,26 +2811,6 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
               '弹幕设置',
             ),
             _menuItem(
-              _PlayerMenuAction.trackAudio,
-              Icons.graphic_eq,
-              '音轨',
-            ),
-            _menuItem(
-              _PlayerMenuAction.trackVideo,
-              Icons.video_settings_outlined,
-              '视频轨',
-            ),
-            _menuItem(
-              _PlayerMenuAction.playbackMode,
-              Icons.repeat,
-              '循环与定时',
-            ),
-            _menuItem(
-              _PlayerMenuAction.lut,
-              Icons.tune,
-              'LUT 滤镜',
-            ),
-            _menuItem(
               _PlayerMenuAction.videoFit,
               Icons.aspect_ratio_outlined,
               '画面比例与缩放',
@@ -2796,17 +2819,6 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
               _PlayerMenuAction.mediaInfo,
               Icons.info_outline,
               '媒体信息',
-            ),
-            // 诊断只有在真的拿到了诊断数据时才有意义；
-            // 没有数据时**灰掉而不是隐藏**——隐藏会让用户以为功能没了。
-            PopupMenuItem<_PlayerMenuAction>(
-              value: _PlayerMenuAction.diagnostics,
-              enabled: _diagnostics != null,
-              child: _menuRow(
-                Icons.monitor_heart_outlined,
-                '播放诊断',
-                enabled: _diagnostics != null,
-              ),
             ),
             _menuItem(
               _PlayerMenuAction.shortcuts,
@@ -2820,14 +2832,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   }
 
   /// 进度行：等宽时间 + 滑杆（`design/01` §4）。
+  ///
+  /// 滑杆用 [PlayerProgressSlider] 而不是裸 `Slider`：缓冲区间要画在同一根
+  /// 轨道上。行高仍由滑杆决定，没有新增一层——进度行的 32 是浮层几何断言
+  /// 的一部分（`phase8_overlay_layout_test.dart`）。
   Widget _buildProgressRow() {
     final duration = _controller.duration;
-    final maxMs = duration.inMilliseconds <= 0
-        ? 1.0
-        : duration.inMilliseconds.toDouble();
-    final value = _controller.position.inMilliseconds
-        .clamp(0, maxMs.toInt())
-        .toDouble();
     return Row(
       children: [
         // 时间必须用**等宽字形**：比例字形下秒数每跳一次，整行时间
@@ -2837,13 +2847,11 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
           style: tabular(Theme.of(context).textTheme.bodyMedium!),
         ),
         Expanded(
-          child: Slider(
-            value: value,
-            max: maxMs,
-            onChanged: duration.inMilliseconds <= 0
-                ? null
-                : (next) =>
-                      _controller.seek(Duration(milliseconds: next.round())),
+          child: PlayerProgressSlider(
+            position: _controller.position,
+            duration: duration,
+            buffered: _controller.buffered,
+            onSeek: _controller.seek,
           ),
         ),
         Text(
@@ -3103,11 +3111,23 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       _osdTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
         if (!mounted) return;
         setState(() => _osdNow = debugOsdClockOverride ?? DateTime.now());
+        _sampleNetworkRate();
       });
     } else {
       _osdTimer?.cancel();
       _osdTimer = null;
     }
+  }
+
+  /// 网速采样，挂在屏显刷新循环上（不另起 Timer，见
+  /// `PlayerController.sampleNetworkRate` 的注释）。
+  ///
+  /// **只在网速开关开着时采**：关着时每秒读一次 mpv 属性纯属浪费，
+  /// 而且会把 "屏显全关 → 停止刷新" 的优化打回半残（循环虽停，
+  /// 这里若另起唤醒就又活了）。
+  void _sampleNetworkRate() {
+    if (!(widget.state.osdFlags[OsdFlag.traffic] ?? false)) return;
+    unawaited(_controller.sampleNetworkRate());
   }
 
   void _touchControls() {
@@ -3151,6 +3171,33 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     _syncOsdTimer();
   }
 
+  /// 键盘打开右键菜单的三个激活器：菜单键、Shift+F10（Windows 惯例）、
+  /// 以及无修饰的 F10（部分键盘没有菜单键，也没有 Shift 习惯）。
+  static const List<SingleActivator> _contextMenuActivators = [
+    SingleActivator(LogicalKeyboardKey.contextMenu),
+    SingleActivator(LogicalKeyboardKey.f10, shift: true),
+    SingleActivator(LogicalKeyboardKey.f10),
+  ];
+
+  /// 在画面中央打开右键菜单（菜单键 / Shift+F10 / F10）。
+  ///
+  /// 复用 [_openContextMenu] 而不是另写一套打开逻辑：它已经幂等（菜单开着时
+  /// 只移动位置），也带着「强制显示控制栏 + 取消隐藏计时器」那套行为，
+  /// 分叉出去这两点就会各自漂移。
+  ///
+  /// 为什么减掉半个菜单尺寸：[_openContextMenu] 的入参是菜单**左上角**
+  /// （`player_context_menu.dart:178-181`），直接传画面中心会让菜单整体落到
+  /// 右下象限、看起来像跑偏了。菜单宽高是 `player_context_menu.dart` 的私有
+  /// 常量（`_menuWidth = 240`、`_estimatedMenuHeight = 420`），外部取不到，
+  /// 这里镜像一份**只用于视觉居中**；镜像值漂移最多让菜单偏几十像素，
+  /// 不改变任何行为。坐标空间沿用既有约定（见 `player_context_menu.dart:17-21`：
+  /// Windows 全屏播放器里 globalPosition 与父 Stack 坐标一致）。
+  void _openContextMenuAtCenter() {
+    const halfMenu = Offset(120, 210);
+    final center = MediaQuery.sizeOf(context).center(Offset.zero);
+    _openContextMenu(center - halfMenu);
+  }
+
   /// 关闭右键菜单并恢复自动隐藏计时（`design/04` §5.4）。
   void _closeContextMenu() {
     if (_contextMenuAnchor == null) return;
@@ -3159,10 +3206,56 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   }
 
   /// 右键菜单的分组内容（`design/04` §4.1）。
+  ///
+  /// ## 为什么是 10 组、且每组都能往下钻
+  ///
+  /// 上一版是 7 个**扁平**组、约 40 项：子菜单基本为空，本该分层的选项
+  /// （字幕字号/描边/位置/底色、各画面比例、7 个屏显开关、定时关闭）全被摊在
+  /// 主列里，主列要滚到底才看得见「屏显」。现在的形态对齐 PotPlayer 的分组
+  /// 逻辑——**按功能域分组、组内下钻**：主列只回答「我要动哪一类」，
+  /// 具体取值落在第 2、第 3 列。
+  ///
+  /// ## 带子列的父项**只有** children、没有 onSelect
+  ///
+  /// 引擎对「有 children 的项」不发动作（`design/04` §5.5：一次点击不能既
+  /// 飞出又执行）。所以父项只承载「打开下一列」，真实动作全部落在叶子上。
+  ///
+  /// ## 当前值必须可见
+  ///
+  /// 倍速、音量档位、静音、画面模式、LUT、屏显开关、自动跳过、循环模式、
+  /// 定时关闭、字幕样式各档都用 `selected` 标出来。不可用项用
+  /// `enabled: false` 但**保留 selected**：引擎把「选中 + 禁用」画成压暗的
+  /// 琥珀，仍读得出这是当前值（`DESIGN.md:373`「禁用只降低强调，不能抹掉
+  /// 状态」）。
+  ///
+  /// ## 每组至少两项
+  ///
+  /// 只有一个子项的分组没有存在价值（分组的目的是缩短主列），宁可合并掉。
+  /// 所以「画面」只有画面比例与 LUT 两项、全屏归「显示」——全屏是显示模式，
+  /// 与屏显开关同一类。
   List<PlayerMenuSection> _contextMenuSections() {
     const rates = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+    // 音量档位：与底部控制条滑杆同值域（0–100），20 一档。
+    const volumeSteps = [0.0, 20.0, 40.0, 60.0, 80.0, 100.0];
     final osd = widget.state.osdFlags;
+    final volume = _controller.volume;
+    final subtitle = _controller.selectedSubtitle;
+    final audioTracks = _controller.audioTrackOptions;
+    // 设置组下钻树的数据源：每次建菜单都重读，菜单里显示的就是**真实值**，
+    // 不走本地缓存（`_options` 只是播放参数的会话副本，字幕/弹幕设置没有副本）。
+    final subtitleSettings = widget.state.subtitleSettings;
+    final danmakuSettings = widget.state.danmakuSettings;
+
+    /// 叶子项的统一收尾：**先关菜单再执行**。
+    ///
+    /// 菜单层由本页持有；不关掉会盖在随后弹出的底部弹层/对话框上。
+    VoidCallback act(VoidCallback action) => () {
+      _closeContextMenu();
+      action();
+    };
+
     return [
+      // ------------------------------------------------------ 1. 播放
       PlayerMenuSection(
         title: '播放',
         items: [
@@ -3170,58 +3263,51 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             id: 'play',
             label: _controller.isPlaying ? '暂停' : '播放',
             icon: _controller.isPlaying ? Icons.pause : Icons.play_arrow,
-            onSelect: () {
-              _closeContextMenu();
-              _controller.playOrPause();
-            },
+            onSelect: act(_controller.playOrPause),
           ),
           PlayerMenuItem(
             id: 'prev',
             label: '上一集',
             icon: Icons.skip_previous,
-            onSelect: () {
-              _closeContextMenu();
-              _playPrevious();
-            },
+            onSelect: act(_playPrevious),
           ),
           PlayerMenuItem(
             id: 'next',
             label: '下一集',
             icon: Icons.skip_next,
-            onSelect: () {
-              _closeContextMenu();
-              _playNext();
-            },
+            onSelect: act(_playNext),
           ),
           PlayerMenuItem(
             id: 'back10',
             label: '后退 10 秒',
             icon: Icons.replay_10,
-            onSelect: () {
-              _closeContextMenu();
-              _controller.seekBy(const Duration(seconds: -10));
-            },
+            onSelect: act(
+              () => _controller.seekBy(const Duration(seconds: -10)),
+            ),
           ),
           PlayerMenuItem(
             id: 'forward10',
             label: '前进 10 秒',
             icon: Icons.forward_10,
-            onSelect: () {
-              _closeContextMenu();
-              _controller.seekBy(const Duration(seconds: 10));
-            },
+            onSelect: act(
+              () => _controller.seekBy(const Duration(seconds: 10)),
+            ),
           ),
+          // 循环与定时是**会话级**状态，取值有 3 种循环 + 8 种定时，全部
+          // 摊进主列会让「播放」组比别的组高出一倍，所以保留原来的底部弹层
+          // 作为唯一入口。`selected` 让「已开启循环或定时」在主列直接可见——
+          // 上一版这两个状态在菜单里完全不可见。
           PlayerMenuItem(
             id: 'playback_mode',
             label: '循环与定时…',
             icon: Icons.repeat,
-            onSelect: () {
-              _closeContextMenu();
-              _showPlaybackModeSheet();
-            },
+            selected: _repeat != PlaybackRepeat.off || !_sleepTimer.idle,
+            onSelect: act(_showPlaybackModeSheet),
           ),
         ],
       ),
+
+      // ------------------------------------------------------ 2. 速度
       PlayerMenuSection(
         title: '速度',
         items: [
@@ -3230,13 +3316,127 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
               id: 'rate_$rate',
               label: '${rate.toString()}×',
               selected: (_controller.rate - rate).abs() < 0.01,
-              onSelect: () {
-                _closeContextMenu();
-                _controller.setRate(rate);
-              },
+              onSelect: act(() => _controller.setRate(rate)),
             ),
         ],
       ),
+
+      // ------------------------------------------------------ 3. 字幕
+      PlayerMenuSection(
+        title: '字幕',
+        items: [
+          PlayerMenuItem(
+            id: 'subtitle_track',
+            label: '字幕轨…',
+            icon: Icons.subtitles_outlined,
+            selected: subtitle != null && subtitle.id != SubtitleOption.offId,
+            onSelect: act(_showSubtitleMenu),
+          ),
+          PlayerMenuItem(
+            id: 'subtitle_search',
+            label: '在线搜索字幕…',
+            icon: Icons.search,
+            onSelect: act(_showSubtitleSearch),
+          ),
+          PlayerMenuItem(
+            id: 'subtitle_local',
+            label: '本地字幕文件…',
+            icon: Icons.folder_open_outlined,
+            onSelect: act(_showLocalSubtitlePicker),
+          ),
+          // 字幕样式在本轮**没有落盘能力**（`PlayerSubtitleStyle` 是页面字段），
+          // 所以不能只给一个「打开设置页」的入口——四档取值每次都要点开底部
+          // 弹层才看得见。这里做成二级 + 三级：字号 / 描边 / 位置 / 底色
+          // 各自飞出一列具体档位。
+          PlayerMenuItem(
+            id: 'subtitle_style',
+            label: '字幕样式',
+            icon: Icons.format_color_text_outlined,
+            children: [
+              PlayerMenuItem(
+                id: 'sub_size',
+                label: '字号',
+                icon: Icons.text_fields,
+                children: [
+                  for (final scale in const [0.8, 1.0, 1.25, 1.5])
+                    PlayerMenuItem(
+                      id: 'sub_size_${(scale * 100).round()}',
+                      label: '${(scale * 100).round()}%',
+                      selected:
+                          (_subtitleStyle.textScale - scale).abs() < 0.001,
+                      onSelect: () => _applySubtitleStyle(
+                        _subtitleStyle.copyWith(textScale: scale),
+                      ),
+                    ),
+                ],
+              ),
+              PlayerMenuItem(
+                id: 'sub_outline',
+                label: '描边',
+                icon: Icons.border_color_outlined,
+                children: [
+                  for (final width in const [0.0, 1.0, 2.0, 3.0])
+                    PlayerMenuItem(
+                      id: 'sub_outline_${width.round()}',
+                      label: width <= 0 ? '无描边' : '${width.round()}px',
+                      selected:
+                          (_subtitleStyle.outlineWidth - width).abs() < 0.001,
+                      onSelect: () => _applySubtitleStyle(
+                        _subtitleStyle.copyWith(outlineWidth: width),
+                      ),
+                    ),
+                ],
+              ),
+              PlayerMenuItem(
+                id: 'sub_pos',
+                label: '位置',
+                icon: Icons.vertical_align_bottom,
+                children: [
+                  for (final padding in const [0.0, 24.0, 48.0, 72.0])
+                    PlayerMenuItem(
+                      id: 'sub_pos_${padding.round()}',
+                      label: '${padding.round()}dp',
+                      selected:
+                          (_subtitleStyle.bottomPadding - padding).abs() <
+                          0.001,
+                      onSelect: () => _applySubtitleStyle(
+                        _subtitleStyle.copyWith(bottomPadding: padding),
+                      ),
+                    ),
+                ],
+              ),
+              PlayerMenuItem(
+                id: 'sub_bg',
+                label: '底色',
+                icon: Icons.format_color_fill,
+                children: [
+                  for (final alpha in const [0.0, 0.25, 0.5, 0.75])
+                    PlayerMenuItem(
+                      id: 'sub_bg_${(alpha * 100).round()}',
+                      label: alpha <= 0 ? '透明' : '${(alpha * 100).round()}%',
+                      selected:
+                          (_subtitleStyle.backgroundOpacity - alpha).abs() <
+                          0.001,
+                      onSelect: () => _applySubtitleStyle(
+                        _subtitleStyle.copyWith(backgroundOpacity: alpha),
+                      ),
+                    ),
+                ],
+              ),
+              PlayerMenuItem(
+                id: 'sub_style_reset',
+                label: '恢复默认样式',
+                icon: Icons.restart_alt,
+                onSelect: act(
+                  () => _applySubtitleStyle(const PlayerSubtitleStyle()),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+
+      // ------------------------------------------------------ 4. 画面
       PlayerMenuSection(
         title: '画面',
         items: [
@@ -3250,76 +3450,100 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                   id: 'fit_${mode.name}',
                   label: mode.label,
                   selected: mode == _videoFitMode,
-                  onSelect: () {
-                    _closeContextMenu();
-                    _applyVideoFitMode(mode);
-                  },
+                  onSelect: act(() => _applyVideoFitMode(mode)),
                 ),
             ],
           ),
           PlayerMenuItem(
-            id: 'fullscreen',
-            label: _fullscreen ? '退出全屏' : '全屏',
-            icon: _fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-            onSelect: () {
-              _closeContextMenu();
-              _toggleFullscreen();
-            },
+            id: 'lut',
+            label: 'LUT 滤镜…',
+            icon: Icons.palette_outlined,
+            selected: _options.hasLut,
+            onSelect: act(_showLutSettings),
           ),
         ],
       ),
+
+      // ------------------------------------------------------ 5. 声音
+      PlayerMenuSection(
+        title: '声音',
+        items: [
+          PlayerMenuItem(
+            id: 'volume',
+            label: '音量',
+            icon: _controller.muted ? Icons.volume_off : Icons.volume_up,
+            children: [
+              for (final step in volumeSteps)
+                PlayerMenuItem(
+                  id: 'volume_${step.round()}',
+                  label: '${step.round()}%',
+                  selected: (volume - step).abs() < 0.5,
+                  onSelect: act(() => _controller.setVolume(step)),
+                ),
+            ],
+          ),
+          PlayerMenuItem(
+            id: 'mute',
+            label: _controller.muted ? '取消静音（M）' : '静音（M）',
+            icon: _controller.muted ? Icons.volume_up : Icons.volume_off,
+            selected: _controller.muted,
+            onSelect: act(_controller.toggleMute),
+          ),
+          PlayerMenuItem(
+            id: 'sound_audio_track',
+            label: '音轨…',
+            icon: Icons.graphic_eq,
+            // 只有一条音轨时引擎没有可切的东西（`_showTrackMenu` 会弹说明），
+            // 这里直接按「无多轨」灰掉，但仍保留在菜单里（隐藏更像功能没了）。
+            enabled: audioTracks.length > 1,
+            onSelect: act(() => _showTrackMenu(PlayerTrackKind.audio)),
+          ),
+        ],
+      ),
+
+      // ------------------------------------------------------ 6. 轨道
       PlayerMenuSection(
         title: '轨道',
         items: [
           PlayerMenuItem(
-            id: 'subtitle',
-            label: '字幕轨',
-            icon: Icons.subtitles_outlined,
-            onSelect: () {
-              _closeContextMenu();
-              _showSubtitleMenu();
-            },
-          ),
-          PlayerMenuItem(
-            id: 'audio_track',
-            label: '音轨',
-            icon: Icons.graphic_eq,
-            onSelect: () {
-              _closeContextMenu();
-              _showTrackMenu(PlayerTrackKind.audio);
-            },
-          ),
-          PlayerMenuItem(
-            id: 'video_track',
-            label: '视频轨',
+            id: 'track_video',
+            label: '视频轨…',
             icon: Icons.video_settings_outlined,
-            onSelect: () {
-              _closeContextMenu();
-              _showTrackMenu(PlayerTrackKind.video);
-            },
+            onSelect: act(() => _showTrackMenu(PlayerTrackKind.video)),
           ),
           PlayerMenuItem(
-            id: 'danmaku',
+            id: 'track_subtitle',
+            label: '字幕轨…',
+            icon: Icons.subtitles_outlined,
+            selected: subtitle != null && subtitle.id != SubtitleOption.offId,
+            onSelect: act(_showSubtitleMenu),
+          ),
+          PlayerMenuItem(
+            id: 'track_danmaku',
             label: _danmakuStyle.enabled ? '关闭弹幕' : '开启弹幕',
             icon: _danmakuStyle.enabled
                 ? Icons.comment
                 : Icons.comment_bank_outlined,
-            onSelect: () {
-              _closeContextMenu();
-              _toggleDanmaku();
-            },
+            selected: _danmakuStyle.enabled,
+            // 就地生效、**不关菜单**：连续调整时会反复按。
+            onSelect: _toggleDanmaku,
           ),
           PlayerMenuItem(
-            id: 'danmaku_settings',
-            label: '弹幕设置',
+            id: 'track_danmaku_settings',
+            label: '弹幕设置…',
             icon: Icons.comment_outlined,
-            onSelect: () {
-              _closeContextMenu();
-              _showDanmakuSettings();
-            },
+            onSelect: act(_showDanmakuSettings),
+          ),
+          PlayerMenuItem(
+            id: 'track_danmaku_search',
+            label: '搜索弹幕…',
+            icon: Icons.travel_explore,
+            onSelect: act(_showDanmakuSearch),
           ),
         ],
       ),
+
+      // ------------------------------------------------------ 7. 显示
       PlayerMenuSection(
         title: '显示',
         items: [
@@ -3333,35 +3557,22 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                   id: 'osd_$id',
                   label: _osdLabelOf(id),
                   selected: osd[id] ?? false,
-                  enabled: id != OsdFlag.traffic,
+                  // 就地生效、不关菜单：7 个开关常要连着拨
+                  // （`_toggleOsdFlag` 自己 setState，勾选当场刷新）。
                   onSelect: () => _toggleOsdFlag(id),
                 ),
             ],
           ),
           PlayerMenuItem(
-            id: 'lut',
-            label: 'LUT 滤镜…',
-            icon: Icons.tune,
-            onSelect: () {
-              _closeContextMenu();
-              _showLutSettings();
-            },
-          ),
-          PlayerMenuItem(
-            id: 'buttons',
-            label: '控制栏按钮…',
-            icon: Icons.tune,
-            onSelect: () {
-              _closeContextMenu();
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => PlayerButtonConfigPage(state: widget.state),
-                ),
-              );
-            },
+            id: 'fullscreen',
+            label: _fullscreen ? '退出全屏' : '全屏',
+            icon: _fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+            onSelect: act(_toggleFullscreen),
           ),
         ],
       ),
+
+      // ------------------------------------------------------ 8. 片头片尾
       PlayerMenuSection(
         title: '片头片尾',
         items: [
@@ -3379,56 +3590,45 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             selected: _options.autoSkipOutro,
             onSelect: () => _toggleAutoSkip(intro: false),
           ),
+          // 手动跳过依赖数据库里的标记：没有标记时**灰掉但仍然列出**，
+          // 隐藏会让用户以为功能没了（`DESIGN.md` 同类教训）。
           PlayerMenuItem(
             id: 'skip_intro',
             label: '跳过片头',
             icon: Icons.skip_next_outlined,
             enabled: _skipSegments.hasIntro,
-            onSelect: () {
-              _closeContextMenu();
-              unawaited(_manualSkip(SkipAction.intro));
-            },
+            onSelect: act(() => _manualSkip(SkipAction.intro)),
           ),
           PlayerMenuItem(
             id: 'skip_outro',
             label: '跳过片尾',
             icon: Icons.skip_next,
             enabled: _skipSegments.hasOutro,
-            onSelect: () {
-              _closeContextMenu();
-              unawaited(_manualSkip(SkipAction.outro));
-            },
+            onSelect: act(() => _manualSkip(SkipAction.outro)),
           ),
           PlayerMenuItem(
             id: 'mark_intro',
             label: '标记片头为当前位置',
             icon: Icons.flag_outlined,
-            onSelect: () {
-              _closeContextMenu();
-              unawaited(_markSkipSegment(SkipAction.intro));
-            },
+            onSelect: act(() => _markSkipSegment(SkipAction.intro)),
           ),
           PlayerMenuItem(
             id: 'mark_outro',
             label: '标记片尾为当前位置',
             icon: Icons.flag,
-            onSelect: () {
-              _closeContextMenu();
-              unawaited(_markSkipSegment(SkipAction.outro));
-            },
+            onSelect: act(() => _markSkipSegment(SkipAction.outro)),
           ),
           PlayerMenuItem(
             id: 'clear_skip',
             label: '清除本片标记',
             icon: Icons.clear,
             enabled: _skipSegments.active,
-            onSelect: () {
-              _closeContextMenu();
-              unawaited(_clearSkipSegments());
-            },
+            onSelect: act(_clearSkipSegments),
           ),
         ],
       ),
+
+      // ------------------------------------------------------ 9. 信息
       PlayerMenuSection(
         title: '信息',
         items: [
@@ -3436,33 +3636,265 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             id: 'media_info',
             label: '媒体信息',
             icon: Icons.info_outline,
-            onSelect: () {
-              _closeContextMenu();
-              _showMediaInfo();
-            },
+            onSelect: act(_showMediaInfo),
           ),
           PlayerMenuItem(
             id: 'diagnostics',
             label: '播放诊断',
             icon: Icons.monitor_heart_outlined,
             enabled: _diagnostics != null,
-            onSelect: () {
-              _closeContextMenu();
-              _showDiagnostics();
-            },
+            onSelect: act(_showDiagnostics),
           ),
           PlayerMenuItem(
             id: 'shortcuts',
             label: '快捷键说明',
             icon: Icons.keyboard,
-            onSelect: () {
-              _closeContextMenu();
-              _showShortcutHelp();
-            },
+            onSelect: act(_showShortcutHelp),
+          ),
+        ],
+      ),
+
+      // ------------------------------------------------------ 10. 设置
+      //
+      // 这一组是**下钻设置树**，不再只是三个跳转入口：硬解 / 缓存 / 自动连播
+      // 这类开关本身就在这里改，用户不必离开画面（上一版三项全是
+      // `Navigator.push`，点一下播放器就没了——用户反馈「还有些没有聚合」
+      // 指的正是这件事）。
+      //
+      // 为什么仍保留跳转项（`完整设置页…` / `打开完整字幕源设置…` /
+      // `打开弹幕库设置…`）：那几个页面里是**文本表单**——字幕源 URL、token
+      // （**不得进日志**）、多个本地目录、弹幕库地址。菜单列宽固定 240
+      // （`design/04` §5.2），放不下一个可读的输入框；硬塞进去也只会被
+      // `maxLines: 1` 的省略号截断，用户看不到自己在改什么，比跳页更难用。
+      // 所以切分标准是**「一步操作 vs 长文本录入」**，不是「开关 vs 页面」：
+      // 开关就地改，表单仍交给专门页面，两边不重复实现同一份偏好。
+      PlayerMenuSection(
+        title: '设置',
+        items: [
+          PlayerMenuItem(
+            id: 'settings_player_options',
+            label: '播放参数',
+            icon: Icons.tune,
+            children: [
+              _settingsToggle(
+                id: 'settings_hwdec',
+                label: '硬件解码',
+                value: _options.hardwareDecoding,
+                onChanged: (value) => _livePatchOptions(
+                  _options.copyWith(hardwareDecoding: value),
+                ),
+              ),
+              _settingsToggle(
+                id: 'settings_cache',
+                label: '缓存',
+                value: _options.cache,
+                onChanged: (value) =>
+                    _livePatchOptions(_options.copyWith(cache: value)),
+              ),
+              _settingsToggle(
+                id: 'settings_preload_next',
+                label: '预加载下一集',
+                value: _options.preloadNext,
+                onChanged: (value) =>
+                    _livePatchOptions(_options.copyWith(preloadNext: value)),
+              ),
+              _settingsToggle(
+                id: 'settings_audio_passthrough',
+                label: '音频直通',
+                value: _options.audioPassthrough,
+                onChanged: (value) => _livePatchOptions(
+                  _options.copyWith(audioPassthrough: value),
+                ),
+              ),
+              _settingsToggle(
+                id: 'settings_auto_next',
+                label: '自动连播',
+                value: _options.autoNext,
+                onChanged: (value) =>
+                    _livePatchOptions(_options.copyWith(autoNext: value)),
+              ),
+              // 第 3 层：失败回退阶梯。四档是**互斥单选**，摊成四条开关会让
+              // 「当前是哪一档」看不出来；飞出子列则天然单选（只有一项打勾）。
+              PlayerMenuItem(
+                id: 'settings_failure_fallback',
+                label: '失败回退',
+                icon: Icons.alt_route,
+                children: [
+                  for (final mode in PlayerFailureFallback.values)
+                    PlayerMenuItem(
+                      id: 'settings_fallback_${mode.id}',
+                      label: mode.label,
+                      selected: _options.failureFallback == mode,
+                      // 就地生效、不关菜单：改完回退策略常常还要接着调缓存上限。
+                      onSelect: () => _livePatchOptions(
+                        _options.copyWith(failureFallback: mode),
+                      ),
+                    ),
+                ],
+              ),
+              // 第 3 层：缓存上限。真值是 int（16–2048 MiB，见
+              // `PlayerOptions.minDemuxerMaxMiB`），菜单里没有数字输入，所以
+              // 给四档常用值；要精调仍走「完整设置页…」的滑杆——**不假装**
+              // 四档就是全部取值。
+              PlayerMenuItem(
+                id: 'settings_cache_cap',
+                label: '缓存上限',
+                icon: Icons.sd_storage_outlined,
+                children: [
+                  for (final mib in const [64, 128, 256, 512])
+                    PlayerMenuItem(
+                      id: 'settings_cache_cap_$mib',
+                      label: '$mib MiB',
+                      selected: _options.demuxerMaxBytesMiB == mib,
+                      onSelect: () =>
+                          _livePatchOptions(_options.copyWith(
+                            demuxerMaxBytesMiB: mib,
+                          )),
+                    ),
+                ],
+              ),
+            ],
+          ),
+          PlayerMenuItem(
+            id: 'settings_subtitle_source',
+            label: '字幕源',
+            icon: Icons.subtitles_outlined,
+            children: [
+              _settingsToggle(
+                id: 'settings_subtitle_auto_match',
+                label: '自动匹配字幕',
+                value: subtitleSettings.autoMatch,
+                // 一个源都没有时匹配必然落空：**灰掉但保留 selected**。
+                // 引擎把「选中 + 禁用」画成压暗琥珀，状态仍可读
+                // （`player_context_menu.dart:503-515`：「禁用只降低强调，
+                // 不能抹掉状态」）。
+                enabled: subtitleSettings.hasAnyProvider,
+                onChanged: _toggleSubtitleAutoMatch,
+              ),
+              PlayerMenuItem(
+                id: 'settings_subtitle_provider_status',
+                label: subtitleSettings.hasAnyProvider
+                    ? '字幕源：已配置'
+                    : '字幕源：未配置',
+                icon: subtitleSettings.hasAnyProvider
+                    ? Icons.check_circle_outline
+                    : Icons.new_releases_outlined,
+                // 纯状态行：不给动作，也**不置灰**（灰色读起来像「坏了」）。
+                // 「已配置」用 selected 表达，与开关列同一套视觉语言。
+                selected: subtitleSettings.hasAnyProvider,
+              ),
+              PlayerMenuItem(
+                id: 'settings_subtitle_source_form',
+                label: '打开完整字幕源设置…',
+                icon: Icons.folder_open_outlined,
+                // 为什么仍是跳转：URL / token / 多个本地目录都是长文本、
+                // 多值录入，见本组顶部注释。
+                onSelect: act(
+                  () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => SubtitleSettingsPage(state: widget.state),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          PlayerMenuItem(
+            id: 'settings_danmaku_library',
+            label: '弹幕库',
+            icon: Icons.forum_outlined,
+            children: [
+              _settingsToggle(
+                id: 'settings_danmaku_auto_search',
+                label: '自动搜索弹幕',
+                value: danmakuSettings.autoSearch,
+                // 未配置库地址时搜不到任何东西：灰掉但保留 selected。
+                enabled: danmakuSettings.hasLibrary,
+                onChanged: _toggleDanmakuAutoSearch,
+              ),
+              PlayerMenuItem(
+                id: 'settings_danmaku_library_form',
+                label: '打开弹幕库设置…',
+                icon: Icons.link,
+                // 为什么仍是跳转：弹幕库地址是一个 URL，改完还要重新探测库
+                // 是否可用——那是表单页的职责，不是一次点击能表达的。
+                onSelect: act(
+                  () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => AdvancedSettingsPage(state: widget.state),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          PlayerMenuItem(
+            id: 'settings_buttons',
+            label: '控制栏按钮',
+            icon: Icons.view_week_outlined,
+            children: [
+              // 9 项（`kPlayerButtons`）：selected = **未隐藏**。
+              // 用「显示中」而不是「已隐藏」做勾选态，是因为用户找的是
+              // 「这个按钮还在不在控制栏上」。
+              for (final spec in kPlayerButtons)
+                _settingsToggle(
+                  id: 'settings_button_${spec.id}',
+                  label: spec.label,
+                  value: !widget.state.playerButtonHidden.contains(spec.id),
+                  onChanged: (value) =>
+                      _togglePlayerButtonVisible(spec.id, value),
+                ),
+              PlayerMenuItem(
+                id: 'settings_buttons_reset',
+                label: '恢复默认顺序',
+                icon: Icons.restart_alt,
+                // 就地执行、不关菜单：结果在控制栏上立刻可见，不需要离开画面。
+                // 这里**不弹二次确认**：误点一次的代价是「回到默认」，
+                // 而默认本身就是绝大多数用户的状态（表单页要求确认是因为
+                // 那里会连拖动顺序一起改）。
+                onSelect: _resetPlayerButtonsFromMenu,
+              ),
+              PlayerMenuItem(
+                id: 'settings_buttons_form',
+                label: '拖动排序…',
+                icon: Icons.drag_indicator,
+                // 顺序调整是拖拽手势，菜单里没有可表达的载体——只能跳页。
+                onSelect: act(
+                  () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          PlayerButtonConfigPage(state: widget.state),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          PlayerMenuItem(
+            id: 'settings_advanced_page',
+            label: '完整设置页…',
+            icon: Icons.settings_outlined,
+            // 兜底入口：直播源回退、广告规则、DoH、站点注入等不在本树的项，
+            // 以及需要数字输入的精调（缓存上限滑杆）都在这里。
+            onSelect: act(
+              () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => AdvancedSettingsPage(state: widget.state),
+                ),
+              ),
+            ),
           ),
         ],
       ),
     ];
+  }
+
+  /// 字幕样式的就地改动（右键菜单三级叶子项用）。
+  ///
+  /// **不落盘**：与 `_showSubtitleStyleSettings` 的「应用」同语义——
+  /// `PlayerSubtitleStyle` 目前是页面级字段，没有持久化能力，这里也不假装有。
+  void _applySubtitleStyle(PlayerSubtitleStyle next) {
+    setState(() => _subtitleStyle = next);
   }
 
   /// 切换一项屏显开关（菜单里就地生效，**不关闭菜单**，便于连续调整）。
@@ -3471,6 +3903,97 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     unawaited(widget.state.setOsdFlag(id, next));
     setState(() {});
     _syncOsdTimer();
+  }
+
+  // ------------------------------------------------------------ 设置树下钻项
+  //
+  // 这里的四项与 `_toggleOsdFlag` 同语义：**先 setState、再（不 await）落盘**。
+  //
+  // 为什么顺序不能反过来（先 await 再 setState）：
+  // 1. 「就地生效」承诺的是**点完立刻变**。`AppState` 的各 `set*` 都是
+  //    同步改内存、只把 `_persist()` 的 Future 交回来
+  //    （`ui_preferences_store.dart:632-733`），等 I/O 只会让勾选晚一拍；
+  // 2. 在 `testWidgets` 的假时钟下，那个 Future 由**真实 zone** 的写盘队列
+  //    驱动，`await` 之后的那次 `setState` 可能永远等不到
+  //    （`player_button_config_page.dart:71-75` 记录过同一个坑）。
+  //
+  // 为什么**不关菜单**：这一层里有 5 个开关 + 9 个控制栏按钮，用户的真实
+  // 动作是「连着改几项再对比效果」。每改一项就关菜单，等于每一项都要重新
+  // 右键、重新走两三层——那正是这次要消灭的负担。
+
+  /// 设置树里的一个开关行。
+  ///
+  /// 只做「布尔 → 菜单项」的形状转换，不含业务：每个开关的真实语义仍在
+  /// 各自的 `onChanged` 里，读的是当前生效值（`selected` 即真相）。
+  PlayerMenuItem _settingsToggle({
+    required String id,
+    required String label,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+    bool enabled = true,
+  }) => PlayerMenuItem(
+    id: id,
+    label: label,
+    selected: value,
+    enabled: enabled,
+    onSelect: () => onChanged(!value),
+  );
+
+  /// 就地改播放参数：立即应用到内核、立即刷新界面，落盘在后台。
+  ///
+  /// 与「完整设置页」读同一份 `PlayerOptions`（`state.setPlayerOptions`），
+  /// 所以两处入口不会漂移：页面里改完回菜单，勾选就是新值。
+  /// mpv 属性注入失败（非 NativePlayer 平台）不在这里报警——那会变成
+  /// 每点一次一个提示；失败路径与启动时一致，由 `_applyPlaybackEnhancements`
+  /// 的日志承接。
+  void _livePatchOptions(PlayerOptions next) {
+    final normalized = next.normalized();
+    _options = normalized;
+    unawaited(widget.state.setPlayerOptions(normalized));
+    unawaited(_controller.applyPlayerOptions(normalized));
+    setState(() {});
+  }
+
+  /// 「自动匹配字幕」开关：没有配置任何字幕源时不给改（菜单行已灰）。
+  void _toggleSubtitleAutoMatch(bool value) {
+    final current = widget.state.subtitleSettings;
+    if (!current.hasAnyProvider) return;
+    unawaited(
+      widget.state.setSubtitleSettings(current.copyWith(autoMatch: value)),
+    );
+    setState(() {});
+  }
+
+  /// 「自动搜索弹幕」开关：没有配置弹幕库地址时不给改（菜单行已灰）。
+  void _toggleDanmakuAutoSearch(bool value) {
+    final current = widget.state.danmakuSettings;
+    if (!current.hasLibrary) return;
+    unawaited(
+      widget.state.setDanmakuSettings(current.copyWith(autoSearch: value)),
+    );
+    setState(() {});
+  }
+
+  /// 显示/隐藏一个控制栏按钮（菜单里就地生效，不关菜单）。
+  void _togglePlayerButtonVisible(String id, bool visible) {
+    final next = Set<String>.of(widget.state.playerButtonHidden);
+    if (visible) {
+      next.remove(id);
+    } else {
+      next.add(id);
+    }
+    unawaited(widget.state.setPlayerButtonHidden(next));
+    setState(() {});
+  }
+
+  /// 从菜单把控制栏按钮恢复默认（顺序 + 显示状态各归各位）。
+  ///
+  /// 不弹二次确认：`PlayerButtonConfigPage._confirmReset` 那边要确认，是因为
+  /// 同一页上还挂着用户手动拖出来的顺序；这里只是一次「回到默认」的快捷方式，
+  /// 代价可逆（再点一遍开关即可）。
+  void _resetPlayerButtonsFromMenu() {
+    unawaited(widget.state.resetPlayerButtons());
+    setState(() {});
   }
 
   /// 应用画面模式并持久化（从菜单调用，与 `_showVideoFitSettings` 同语义）。
@@ -3796,7 +4319,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            for (final (key, description) in playerShortcuts)
+            for (final (key, description) in [
+              ...playerShortcuts,
+              ..._contextMenuShortcutHelp,
+            ])
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 2),
                 child: Text('$key：$description'),
@@ -3814,6 +4340,14 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   }
 }
 
+/// 本页独有、`playerShortcuts`（`app.dart:1348` 的共享常量，不改它）里
+/// 没有的快捷键说明：键盘打开右键菜单是本页自己的入口，说明也只属于本页。
+const List<(String, String)> _contextMenuShortcutHelp = [
+  ('Shift + F10', '打开右键菜单（画面中央）'),
+  ('菜单键', '打开右键菜单（画面中央）'),
+  ('F10', '打开右键菜单（画面中央）'),
+];
+
 /// 屏显开关的中文名（`design/02` §5.1）。
 String _osdLabelOf(String id) {
   switch (id) {
@@ -3826,7 +4360,7 @@ String _osdLabelOf(String id) {
     case OsdFlag.progress:
       return '播放进度';
     case OsdFlag.traffic:
-      return '网速（未采集）';
+      return '网速';
     case OsdFlag.mini:
       return '迷你进度条';
     case OsdFlag.diagnostics:
@@ -3838,23 +4372,19 @@ String _osdLabelOf(String id) {
 
 /// 播放器顶栏**溢出菜单**的动作。
 ///
-/// 这些是「设一次」或「出问题时才用」的能力，与播放中反复碰的字幕/弹幕/全屏
-/// 分开——分组依据是**使用时机**。
+/// 只保留**右键之外再没有别的入口**的五项（理由见 `_buildPlayerAppBar` 里
+/// 「更多」那段注释）：字幕样式、弹幕设置、画面比例与缩放、媒体信息、
+/// 快捷键说明。其余能力全部收进右键菜单的多层分组，不在顶栏重复第二次。
 enum _PlayerMenuAction {
   subtitleStyle,
   danmakuSettings,
-  trackAudio,
-  trackVideo,
-  playbackMode,
-  lut,
   videoFit,
   mediaInfo,
-  diagnostics,
   shortcuts,
 }
 
 /// 溢出菜单里的一行（图标 + 文字）。
-Widget _menuRow(IconData icon, String label, {bool enabled = true}) {
+Widget _menuRow(IconData icon, String label) {
   return Row(
     children: [
       Icon(icon, size: 18),

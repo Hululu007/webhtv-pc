@@ -18,6 +18,7 @@ PlayerOsdLayer buildLayer({
   Duration duration = const Duration(minutes: 10),
   Duration position = const Duration(minutes: 2, seconds: 56),
   String? resolution = '3840×2160',
+  double? bytesPerSecond,
   List<OsdDiagnosticsRow> diagnostics = const [],
   List<OsdDiagnosticsRow> environment = const [],
 }) => PlayerOsdLayer(
@@ -29,6 +30,7 @@ PlayerOsdLayer buildLayer({
   duration: duration,
   isLive: isLive,
   now: DateTime(2026, 10, 18, 20, 30, 18),
+  bytesPerSecond: bytesPerSecond,
   diagnostics: diagnostics,
   environment: environment,
 );
@@ -222,6 +224,104 @@ void main() {
     );
     expect(find.text('运行环境'), findsNothing);
     expectNoTextInsideLayer(tester);
+  });
+
+  group('下右网速（design/02 §3.6）', () {
+    testWidgets('开关开时按字节/秒渲染，并落在右下角', (tester) async {
+      await tester.pumpWidget(
+        wrap(
+          buildLayer(
+            flags: {...defaultOsdFlags(), OsdFlag.traffic: true},
+            bytesPerSecond: 12800000,
+          ),
+        ),
+      );
+      // 精确串：断言的是**真的读了这个数**（12.8 MB/s），不是写死的占位。
+      expect(find.text('12.8 MB/s'), findsOneWidget);
+
+      final traffic = tester.getRect(find.text('12.8 MB/s'));
+      final progress = tester.getRect(find.text('02:56 / 10:00'));
+      // 贴右缘：内边距是 AppSpace.lg（§3.4 统一内边距）。
+      expect(
+        traffic.right,
+        800 - AppSpace.lg,
+        reason: '网速贴右下角，与进度同一行',
+      );
+      expect(
+        traffic.bottom,
+        progress.bottom,
+        reason: '两段同底（Row 的 crossAxisAlignment.end）',
+      );
+      expect(
+        traffic.left,
+        greaterThan(progress.right),
+        reason: '网速不得压到进度文字上',
+      );
+    });
+
+    testWidgets('取不到值时显示长破折号，不显示 0', (tester) async {
+      await tester.pumpWidget(
+        wrap(
+          buildLayer(
+            flags: {...defaultOsdFlags(), OsdFlag.traffic: true},
+            bytesPerSecond: null,
+          ),
+        ),
+      );
+      expect(find.text('—'), findsOneWidget);
+      expect(find.textContaining('0 B/s'), findsNothing, reason: '0 会被误读成卡了');
+    });
+
+    testWidgets('另有反向锁：0 字节/秒显示 0 B/s（真实的零不是没数据）', (tester) async {
+      await tester.pumpWidget(
+        wrap(
+          buildLayer(
+            flags: {...defaultOsdFlags(), OsdFlag.traffic: true},
+            bytesPerSecond: 0,
+          ),
+        ),
+      );
+      expect(find.text('0 B/s'), findsOneWidget);
+      expect(find.text('—'), findsNothing);
+    });
+
+    testWidgets('只开网速（进度关）时仍贴右缘，不跑到左边', (tester) async {
+      // 回归锁：这个组合是 `Row` 里唯一没有 `Expanded` 子项的情形，
+      // 少了 `Spacer` 网速就会贴左——一个只有"关掉别的开关"才会出现的缺陷。
+      await tester.pumpWidget(
+        wrap(
+          buildLayer(
+            flags: {
+              ...defaultOsdFlags(),
+              OsdFlag.traffic: true,
+              OsdFlag.progress: false,
+            },
+            bytesPerSecond: 860000,
+          ),
+        ),
+      );
+      final traffic = tester.getRect(find.text('860 KB/s'));
+      expect(traffic.right, 800 - AppSpace.lg, reason: '仍须贴右缘');
+      expect(traffic.left, greaterThan(400), reason: '不得掉到左半边');
+    });
+
+    testWidgets('开关关时不渲染；控制栏可见时也强制隐藏', (tester) async {
+      await tester.pumpWidget(
+        wrap(buildLayer(bytesPerSecond: 12800000)),
+      );
+      expect(find.text('12.8 MB/s'), findsNothing, reason: '开关默认关闭');
+
+      await tester.pumpWidget(
+        wrap(
+          buildLayer(
+            flags: {...defaultOsdFlags(), OsdFlag.traffic: true},
+            bytesPerSecond: 12800000,
+            controlsVisible: true,
+          ),
+        ),
+      );
+      expect(find.text('12.8 MB/s'), findsNothing, reason: '控制栏可见时屏显退让');
+    });
   });
 
   testWidgets('整层 IgnorePointer：点击穿透（design/01 §3.1）', (tester) async {

@@ -708,6 +708,13 @@ void main() {
     expect(find.byTooltip('画面比例与缩放（contain）'), findsNothing);
 
     // 溢出菜单真的能打开，且里面的项都在。
+    //
+    // 本轮把右键菜单扩成 PotPlayer 式 10 组多层之后，「更多」收敛为**只留
+    // 右键之外再没有别的入口**的五项（字幕样式 / 弹幕设置 / 画面比例与缩放 /
+    // 媒体信息 / 快捷键说明）。原来这里断言的 播放诊断、音轨、视频轨、
+    // 循环与定时、LUT 滤镜 已各有更近的入口（右键菜单分组 / 设置页日志页），
+    // 因此**下面同时加了它们不该出现在溢出菜单里的反向锁**：收敛如果不彻底
+    // （新旧项并存），那些反向锁会红。
     await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
     for (final label in [
@@ -715,10 +722,16 @@ void main() {
       '弹幕设置',
       '画面比例与缩放',
       '媒体信息',
-      '播放诊断',
       '快捷键说明',
     ]) {
       expect(find.text(label), findsWidgets, reason: '溢出菜单缺少「$label」');
+    }
+    for (final label in ['播放诊断', '音轨', '视频轨', '循环与定时', 'LUT 滤镜']) {
+      expect(
+        find.text(label),
+        findsNothing,
+        reason: '「$label」已归右键菜单，不得在收敛后的溢出菜单里重复出现',
+      );
     }
     // 这里**不截图**：`PopupMenu` 渲染在 `Navigator` 的 `Overlay` 里，
     // 而本 harness 的 `capture` 取的是树中第一个 `RepaintBoundary`

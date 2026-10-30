@@ -20,6 +20,10 @@ Map<String, bool> defaultOsdFlags() => const {
     };
 ```
 
+> **更正（后续变化）**：上面是当时的源码快照，`// 本轮无实现` 那句已失效。
+> `traffic` 现在**已实现**（双数据源：`demuxer-cache-state` 内解析 `raw-input-rate` 字段，解析不到回退 `cache-speed`；见 `design/02` §3.6），默认值仍是 `false`，
+> 但开关**可点**、下右**会渲染**。`osd_config.dart` 里那句注释也已改写为「已实现」。
+
 与 `design/02` §5.1 的表格逐项一致（`verify_design_docs.py` 的契约快照检查会核对
 `OsdFlag.values` 与该表）。
 

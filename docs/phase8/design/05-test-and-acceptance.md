@@ -224,7 +224,7 @@ added/removed 配对不变式。**同一个 API 在 widget 测试里可靠、在
 | `test/phase8_app_state_config_test.dart` | L2 | `AppState` 的屏显与按钮配置读写、立即生效、恢复默认 |
 | `test/phase8_osd_layer_test.dart` | L2 | 四角渲染与隐藏条件、控制栏联动、`IgnorePointer`、直播/`duration<=0`、字号与描边 |
 | `test/phase8_button_config_page_test.dart` | L2 | 列出 9 项与分组、开关持久化、恢复默认二次确认、预览行、拖动重排 |
-| `test/phase8_settings_entries_test.dart` | L2 | 设置页两个入口、7 项开关齐全、`traffic` 置灰、切换持久化 |
+| `test/phase8_settings_entries_test.dart` | L2 | 设置页两个入口、7 项开关齐全、`traffic` **可点**（原文「置灰」，能力落地后更正）、切换持久化 |
 | `test/phase8_player_page_overlay_test.dart` | L2 | 四层结构、`AppBar` 保留、四个 tooltip、`IgnorePointer`、右键菜单开关与 `Esc`、按钮配置生效、无 elevation |
 | `integration_test/phase8_overlay_flow_test.dart` | L3 | **视频区几何不变式**、顶栏不占 56px |
 | `integration_test/phase8_visual_flow_test.dart` | L3 | 多宽高比截图（含**菜单可见**）、菜单截图与关闭态字节不同、窄窗口不换行 |
@@ -269,7 +269,7 @@ added/removed 配对不变式。**同一个 API 在 widget 测试里可靠、在
 | B13 | 屏显层 `IgnorePointer`：点击穿透 | L2 | 画面回调被触发 |
 | B14 | 屏显文本字号 = 14 且带 `tabular` | L1 | 样式断言 |
 | B15 | 诊断面板与 `_showMediaInfo` 用同一取数函数 | L1 | 函数级：同输入同输出 |
-| B16 | `traffic` 开关置灰 + 副标题说明未采集 | L2 | `onChanged == null` 且文字存在 |
+| B16 | `traffic` 开关**可点**且副标题写数据来源（原文「置灰 + 说明未采集」，能力落地后更正） | L2 | `onChanged != null` 且副标题**精确等于**「取自播放引擎的网络输入速率；取不到时显示 —」（**不含**任何属性名） |
 | B17 | 迷你进度条只在控制栏隐藏时显示，且颜色为 `magnitude` | L2 | 样式断言 |
 
 ### 3.3 `03` 按钮排版
@@ -522,7 +522,7 @@ The Metric-Neutral Rule 记录了实测：`bodySmall` 行高 1.33→1.65 会让
 | # | 差异 | 上游 | PC 端 | 理由 |
 | --- | --- | --- | --- | --- |
 | 1 | 时钟默认值 | `display_time` = false | **true** | PC 是"坐在电脑前"场景；全屏时任务栏不可见，时钟是真实需求（用户已确认） |
-| 2 | 网速屏显 | `PlaybackSpeedMeter` 按秒采样 | **本轮不实现** | PC 端无字节级吞吐量；只覆盖代理流量会误导（`02` §3.6） |
+| 2 | 网速屏显 | `PlaybackSpeedMeter` 按秒采样 | **已实现**：双数据源——首选 `demuxer-cache-state` 内解析 `raw-input-rate` 字段，解析不到同拍回退 `cache-speed`；取不到显示 `—`（`02` §3.6） | **更正（两轮）**：①原文写「本轮不实现 / PC 端无字节级吞吐量 / 只覆盖代理流量会误导」，前提错在「media-kit 未暴露吞吐量」——`NativePlayer.getProperty` 能读 mpv 属性，它统计的是播放器输入流，不限于代理流量；②原实现直接读 `raw-input-rate` 也是错的——**它不是属性**（`dart:ffi` 直连 libmpv 实测 `mpv_get_property` 回 `rc = -8`，`property-list` 827 项里没有它），它只是 `demuxer-cache-state` 的 JSON 键，所以必须首选 JSON、回退 `cache-speed`。运行时验证已完成，见 `02` §3.6.4；已知局限随之改写为「仅桌面可用 / 起播首秒短暂 `—` / 是最近一次采样不是流量计」，同在该节 |
 | 3 | 控制栏可见时的强制显示 | 强制显示 标题 + 分辨率 + 时钟 | **只强制时钟** | PC 顶栏已显示标题，重复是噪音（`02` §4.2） |
 | 4 | 按钮配置格式 | 逗号分隔字符串 | JSON 数组（**兼容读字符串**） | PC 已有 JSON 设置文件（`03` §4.2） |
 | 5 | 默认隐藏播种 | 首次运行播种 | **不播种** | PC 端 9 个可配置按钮无默认隐藏项，播种是空操作（`03` §4.5） |

@@ -204,35 +204,90 @@ void main() {
     expect(defaultOsdFlags()[OsdFlag.title], isTrue);
   });
 
-  testWidgets('网速开关置灰且副标题说明未采集（design/02 §5.1）', (tester) async {
+  // 网速**已实现**（`player_controller.dart` 的 `sampleNetworkRate` 读 mpv 的
+  // `demuxer-cache-state` 内 `raw-input-rate` 字段、回退 `cache-speed`；
+  // `player_page.dart` 的 `_sampleNetworkRate` 只在开关打开时才采样，
+  // `player_osd.dart` 只在开关打开时渲染），所以它的开关不再是置灰项。
+  //
+  // 副标题**刻意不写属性名**：数据源是两个属性的组合，而对用户没有意义；
+  // 上一版把 `raw-input-rate` 写成"属性"是错的（实测它回 PROPERTY_NOT_FOUND），
+  // 文案钉死实现细节就会把那个错误固化下来。
+  testWidgets('网速开关可用：可点、副标题说明来源、点下去真的写进 AppState', (tester) async {
     await pumpSettings(tester);
 
-    final traffic = tester.widget<SwitchListTile>(
-      osdTile(OsdFlag.traffic),
-    );
-    expect(traffic.onChanged, isNull, reason: '未实现的开关必须置灰');
+    final traffic = tester.widget<SwitchListTile>(osdTile(OsdFlag.traffic));
+    // 什么错误实现会仍然通过：留着上一版的 `onChanged: null` —— 开关永远点不动。
+    expect(traffic.onChanged, isNotNull, reason: '网速已实现，开关不得再置灰');
+    // 副标题只解释**数据来源**与「取不到」的显示，不得再出现「未采集」这类
+    // 过时结论——那会让用户以为根本没有这个能力。
     expect(
       (traffic.subtitle! as Text).data,
-      '本版本未采集网速',
-      reason: '置灰原因必须写在副标题里（精确文案）',
+      '取自播放引擎的网络输入速率；取不到时显示 —',
+      reason: '副标题应说明数据来源与「取不到」的显示（精确文案）',
+    );
+    // 反向锁：副标题**不得**再写具体的 mpv 属性名。上一版写成
+    // 「取自 mpv 的 raw-input-rate」，而实测该名字根本不是属性
+    // （`mpv_get_property` 回 -8 PROPERTY_NOT_FOUND），屏显因此永远是 `—`。
+    expect(
+      (traffic.subtitle! as Text).data,
+      isNot(contains('raw-input-rate')),
+      reason: '文案不得把内部属性名（且曾写错的那个）暴露给用户',
     );
 
-    // 反向：**只有** traffic 置灰。
-    // 什么错误实现会仍然通过：把所有开关的 `onChanged` 都写成 null
-    // （「反正 traffic 那条断言过了」）—— 那样一个开关都点不动。
+    // 反向断言 1（替换旧版的「**只有** traffic 置灰」）：
+    // 新语义下没有任何置灰项，所以逐个 id 断言**每一项**都可点。
+    // 单纯删掉旧断言会让「把整个 Column 的 `onChanged` 统一写成 null」这类
+    // 实现漏网；逐个 id 报错还能直接指出是哪一项被置灰。
     for (final id in OsdFlag.values) {
-      if (id == OsdFlag.traffic) continue;
       expect(
         tester.widget<SwitchListTile>(osdTile(id)).onChanged,
         isNotNull,
         reason: '「$id」已实现，不得置灰',
       );
-      expect(
-        tester.widget<SwitchListTile>(osdTile(id)).subtitle,
-        isNull,
-        reason: '「$id」没有置灰理由，不应有副标题',
-      );
     }
+
+    // 反向断言 2：「真的接上了」与「只是把 null 换成了空函数」必须可区分。
+    // `onChanged: (_) {}` 能让上面所有断言通过，却改变不了任何状态。
+    // 所以这里真的点一下，断言 state 里 traffic **翻转**、且只翻它一个；
+    // 再点回去，断言传入值被尊重（`onChanged: (_) => setOsdFlag(id, true)`
+    // 这种「永远置 true」的实现会在第二次点击露馅）。
+    expect(state.osdFlags[OsdFlag.traffic], isFalse, reason: '前置：默认关闭');
+
+    await tester.ensureVisible(osdTile(OsdFlag.traffic));
+    await settle(tester);
+    await tester.tap(osdTile(OsdFlag.traffic));
+    await settleIo(tester);
+
+    expect(
+      state.osdFlags[OsdFlag.traffic],
+      isTrue,
+      reason: '点一下必须真的写进 state（空实现会停在这里）',
+    );
+    // 精确整表：其余 6 项不得被顺带改掉（写死 id 的实现会在这里露馅）。
+    expect(state.osdFlags, {
+      OsdFlag.title: true,
+      OsdFlag.size: true,
+      OsdFlag.time: true,
+      OsdFlag.progress: true,
+      OsdFlag.traffic: true, // 刚点开
+      OsdFlag.mini: false, // 从未点过 → 保持默认
+      OsdFlag.diagnostics: false,
+    });
+    // 界面也必须跟着变（`notifyListeners` → `ListenableBuilder` 重建），
+    // 而不是只有内存里对了。
+    expect(
+      tester.widget<SwitchListTile>(osdTile(OsdFlag.traffic)).value,
+      isTrue,
+      reason: '开关必须反映新状态（不是只改内存）',
+    );
+
+    await tester.tap(osdTile(OsdFlag.traffic));
+    await settleIo(tester);
+    expect(
+      state.osdFlags[OsdFlag.traffic],
+      isFalse,
+      reason: '再次点击必须关闭（无视传入值的实现会在这里露馅）',
+    );
   });
 
   testWidgets('切换屏显开关：精确状态 + 往返 + 落盘（design/05 §3.2 B5）', (tester) async {

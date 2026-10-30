@@ -142,17 +142,19 @@ void main() {
         const Rect.fromLTWH(AppSpace.md, 516, 800 - AppSpace.md * 2, 32),
         reason: '进度行在动作行之上，左右留 AppSpace.md，且被拉满宽度',
       );
-      // 动作行是通栏的：它自己占满 (12..788)，按钮从它的左缘排起
-      // （若底部 `Column` 用了默认的 center，这里会是居中，按钮落在 376 而不是 12）。
+      // 动作行**盒子**仍是通栏的：它自己占满 (12..788)。
+      // 靠底部 `Column` 的默认 center 做不到这一点——那样盒子会缩成内容宽，
+      // 溢出时连滚动视口都不存在。所以盒子通栏、**内容**居中，两件事分开。
       expect(
         tester.getRect(find.byType(PlayerOverlayActionRow)),
         const Rect.fromLTWH(AppSpace.md, 552, 800 - AppSpace.md * 2, 40),
-        reason: '动作行通栏且单行',
+        reason: '动作行盒子通栏且单行（内容居中不改变盒子宽度）',
       );
+      // 内容居中：单个 48 宽按钮在 776 宽里居中 → 12 + (776 - 48) / 2 = 376。
       expect(
         tester.getRect(find.byKey(const ValueKey('action'))),
-        const Rect.fromLTWH(AppSpace.md, 552, 48, 40),
-        reason: '动作行内容从左边排起，不居中',
+        const Rect.fromLTWH(376, 552, 48, 40),
+        reason: '动作行内容居中：12 + (776-48)/2 = 376',
       );
       expect(
         600 - tester.getRect(find.byType(PlayerOverlayActionRow)).bottom,
@@ -286,7 +288,8 @@ void main() {
       expect(videoTaps, 2, reason: '纱不得吃掉画面的点击');
 
       // 反过来：浮层自己的按钮必须能点到（浮层没有被整体 IgnorePointer）。
-      await tester.tapAt(const Offset(12 + 24, 552 + 20));
+      // 单个 48 宽按钮现在居中：左端 376，中心 376 + 24。
+      await tester.tapAt(const Offset(376 + 24, 552 + 20));
       expect(buttonTaps, 1, reason: '动作行按钮必须可点');
       expect(videoTaps, 2, reason: '按钮吃掉点击，画布不应再收到');
     });
@@ -313,17 +316,18 @@ void main() {
 
       expect(find.byType(PlayerOverlayDivider), findsOneWidget);
       // 位置：插在第 2 与第 3 个按钮之间（不是开头、不是结尾）。
-      // 内容从 x=12 起：48 + 48 → 分隔线槽 108..117（4 + 1 + 4）。
+      // 内容居中：48*3 + 9 = 153 宽，左端 = 12 + (776 - 153) / 2 = 323.5，
+      // 于是分隔线槽 323.5 + 96 = 419.5..428.5（4 + 1 + 4）。
       // 竖向：按钮 40 高、线 20 高，`Row` 的 crossAxisAlignment 是 center
       // → 线居中在 562..582。
       final divider = find.byType(PlayerOverlayDivider);
-      expect(tester.getRect(divider), const Rect.fromLTWH(108, 562, 9, 20));
+      expect(tester.getRect(divider), const Rect.fromLTWH(419.5, 562, 9, 20));
 
       // 尺寸与颜色：1px 宽、20px 高、由主题的 outline 角色染出。
       final line = find.descendant(of: divider, matching: find.byType(Container));
       expect(
         tester.getRect(line),
-        const Rect.fromLTWH(112, 562, 1, 20),
+        const Rect.fromLTWH(423.5, 562, 1, 20),
         reason: '发丝线必须是 1×20 的实心线（尺寸为 0 等于没画）',
       );
       expect(
@@ -350,11 +354,12 @@ void main() {
       );
       expect(find.byType(PlayerOverlayDivider), findsNothing);
       // 相邻两个按钮之间没有槽位：第二个按钮紧贴第一个。
-      expect(tester.getRect(find.byKey(const ValueKey('b0'))).left, AppSpace.md);
+      // 总宽 96，居中 → 左端 = 12 + (776 - 96) / 2 = 352。
+      expect(tester.getRect(find.byKey(const ValueKey('b0'))).left, 352);
       expect(
         tester.getRect(find.byKey(const ValueKey('b1'))).left,
-        AppSpace.md + 48,
-        reason: '无分隔线时按钮直接相邻',
+        352 + 48,
+        reason: '无分隔线时按钮直接相邻（间距恰为一个按钮宽）',
       );
     });
 
@@ -384,7 +389,8 @@ void main() {
         ),
       );
       expect(find.byType(PlayerOverlayDivider), findsNWidgets(3));
-      // 逐条钉住槽位：12 + 48*2 = 108；再 9 → 117 + 48 = 165；再 9 → 174 起三个 48 = 318；再 9 → 327。
+      // 逐条钉住槽位。内容宽 = 48*7 + 9*3 = 363，居中左端 = 12 + (776-363)/2 = 218.5；
+      // 于是 218.5 + 48*2 = 314.5；再 9 + 48 = 371.5；再 9 + 48*3 = 524.5。
       // 注意：`const PlayerOverlayDivider()` 被规范化成同一个实例，所以按 element 取
       // renderObject 的坐标，不能按 widget 反查。
       final xs = [
@@ -393,7 +399,7 @@ void main() {
               .localToGlobal(Offset.zero)
               .dx,
       ];
-      expect(xs, [108.0, 165.0, 318.0], reason: '分隔线必须落在每个分组边界上');
+      expect(xs, [314.5, 371.5, 524.5], reason: '分隔线必须落在每个分组边界上（随居中整体平移）');
     });
   });
 
@@ -469,6 +475,51 @@ void main() {
         reason: '滚到底时最后一个按钮的右缘应贴住内容右界',
       );
       expect(last.left, lessThan(800), reason: '最后一项必须能进入视口');
+    });
+
+    testWidgets('内容溢出时退回左对齐（居中只在装得下时成立）', (tester) async {
+      // 居中是由 `ConstrainedBox(minWidth: 通栏宽)` + `Row(center)` 共同得到的：
+      // 装不下时内容盒比通栏宽更宽，`Row` 分到的剩余空间为 0（`RenderFlex`
+      // 用 `math.max(0, freeSpace)` 钳过），内容自然从左侧排起。
+      //
+      // 这条用例是那个分支的唯一证据：把实现换成「无条件 Center 包一层」时，
+      // 溢出的内容会被推到负坐标，第一个按钮的 left 就不再是 12。
+      await tester.pumpWidget(
+        wrap(
+          buildOverlay(
+            actionButtons: [
+              for (var i = 0; i < 20; i++)
+                SizedBox(
+                  width: 120,
+                  height: 40,
+                  key: ValueKey('ov$i'),
+                ),
+            ],
+            actionGroups: [
+              for (var i = 0; i < 20; i++) PlayerButtonGroup.transport,
+            ],
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull, reason: '不得溢出报错');
+      expect(
+        tester.getRect(find.byKey(const ValueKey('ov0'))).left,
+        AppSpace.md,
+        reason: '装不下时从左侧排起：第一个按钮贴内容左缘',
+      );
+
+      // 而且真的能拖动（可滚动范围 = 内容宽 − 视口宽 = 2400 − 776）。
+      await tester.drag(
+        find.byType(PlayerOverlayActionRow),
+        const Offset(-2000, 0),
+      );
+      await tester.pumpAndSettle();
+      final lastRect = tester.getRect(find.byKey(const ValueKey('ov19')));
+      expect(
+        lastRect.right,
+        closeTo(800 - AppSpace.md, 0.5),
+        reason: '拖动后最后一项贴住内容右界',
+      );
     });
   });
 

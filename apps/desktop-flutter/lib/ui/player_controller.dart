@@ -141,6 +141,29 @@ class PlayerController extends ChangeNotifier {
   Duration _buffered = Duration.zero;
   bool _playing = false;
   bool _loading = false;
+
+  /// 播放中途的缓冲状态（
+  /// `core-idle` / `paused-for-cache`）。
+  ///
+  /// 与 [_loading] **不是同一件事**：[_loading] 只覆盖 `open()`
+  /// 的生命周期（起播到首帧），它一旦落定就不再变；用户真正会遇到的
+  /// "卡住了"全部发生在之后，只能靠这两个流观测。
+  bool _buffering = false;
+
+  /// 缓冲百分比（0–100）。
+  ///
+  /// 来源是 mpv 的 `cache-buffering-state`（media_kit 的
+  /// `stream.bufferingPercentage`）。**null 表示"引擎还没上报"**，
+  /// 不是 0：两者在界面上是不同形态（无数字的无限环 vs "0%"），
+  /// 把"没数据"画成 0% 会让用户以为卡死在零。
+  double? _bufferingPercent;
+
+  /// 最近一次采样到的网络吞吐（字节/秒）。null 表示**取不到**。
+  ///
+  /// 为什么是 null 而不是 0：0 会被读成"网络停了"，而真正的 0 只在
+  /// 播放器确实没有流量时出现，取不到值完全是另一回事。屏显对两者
+  /// 显示不同文本（见 `formatByteRate`）。
+  double? _bytesPerSecond;
   bool _completed = false;
   double _volume = 100;
   bool _muted = false;
@@ -168,6 +191,16 @@ class PlayerController extends ChangeNotifier {
   Duration get buffered => _buffered;
   bool get isPlaying => _playing;
   bool get isLoading => _loading;
+
+  /// 播放中途是否在缓冲（见 [_buffering]）。
+  bool get isBuffering => _buffering;
+
+  /// 缓冲百分比 0–100；null 表示引擎尚未上报（见 [_bufferingPercent]）。
+  double? get bufferingPercent => _bufferingPercent;
+
+  /// 最近一次采样到的网速（字节/秒）；null 表示取不到（见 [_bytesPerSecond]）。
+  double? get bytesPerSecond => _bytesPerSecond;
+
   bool get isCompleted => _completed;
 
   /// 显式清除 `completed`（失败/回滚路径用，`design/03` §4.3）。
@@ -310,6 +343,65 @@ class PlayerController extends ChangeNotifier {
       _lastEngineError = '$error';
       return false;
     }
+  }
+
+  /// 采样一次网络吞吐（字节/秒），成功时更新 [bytesPerSecond]。
+  ///
+  /// **挂在已有的屏显刷新循环上**（`player_page.dart` 的 `_startOsdTicker`，
+  /// 1 秒一跳），因此本方法**不持有任何 Timer**：另起一个定时器会多一份
+  /// 每秒唤醒，还会让"屏显全关时停止刷新"这条既有优化失效
+  /// （那个优化的判据是"没有东西要刷新"，网速就是东西）。
+  ///
+  /// **双数据源，首选失败才回退**（两拍顺序读会让屏显跳变，所以同一拍内
+  /// 完成）：
+  /// 1. 首选 `demuxer-cache-state`：它是 JSON 串，内含 `raw-input-rate`。
+  ///    `raw-input-rate` **不是独立属性**（`mpv_get_property` 回
+  ///    `MPV_ERROR_PROPERTY_NOT_FOUND`），只能从这里取。
+  /// 2. 回退 `cache-speed`：独立属性，double 的字符串形式，单位字节/秒。
+  ///
+  /// 取不到值的四种情形（都返回 null，**不**退化成 0）：
+  /// - 当前平台不是 `NativePlayer`（非桌面构建）；
+  /// - 属性为空串（`getProperty` 在失败时返回 `""`，见
+  ///   `media_kit/.../native/player/real.dart:1278`）。缓存建立前的那一两拍
+  ///   `demuxer-cache-state` 正是回 NULL，这里如实给 null、下一拍重试；
+  /// - 解析失败（mpv 在某些状态下会回 `"nan"` / `"inf"`）；
+  /// - 值为负数或非有限。
+  Future<double?> sampleNetworkRate() async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) {
+      _setBytesPerSecond(null);
+      return null;
+    }
+    String cacheState;
+    try {
+      cacheState = await platform.getProperty('demuxer-cache-state');
+    } catch (error) {
+      _lastEngineError = '$error';
+      cacheState = '';
+    }
+    var parsed = parseRawInputRateFromCacheState(cacheState);
+    String? cacheSpeed;
+    // 首选真的失败才读回退属性：首选成功时多读一次纯属每秒一次的浪费。
+    if (parsed == null) {
+      try {
+        cacheSpeed = await platform.getProperty('cache-speed');
+      } catch (error) {
+        _lastEngineError = '$error';
+      }
+    }
+    parsed = resolveNetworkRate(parsed, cacheSpeed);
+    _setBytesPerSecond(parsed);
+    return parsed;
+  }
+
+  /// 只在值真的变了时通知，避免每秒一次无意义重建。
+  ///
+  /// 屏显的时钟本来就在每秒重建，但那是 `setState`（页面级）；这里多通知
+  /// 一次会让 `_onControllerChanged` 里的连播判定也跟着每秒跑一遍。
+  void _setBytesPerSecond(double? value) {
+    if (_bytesPerSecond == value) return;
+    _bytesPerSecond = value;
+    notifyListeners();
   }
 
   /// 应用播放参数（Phase 9）。失败不阻断播放，只留错误文本。
@@ -507,6 +599,19 @@ class PlayerController extends ChangeNotifier {
       }),
       _player.stream.buffer.listen((value) {
         _buffered = value;
+        notifyListeners();
+      }),
+      _player.stream.buffering.listen((value) {
+        _buffering = value;
+        // 停止缓冲时把百分比清空：那是上一次卡顿留下的残值，留着会让
+        // 下一次卡顿在引擎上报之前先闪一下旧数字。
+        if (!value) _bufferingPercent = null;
+        notifyListeners();
+      }),
+      _player.stream.bufferingPercentage.listen((value) {
+        // mpv 在非缓冲期也会持续上报 0；0 是真实的"还没填"，不是"没数据"，
+        // 这里照收，由界面决定怎么画。
+        _bufferingPercent = value.clamp(0, 100).toDouble();
         notifyListeners();
       }),
       _player.stream.playing.listen((value) {
@@ -892,4 +997,73 @@ class PlayerController extends ChangeNotifier {
     _player.dispose();
     super.dispose();
   }
+}
+
+/// 从 mpv `demuxer-cache-state` 的 JSON 串里取出 `raw-input-rate`。
+///
+/// **不做整体 JSON 解析、不引入 JSON 依赖**，理由是三条：
+/// - 这串是 mpv 自己的 JSON 风格输出（键名带引号、数字不带空格、顺序随
+///   版本变），字段会随 mpv 版本增减，整体解析会因无关字段把有用的那个
+///   也一起废掉；
+/// - 要的只有一个数，定向查找对 mpv 字段增删是免疫的；
+/// - 单测要能直接用真实抓到的原串当输入，正则比"喂 JSON 库"更贴事实。
+///
+/// 键名必须完整匹配：`"raw-input-rate-foo"` 不算命中（正则要求键名右引号
+/// 紧跟 `rate`）。值不是数字（`null`、`"abc"`）交给 [parseByteRate] 判空。
+double? parseRawInputRateFromCacheState(String? cacheStateJson) {
+  if (cacheStateJson == null) return null;
+  final match = _rawInputRateField.firstMatch(cacheStateJson);
+  if (match == null) return null;
+  return parseByteRate(match.group(1));
+}
+
+/// `demuxer-cache-state` 里 `raw-input-rate` 字段的值。
+///
+/// 取到逗号/右花括号/空白为止：mpv 在该字段后面必然跟分隔符，这条边界
+/// 同时挡住了把后续字段一起吞进去。
+final RegExp _rawInputRateField = RegExp(
+  r'"raw-input-rate"\s*:\s*([^,}\s]+)',
+);
+
+/// 双数据源的落定规则：首选优先，首选没值才看回退。
+///
+/// 单独一个纯函数是为了让"回退顺序"能在单测里断言（`getProperty` 需要
+/// 真引擎，测不了）。[fallbackRaw] 为 null 表示**没有去读**回退属性。
+double? resolveNetworkRate(double? primary, String? fallbackRaw) =>
+    primary ?? parseByteRate(fallbackRaw);
+
+/// 把 mpv 的 `raw-input-rate` 原始串解析成字节/秒；解析不出来就是 null。
+///
+/// 为什么单独一个纯函数：这个解析要在单测里覆盖 `nan` / `inf`
+/// / 空串 / 负数 / 带小数的各种形态，而 `getProperty` 需要真引擎。
+/// 抽出来之后剩下的唯一不知情点就是"引擎给的是不是这个串"。
+///
+/// 返回 null 的四种情形都**不是 0**：0 会被界面上读成"网速为零（卡了）"，
+/// 与"没数据"完全不是一回事（见 `formatByteRate`）。
+double? parseByteRate(String? raw) {
+  if (raw == null) return null;
+  final text = raw.trim();
+  if (text.isEmpty) return null;
+  final value = double.tryParse(text);
+  if (value == null || !value.isFinite || value < 0) return null;
+  return value;
+}
+
+/// 把字节/秒格式化成屏显用的短串：`12.8 MB/s` / `860 KB/s` / `—`。
+///
+/// 三条规则，每条都有理由：
+/// - **null 显示 `—`**：取不到值时如实说"没有"，不写 0（见上）；
+/// - **1000 进制**而不是 1024：这是**网络吞吐**，链路的 MB/s 是按 10^6 说的，
+///   按 1024 算会让 8 Mbps 宽带显示成 `0.95 MB/s`，与运营商口径对不上；
+/// - **KB/s 不带小数**：`860.3` 的精度是假的（mpv 自己就在抖），
+///   而 MB/s 保留一位是因为那个量级下一位小数肉眼可见地有意义。
+String formatByteRate(double? bytesPerSecond) {
+  if (bytesPerSecond == null || !bytesPerSecond.isFinite || bytesPerSecond < 0) {
+    return '—';
+  }
+  const kb = 1000.0;
+  const mb = 1000.0 * 1000.0;
+  if (bytesPerSecond >= mb) return '${(bytesPerSecond / mb).toStringAsFixed(1)} MB/s';
+  if (bytesPerSecond >= kb) return '${(bytesPerSecond / kb).round()} KB/s';
+  return '${bytesPerSecond.round()} B/s';
 }

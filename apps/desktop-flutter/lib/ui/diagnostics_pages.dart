@@ -325,21 +325,32 @@ class SettingsPage extends StatelessWidget {
         Column(
           key: const ValueKey('settings-osd'),
           children: [
+            // 网速已实现：`PlayerController.sampleNetworkRate` 读 mpv 的
+            // `raw-input-rate`，`player_page.dart` 的 `_sampleNetworkRate` 只在
+            // **本开关打开时**才去采样，`player_osd.dart` 只在打开时渲染。
+            // 所以它和其余 6 项一样可点，点下去真的有效果。
+            //
+            // 上一版这里是「未实现 → 置灰」，理由是「不得让开关可点却无效果」。
+            // 那条纪律继续有效，只是前提变了：能力已经落地，再置灰等于把一个
+            // 能用的功能藏起来。将来若要停用某项，先删能力再置灰，别留一个
+            // 点了没反应的开关。
             for (final id in OsdFlag.values)
               SwitchListTile(
                 key: ValueKey('settings-osd-$id'),
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 title: Text(_osdLabel(id)),
+                // 副标题只解释**数据来源**，不承诺任何未实现的能力：
+                // 用户看到屏显上的 `—` 时需要知道那是「取不到」，而不是「卡了」。
+                //
+                // 不写具体属性名：数据源是 `demuxer-cache-state` 内含的字段
+                // 加 `cache-speed` 回退，对用户没有意义；写一个属性名反而会把
+                // 实现细节钉死在一个可能再变的名字上（上一版就写错过）。
                 subtitle: id == OsdFlag.traffic
-                    ? const Text('本版本未采集网速')
+                    ? const Text('取自播放引擎的网络输入速率；取不到时显示 —')
                     : null,
-                // 网速未实现 → 置灰。**不得**让开关可点却无效果：
-                // 那比没有开关更糟（`DESIGN.md` 关于筛选按钮的同类教训）。
                 value: state.osdFlags[id] ?? false,
-                onChanged: id == OsdFlag.traffic
-                    ? null
-                    : (value) => state.setOsdFlag(id, value),
+                onChanged: (value) => state.setOsdFlag(id, value),
               ),
           ],
         ),

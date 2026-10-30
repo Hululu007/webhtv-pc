@@ -18,6 +18,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../core/player_buttons.dart';
+import 'common.dart';
 import 'scroll_behavior.dart';
 import 'tokens.dart';
 
@@ -113,11 +114,14 @@ class PlayerOverlayDivider extends StatelessWidget {
   }
 }
 
-/// 动作行：单行 + 溢出横向滚动（`design/03` §5.4）。
+/// 动作行：单行 + 有富余宽度时**居中**，溢出时退回左对齐 + 横向拖动（`design/03` §5.4）。
 ///
 /// 为什么不用 `Wrap`（改造前的写法）：`Wrap` 在窄窗口下换行，浮层高度随之
 /// 从 1 行变 2 行，遮住画面的范围不可预测。上游同做法：
 /// `view_control_vod_action.xml:2-9` 的 `HorizontalScrollView`。
+///
+/// 为什么居中：改造前内容无条件从左边排起，宽窗口下右侧空出近一半宽度，
+/// 视觉重心全压在左下角；按钮组本身是「一组动作」，居中才和它承载的内容对齐。
 class PlayerOverlayActionRow extends StatelessWidget {
   const PlayerOverlayActionRow({
     super.key,
@@ -146,16 +150,204 @@ class PlayerOverlayActionRow extends StatelessWidget {
       children.add(buttons[i]);
     }
     // 动作行溢出时用鼠标左右拖（横向条，§17.4）。
-    return HorizontalMouseDrag(
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        // 不需要显式关滚动条：`MaterialScrollBehavior.buildScrollbar` 对
-        // `Axis.horizontal` 直接返回 child（只有纵向才包 `Scrollbar`），
-        // 这正好等于上游 `view_control_vod_action.xml:9` 的 `scrollbars="none"`。
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: children,
+    //
+    // 居中与「溢出时左对齐 + 可拖动」是**同一个写法**的两个分支，不要拆成
+    // `Center` / `Row(start)` 两套：
+    // - `ConstrainedBox(minWidth: 通栏宽度)` 把内容盒撑到至少通栏宽，
+    //   装得下时 `Row` 的 `mainAxisSize.min` 仍取内容宽，但外层 minWidth 让
+    //   内容盒保持通栏宽，于是 `mainAxisAlignment.center` 把按钮组居中；
+    // - 装不下时内容盒被撑到内容宽（> 通栏），`mainAxisAlignment` 分配到的
+    //   剩余空间为 0（`RenderFlex` 用 `math.max(0, freeSpace)` 钳过，
+    //   不会出现负的 leading space），内容自然从左侧排起，剩下的交给
+    //   `SingleChildScrollView` 横向滚动。
+    //
+    // 用 `LayoutBuilder` 而不是让 `Row` 自己 `MainAxisSize.max`：后者的
+    // 子项在无限宽约束里永远居中不了（滚动视图给的正是无限宽）。
+    return LayoutBuilder(
+      builder: (context, constraints) => HorizontalMouseDrag(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          // 不需要显式关滚动条：`MaterialScrollBehavior.buildScrollbar` 对
+          // `Axis.horizontal` 直接返回 child（只有纵向才包 `Scrollbar`），
+          // 这正好等于上游 `view_control_vod_action.xml:9` 的 `scrollbars="none"`。
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minWidth: constraints.maxWidth),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: children,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 进度滑杆：在轨道上叠加「已缓冲区间」。
+///
+/// **缓冲段用 `Slider.secondaryTrackValue` 画，不自己 `CustomPaint` 一条**：
+/// 轨道矩形由 `SliderTrackShape.getPreferredRect` 算出（两侧内缩取
+/// `max(thumbWidth, overlayWidth) / 2`），任何自绘的条都要把那段内缩量
+/// 复制一遍——主题一改（描边半径、`trackHeight`）缓冲段就与轨道错位，
+/// 而且错位是**静默**的（看起来只是"缓冲条有点歪"）。
+/// `secondaryTrackValue` 走框架同一个 `trackRect`，天然对齐；它还自带两条
+/// 我们本来就要写的判据：
+/// - 只有 `secondaryOffset.dx > thumbCenter.dx` 才画
+///   （`slider_parts.dart:512-514`）——即**永远不会画出一条负数长度的条**；
+/// - 值必须落在 `[min, max]` 内，否则 `Slider` 自己的断言先炸
+///   （`slider.dart:206`），所以我们先把 `buffered` 钳进区间。
+///
+/// 高度与改造前**完全一致**：`Slider` 仍是唯一决定高度的子项，没有新增层
+/// （进度行 32 是浮层几何断言的一部分，不能因为多画一条缓冲段而变高）。
+class PlayerProgressSlider extends StatefulWidget {
+  const PlayerProgressSlider({
+    super.key,
+    required this.position,
+    required this.duration,
+    required this.buffered,
+    required this.onSeek,
+  });
+
+  final Duration position;
+  final Duration duration;
+
+  /// 引擎上报的已缓冲位置（media_kit 的 `demuxer-cache-time`）。
+  final Duration buffered;
+
+  /// 拖动时连续回调（语义与改造前的 `Slider.onChanged` 一致）。
+  final ValueChanged<Duration> onSeek;
+
+  @override
+  State<PlayerProgressSlider> createState() => _PlayerProgressSliderState();
+}
+
+class _PlayerProgressSliderState extends State<PlayerProgressSlider> {
+  /// 拖动中：此时**不画**缓冲段。
+  ///
+  /// 为什么：拖动期间拇指位置代表"用户想去的地方"，缓冲段却仍指向
+  /// "引擎已经拿到的地方"，两者画在同一根轨道上会被读成"这一段已经被
+  /// 播放覆盖了"。松手后缓冲段立刻回来，代价只是一次重建。
+  bool _dragging = false;
+
+  /// 缓冲段在滑杆值域里的位置；不需要画时为 null。
+  ///
+  /// 三条判据（顺序即语义）：
+  /// 1. 直播/时长未知（`duration <= 0`）——没有值域，画不出来；
+  /// 2. 拖动中——见 [_dragging]；
+  /// 3. `buffered <= position`——没有"前方已缓冲"可言，画出来会是一条
+  ///    负数长度的条（框架不会画，但我们也不该把值传下去：
+  ///    `secondaryTrackValue` 非 null 会参与断言与 `Slider` 的相等判定）。
+  double? get _bufferedValue {
+    if (_dragging) return null;
+    final maxMs = widget.duration.inMilliseconds;
+    if (maxMs <= 0) return null;
+    final positionMs = widget.position.inMilliseconds.clamp(0, maxMs);
+    final bufferedMs = widget.buffered.inMilliseconds;
+    if (bufferedMs <= positionMs) return null;
+    return bufferedMs.clamp(positionMs, maxMs).toDouble();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final maxMs = widget.duration.inMilliseconds;
+    final live = maxMs <= 0;
+    final max = live ? 1.0 : maxMs.toDouble();
+    final value = widget.position.inMilliseconds.clamp(0, max.toInt()).toDouble();
+    return Slider(
+      value: value,
+      max: max,
+      secondaryTrackValue: _bufferedValue,
+      // 缓冲段颜色取 `tertiary`（浅蓝），**不是** `outline`（初版）也不是
+      // `primary`（琥珀，已播放段在用）。
+      //
+      // 初版写的是 `outline`，理由是"它是调色板里深色底上提亮一档的角色，
+      // 压在未播放轨道上仍读得出来"。**这个判断被实测推翻了**：`outline`
+      // (#3A4560) 画在 `surfaceContainerHighest` (#2C3654) 上算出来只有
+      // **1.25:1**——比一条发丝线还难分辨，用户反馈"基本看不清"。
+      // 分隔线用 `outline` 能成立是因为它画在**视频帧**上（见
+      // [PlayerOverlayDivider] 的对比度论证），而这里是**深色轨道**之上，
+      // 底色不同，结论不能照搬。
+      //
+      // `tertiary` (#9BB8E0) 对同底色是 **5.86:1**，过 WCAG AA 的 4.5:1；
+      // 同时它与 `primary` 的琥珀在色相上明确分离，不会被读成"已经放到
+      // 那儿了"。缓冲段仍低于已播放段的强调度（琥珀对浅蓝），层级不变。
+      secondaryActiveColor: Theme.of(context).colorScheme.tertiary,
+      onChanged: live
+          ? null
+          : (next) => widget.onSeek(Duration(milliseconds: next.round())),
+      // 只在拖动期间置位：键盘/快捷键 seek 不该让缓冲段闪一下。
+      onChangeStart: live ? null : (_) => setState(() => _dragging = true),
+      onChangeEnd: live ? null : (_) => setState(() => _dragging = false),
+    );
+  }
+}
+
+/// 缓冲中提示是否出现。
+///
+/// **单独抽成纯函数**：这条判据是"两个圈不叠加"的唯一依据，而它在
+/// widget 树上不可直接观测（`isLoading` 为 true 时两个条件都为真，
+/// 差别只在渲染结果）。抽出来之后三种组合都能被直接断言。
+///
+/// 判据：`isBuffering && !isLoading`。
+/// - 加载阶段已有全屏 [LoadingBlock]，再叠一个环等于画两个圈；
+/// - 加载完成后才轮到"播放中途卡顿"这个场景，此时 `isLoading` 为 false。
+bool showBufferingIndicator({
+  required bool isBuffering,
+  required bool isLoading,
+}) => isBuffering && !isLoading;
+
+/// 画面中央的缓冲中提示：环形 + 可选百分比。
+///
+/// 复用 [LoadingBlock]（"一处定义，全站同一个圈"）而不是另写一个
+/// `CircularProgressIndicator`：描边宽度随直径缩放的规则已经在那边定过。
+///
+/// **不吃指针**（外层 `IgnorePointer`）：缓冲中用户仍可能想点画面唤出
+/// 控制栏或右键菜单，提示层挡住中间那块等于把常用手势全废掉。
+class PlayerBufferingIndicator extends StatelessWidget {
+  const PlayerBufferingIndicator({super.key, this.percent});
+
+  /// 0–100；null 表示引擎还没上报百分比（`cache-buffering-state` 未就绪）。
+  ///
+  /// 两种形态：有值 → 环中显示百分比数字；无值 → 只有一个无限旋转的环。
+  final double? percent;
+
+  /// 环的直径。44 不是间距 token 里的值，而是**尺寸**：比
+  /// `LoadingBlock` 默认 36 大一圈，好让环中的百分比数字不显得拥挤。
+  static const double _diameter = 44;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = percent;
+    return IgnorePointer(
+      child: Center(
+        child: SizedBox(
+          width: _diameter,
+          height: _diameter,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              const LoadingBlock(size: _diameter),
+              if (label != null)
+                Text(
+                  '${label.round()}%',
+                  // 环内的数字压在任意视频帧上：必须浅色 + 描边（同
+                  // `player_osd.dart` 的理由：fixture 是高饱和彩条）。
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurface,
+                    fontFeatures: kTabularFigures,
+                    shadows: const [
+                      Shadow(
+                        color: Colors.black,
+                        offset: Offset(1, 1),
+                        blurRadius: 2,
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -239,10 +431,14 @@ class PlayerControlOverlay extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               // **必须 stretch**：`Column` 的默认 `crossAxisAlignment` 是
               // `center`，那样两个孩子都只拿到松散宽度——进度行（一个
-              // `SizedBox(height: 32)` 之类的空盒子）会缩成 0 宽并被水平居中，
-              // 动作行也会在有富余宽度时**居中**而不是从左边排起
-              // （实测：3 个 48 宽按钮的分隔线落在 x=419.5 而不是 108）。
+              // `SizedBox(height: 32)` 之类的空盒子）会缩成 0 宽并被水平居中。
               // `design/03` §5.4 要求「进度行是独立的 Row，始终占满宽度」。
+              //
+              // 动作行的**内容**居中是这个 `Column` 之外的事（见
+              // [PlayerOverlayActionRow] 的 `LayoutBuilder` + `minWidth`）：
+              // 靠这里松弛居中做不到——那样动作行的盒子本身会缩成内容宽，
+              // 溢出时连滚动视口都不存在了。所以这里保持 stretch，
+              // 让动作行自己拿到通栏宽度、自己决定内容怎么排。
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 progressRow,

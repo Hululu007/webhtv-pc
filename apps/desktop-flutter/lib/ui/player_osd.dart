@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 
 import '../core/osd_config.dart';
 import '../core/osd_diagnostics.dart';
+import 'player_controller.dart' show formatByteRate;
 import 'tokens.dart';
 
 /// 屏显文本样式。
@@ -59,6 +60,7 @@ class PlayerOsdLayer extends StatelessWidget {
     required this.duration,
     required this.isLive,
     required this.now,
+    required this.bytesPerSecond,
     required this.diagnostics,
     required this.environment,
   });
@@ -75,6 +77,12 @@ class PlayerOsdLayer extends StatelessWidget {
   final Duration duration;
   final bool isLive;
   final DateTime now;
+
+  /// 下右网速（字节/秒）；null 表示取不到，显示 `—`。
+  ///
+  /// 由调用方（`player_page.dart` 的屏显刷新循环）采样后传入，
+  /// 本层不做 IO：屏显层是纯渲染层（见文件头「职责边界」）。
+  final double? bytesPerSecond;
   final List<OsdDiagnosticsRow> diagnostics;
   final List<OsdDiagnosticsRow> environment;
 
@@ -106,6 +114,13 @@ class PlayerOsdLayer extends StatelessWidget {
       (flags[OsdFlag.progress] ?? false) &&
       !isLive &&
       duration > Duration.zero;
+
+  /// 下右网速：控制栏可见时强制隐藏（与其余各项一致，§4.2）。
+  ///
+  /// **直播不隐藏**：直播恰恰是最需要看网速的场景（缓冲/掉帧时
+  /// 用户要判断是网络还是源）。开关是唯一判据。
+  bool get _trafficVisible =>
+      !controlsVisible && (flags[OsdFlag.traffic] ?? false);
 
   /// 迷你进度条：控制栏可见时强制隐藏；直播或时长未知时也隐藏。
   bool get _miniVisible =>
@@ -184,14 +199,39 @@ class PlayerOsdLayer extends StatelessWidget {
                     ),
                   ),
                 const Spacer(),
-                // 下左进度。整行宽度可用：下右网速本轮不渲染（§3.6）。
-                if (_progressVisible)
-                  Text(
-                    '${_formatDuration(position)} / '
-                    '${_formatDuration(duration)}',
-                    style: _osdTextStyle(),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                // 底部一行：下左进度 + 下右网速（§3.5、§3.6）。
+                //
+                // 两段各自独立判据，左右分置：竖排的其余各行都贴左，
+                // 只有这一行是左右两端各一段。
+                //
+                // **两个分支都要占住剩余宽度**，否则「只开网速、关进度」时
+                // 网速会贴到左缘——那正是 `Expanded` 缺席、`Row` 里没有弹性
+                // 子项时的排法。所以进度不可见时补一个 `Spacer`。
+                if (_progressVisible || _trafficVisible)
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      if (_progressVisible)
+                        Expanded(
+                          child: Text(
+                            '${_formatDuration(position)} / '
+                            '${_formatDuration(duration)}',
+                            style: _osdTextStyle(),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        )
+                      else
+                        const Spacer(),
+                      if (_trafficVisible) ...[
+                        const SizedBox(width: AppSpace.md),
+                        Text(
+                          formatByteRate(bytesPerSecond),
+                          style: _osdTextStyle(),
+                          maxLines: 1,
+                        ),
+                      ],
+                    ],
                   ),
               ],
             ),

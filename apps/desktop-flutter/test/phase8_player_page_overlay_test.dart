@@ -10,6 +10,18 @@ import 'package:webhtv_pc/ui/player_page.dart';
 
 import 'support/player_page_harness.dart';
 
+/// 按下 Shift+F10 再松开。
+///
+/// `tester.sendKeyEvent` 不接受修饰键参数（`flutter_test/lib/src/controller.dart:2213`），
+/// 所以 Shift 必须显式先按下、再发 F10、最后按逆序松开——这也是真实键盘的
+/// 事件顺序，`SingleActivator(shift: true)` 读的正是按下时刻的修饰键状态。
+Future<void> pressShiftF10(WidgetTester tester) async {
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.f10);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.f10);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+}
+
 void main() {
   testWidgets('播放器页是 Stack 结构，控制浮层不参与布局（design/01 §3）', (tester) async {
     await pumpPlayerPage(tester);
@@ -133,6 +145,89 @@ void main() {
     await tester.tapAt(const Offset(20, 20));
     await settlePlayerPage(tester);
     expect(find.byType(PlayerContextMenu), findsNothing);
+  });
+
+  // ---- 键盘入口：右键菜单不再只属于鼠标 -------------------------------------
+
+  testWidgets('Shift+F10 打开菜单，且菜单落在画面中央附近', (tester) async {
+    await pumpPlayerPage(tester);
+    await pressShiftF10(tester);
+    await settlePlayerPage(tester);
+
+    expect(find.byType(PlayerContextMenu), findsOneWidget, reason: 'Shift+F10 必须能打开菜单');
+
+    // 量的是**菜单面板**而不是 PlayerContextMenu 本身：后者返回
+    // `Positioned.fill`（`player_context_menu.dart:270`），`getRect` 拿到的是
+    // 整个视口，断言恒成立 = 空断言。面板是菜单里唯一的 `Material`。
+    final panel = tester.getRect(find.descendant(
+      of: find.byType(PlayerContextMenu),
+      matching: find.byType(Material),
+    ).first);
+    final viewport = Offset.zero & tester.view.physicalSize / tester.view.devicePixelRatio;
+    // 面板左上角 = 画面中心 - 半个菜单（240×420，见 `_openContextMenuAtCenter`）。
+    expect((panel.left - (viewport.center.dx - 120)).abs(), lessThan(40),
+        reason: '菜单水平居中（实测面板 $panel，视口 $viewport）');
+    expect((panel.top - (viewport.center.dy - 210)).abs(), lessThan(40),
+        reason: '菜单竖直居中（实测面板 $panel，视口 $viewport）');
+  });
+
+  testWidgets('contextMenu 键打开菜单', (tester) async {
+    await pumpPlayerPage(tester);
+    await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
+    await settlePlayerPage(tester);
+    expect(find.byType(PlayerContextMenu), findsOneWidget);
+  });
+
+  testWidgets('F10 打开菜单', (tester) async {
+    await pumpPlayerPage(tester);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+    await settlePlayerPage(tester);
+    expect(find.byType(PlayerContextMenu), findsOneWidget);
+  });
+
+  testWidgets('键盘连按两次：菜单仍只有一个（幂等）', (tester) async {
+    await pumpPlayerPage(tester);
+    await pressShiftF10(tester);
+    await settlePlayerPage(tester);
+    expect(find.byType(PlayerContextMenu), findsOneWidget);
+
+    await pressShiftF10(tester);
+    await settlePlayerPage(tester);
+    expect(find.byType(PlayerContextMenu), findsOneWidget, reason: '连按不得叠加出第二个菜单');
+    expect(tester.takeException(), isNull, reason: '连按不得抛异常');
+  });
+
+  testWidgets('键盘打开菜单后 Esc 仍只关菜单，不退出全屏', (tester) async {
+    await pumpPlayerPage(tester);
+    await pressShiftF10(tester);
+    await settlePlayerPage(tester);
+    expect(find.byType(PlayerContextMenu), findsOneWidget);
+
+    windowManagerCalls.clear();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await settlePlayerPage(tester);
+
+    expect(find.byType(PlayerContextMenu), findsNothing, reason: 'Esc 必须关掉键盘打开的菜单');
+    expect(
+      windowManagerCalls.where((c) => c.method == 'setFullScreen'),
+      isEmpty,
+      reason: 'Esc 不得顺带切换全屏',
+    );
+  });
+
+  testWidgets('快捷键说明里能看到新增的三条（含 F10 不得飘回全屏说明）', (tester) async {
+    await pumpPlayerPage(tester);
+    await tester.tap(find.byTooltip('更多'));
+    await settlePlayerPage(tester);
+    await tester.tap(find.text('快捷键说明').last);
+    await settlePlayerPage(tester);
+
+    expect(find.text('Shift + F10：打开右键菜单（画面中央）'), findsOneWidget);
+    expect(find.text('菜单键：打开右键菜单（画面中央）'), findsOneWidget);
+    // 反向锁：无修饰的 F10 现在打开菜单，说明里若还挂在「F11 / F」那行全屏
+    // 说明上就会自相矛盾——旧表里也没有 F10，这条断言防的是把 F10 塞错行。
+    expect(find.text('F11 / F：全屏切换'), findsOneWidget);
+    expect(find.text('F10：打开右键菜单（画面中央）'), findsOneWidget);
   });
 
   testWidgets('屏显全关且控制栏隐藏时定时器停止（design/02 §4.3）', (tester) async {
