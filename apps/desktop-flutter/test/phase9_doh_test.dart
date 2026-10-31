@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -308,6 +309,24 @@ void main() {
       expect(result!.single.address, '10.0.0.2');
       // 坏端点先试 A、再试 AAAA（各一次失败），好端点的 A 成功：共 3 次。
       expect(calls, 3);
+    });
+
+    test('并发写盘不会让缓存文件消失', () async {
+      await resolver.resolve('site.test');
+      final path = '${temp.path}/doh_cache.json';
+      // resolve() 里的写盘是 fire-and-forget，调用方还会再 flush 一次：两个写盘者
+      // 一旦共用同一个 tmp 并交错，后者会删掉前者刚 rename 出来的文件、自己的
+      // rename 又因 tmp 已被搬走而失败——缓存文件静默消失（CI 上「跨实例复用」
+      // 这条用例就是这样红的）。写盘必须是同步临界区，任何一轮都不许丢文件。
+      for (var i = 0; i < 40; i++) {
+        unawaited(resolver.flushCache());
+        await resolver.flushCache();
+        expect(
+          File(path).existsSync(),
+          isTrue,
+          reason: '第 $i 轮并发写盘把缓存文件弄丢了',
+        );
+      }
     });
 
     test('磁盘缓存可跨实例复用', () async {

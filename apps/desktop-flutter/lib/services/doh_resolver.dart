@@ -63,6 +63,16 @@ class DohResolver {
   bool _cacheLoaded = false;
   Future<void>? _loading;
 
+  /// 进程内实例序号：让同一进程里多个解析器的临时文件互不相同。
+  static int _instanceSeq = 0;
+  final int _instanceId = _instanceSeq++;
+
+  /// 缓存落盘的独占临时名（读缓存不会读它）。
+  ///
+  /// 同进程内的写盘已由 [_flushCacheSync] 的同步临界区串行化；再加 `pid` 与
+  /// 实例序号，是为了让别的进程（用户开了两个实例）也不会撞同一个 tmp。
+  String get _tempCachePath => '$cachePath.$pid.$_instanceId.tmp';
+
   /// 生效的端点列表（自定义端点优先）。
   List<DohEndpoint> get effectiveEndpoints {
     if (settings.hasCustomUrl) {
@@ -119,7 +129,7 @@ class DohResolver {
           addresses: answer.addresses,
           expiresAtMs: nowMs + ttl * 1000,
         );
-        unawaited(_flushCacheQuietly());
+        _flushCacheSync();
         log?.info(
           'DoH 解析 $target -> ${answer.addresses.length} 个地址 '
           'endpoint=${redactDohUrl(endpoint.url)} ttl=${ttl}s',
@@ -305,25 +315,58 @@ class DohResolver {
     _cacheLoaded = true;
   }
 
-  Future<void> _flushCacheQuietly() async {
-    try {
-      final pruned = DohCacheFile(
-        entries: Map.of(_cache),
-      ).pruned(_now().millisecondsSinceEpoch);
-      _cache
-        ..clear()
-        ..addAll(pruned.entries);
-      final file = File(cachePath);
-      await file.parent.create(recursive: true);
-      final temp = File('$cachePath.tmp');
-      await temp.writeAsString(pruned.encode(), flush: true);
-      if (await file.exists()) await file.delete();
-      await temp.rename(cachePath);
-    } catch (error) {
-      log?.warning('写入 DoH 缓存失败：$error', scope: 'doh');
+  /// 缓存落盘（同步临界区）。
+  ///
+  /// 为什么整段同步：`resolve()` 里的写盘是 fire-and-forget 的，调用方（含
+  /// 测试）还会再显式 flush 一次，同一份缓存于是有两个写盘者。它们原先共用
+  /// `'$cachePath.tmp'`，时序一交错就会出：后者把前者刚 rename 出来的文件
+  /// delete 掉，自己的 rename 又因为 tmp 已被搬走而失败——结果是缓存文件
+  /// **静默消失**（CI 上「磁盘缓存可跨实例复用」偶发转红的原因，实测 200 轮
+  /// 真实时序里丢 4 次）。
+  ///
+  /// Dart 是单线程的：只要「整理缓存 → 写 tmp → rename」之间一个 await 都
+  /// 没有，两个写盘者就不可能交错，不需要异步锁（异步锁会踩 fake-async zone
+  /// 的坑，见 `settings_file.dart` 文件头）。代价是临界区内阻塞事件循环，但
+  /// 这份文件只有几百字节，同步读写是微秒级；而丢掉缓存会让下次启动多打一轮
+  /// DoH 查询——这种「偶发变慢」在用户侧极难复现。
+  void _flushCacheSync() {
+    final pruned = DohCacheFile(
+      entries: Map.of(_cache),
+    ).pruned(_now().millisecondsSinceEpoch);
+    _cache
+      ..clear()
+      ..addAll(pruned.entries);
+
+    final file = File(cachePath);
+    final temp = File(_tempCachePath);
+    Object? lastError;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        file.parent.createSync(recursive: true);
+        // ⚠️ 以下三行之间不得出现任何 await：原子性就是本方法的全部价值。
+        temp.writeAsStringSync(pruned.encode(), flush: true);
+        if (file.existsSync()) file.deleteSync();
+        temp.renameSync(cachePath);
+        return;
+      } on FileSystemException catch (error) {
+        // Windows 上 delete/rename 可能被别的进程（或杀毒软件）短暂占用
+        // （errno 32）。同步阻塞几毫秒再试：占用通常是毫秒级的。
+        lastError = error;
+        sleep(Duration(milliseconds: 10 * (attempt + 1)));
+      } on Object catch (error) {
+        lastError = error;
+        break;
+      }
     }
+    // 兜底清理：留下半成品 tmp 没有意义。
+    try {
+      if (temp.existsSync()) temp.deleteSync();
+    } on Object {
+      // 清理失败无关紧要。
+    }
+    log?.warning('写入 DoH 缓存失败：$lastError', scope: 'doh');
   }
 
-  /// 供测试等待挂起的缓存写盘。
-  Future<void> flushCache() => _flushCacheQuietly();
+  /// 供测试等待缓存落盘（写盘本身同步，返回的 Future 立即完成）。
+  Future<void> flushCache() async => _flushCacheSync();
 }
