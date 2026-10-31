@@ -589,21 +589,80 @@ void main() {
     // 面板默认是关的：按钮在、面板内容不在。
     expect(find.text('重置筛选'), findsNothing, reason: '还没筛过，不该有重置入口');
 
+    // 这张图拍的是**面板关闭**时的分类条：它证明的是**需求①②**——筛选按钮出现
+    // 在刷新旁边、且筛选区域不再常驻。所以必须在 `tap` 面板按钮**之前**拍，
+    // 否则它和下一张「展开的面板」是同一帧（曾经两张图字节完全相同，白存一张）。
+    await capture(
+      tester,
+      relativePath: '.impeccable/review/browse-filter-button.png',
+    );
+
     // 点开后必须真的出现维度（而不是空面板）。
     await tester.tap(filterButton);
     await tester.pumpAndSettle();
     expect(find.text('剧情'), findsWidgets, reason: '面板里应有「剧情」维度');
     expect(find.text('地区'), findsWidgets, reason: '面板里应有「地区」维度');
-    // 这张图证明的是**需求①②**：筛选按钮出现在刷新旁边、且筛选区域不再常驻。
+    // 专门的展开面板证据图：全宽、维度按可用宽排成多列。
     //
-    // **它拍不到面板本身**：`MenuAnchor` 的浮层渲染在 `Navigator` 的 `Overlay`
-    // 里，而本 harness 的 `capture` 取的是树中第一个 `RepaintBoundary`
-    // （`Scaffold` 那层）——与 `player-overflow` 那次同一个限制。
-    // 所以面板内容由上面的断言保证，**不拿一张没有面板的图冒充面板证据**。
+    // 面板是**页面内联区**（不再是 `MenuAnchor` 挂在 `Navigator` 的 `Overlay`
+    // 里的浮层），所以树中第一个 `RepaintBoundary`（`Scaffold` 那层）就能把它
+    // 一起拍进来——原先"拍不到面板"的限制随这次改造一起消失了。
     await capture(
       tester,
-      relativePath: '.impeccable/review/browse-filter-button.png',
+      relativePath: '.impeccable/review/browse-filter-panel-dark.png',
     );
+
+    // 让一个筛选维度真的生效，才拍得到底部那条「已生效 N 项 + 重置筛选」。
+    //
+    // 直接驱动状态而不是点 chip：chip 的 key 依赖站点给的选项值，而行数/列数
+    // 本来就是这条证据要看的东西，不必再赌一次坐标。`setCategoryFilter` 会立刻
+    // 重载当前分类（真实 HTTP），所以要用 `runAsync` 让真实 async 区跑完。
+    await tester.runAsync(() => state.setCategoryFilter('class', '喜剧'));
+    // `pumpAndSettle` 在这里不可用：重载期间页面有持续动画的进度指示器，永远不会
+    // settle。改为有界 pump 循环，直到重置入口出现为止（最多 20 次，每次 50ms）。
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+      if (find
+          .byKey(const ValueKey('category-filter-clear'))
+          .evaluate()
+          .isNotEmpty) {
+        break;
+      }
+    }
+    // 重置条一挂上，外层 AnimatedSize 才刚开始逐帧撑高面板：命中首帧拍到的是
+    // 被裁掉下半截的面板，且此刻点「重置筛选」会落在裁剪区外（hit test 打空，
+    // 于是重置没生效、重置入口留在原地）。所以再泵固定一段时长让尺寸动画走完。
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(
+      find.byKey(const ValueKey('category-filter-clear')),
+      findsOneWidget,
+      reason: '筛选生效后底部必须给出「重置筛选」',
+    );
+    await capture(
+      tester,
+      relativePath: '.impeccable/review/browse-filter-panel-active-dark.png',
+    );
+
+    // 重置也走真实 HTTP 重载：先让真实 async 区把请求跑完再 settle，否则加载期的
+    // 进度指示器是无限动画，`pumpAndSettle` 会直接超时。
+    await tester.tap(find.byKey(const ValueKey('category-filter-clear')));
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      if (state.contentPhase == LoadPhase.ready) break;
+    }
+    await tester.pumpAndSettle();
+    expect(find.text('重置筛选'), findsNothing, reason: '重置后不该再留着重置入口');
+
+    // 收起 → 再展开 → 再收起：确认这个来回不会把面板状态弄坏（异常由末尾统一取）。
+    await tester.tap(filterButton);
+    await tester.pumpAndSettle();
+    await tester.tap(filterButton);
+    await tester.pumpAndSettle();
     await tester.tap(filterButton);
     await tester.pumpAndSettle();
 

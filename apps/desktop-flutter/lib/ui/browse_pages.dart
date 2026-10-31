@@ -2,6 +2,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -104,6 +105,13 @@ class _BrowseTabBar extends StatefulWidget {
 class _BrowseTabBarState extends State<_BrowseTabBar> {
   final ScrollController _controller = ScrollController();
 
+  /// 筛选面板是否展开。
+  ///
+  /// 状态提在这一层：面板是分类条正下方的**内联区**，展开/收起由分类条上的按钮
+  /// 驱动，两者必须共享同一个状态源——放在按钮里也活不过一帧重建，放在面板里
+  /// 它自己就没法决定自己该不该在树里。
+  bool _filtersOpen = false;
+
   @override
   void dispose() {
     _controller.dispose();
@@ -121,71 +129,94 @@ class _BrowseTabBarState extends State<_BrowseTabBar> {
     final loading = state.contentPhase == LoadPhase.loading;
     // 当前分类可用的筛选维度。空 = 这个分类没有筛选，入口按钮**不渲染**。
     final filters = _VodGrid.filtersFor(state, selected);
+    // 切到没有筛选维度的分类时按钮会消失，面板必须跟着收——否则用户再也收不起它。
+    final open = _filtersOpen && filters.isNotEmpty;
 
-    return Container(
-      height: 46,
-      padding: const EdgeInsets.only(left: 8, right: 4),
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: Theme.of(context).dividerColor),
-        ),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            // 桌面端的竖滚轮在 Flutter 里不驱动横向滚动，需要显式转一次，
-            // 否则分类多到溢出时滚轮推不动这条（§17.4 鼠标可用）。
-            // 鼠标左右拖由 `HorizontalMouseDrag` 打开（同样 §17.4）。
-            child: HorizontalMouseDrag(
-              child: _WheelScroll(
-                controller: _controller,
-                child: SingleChildScrollView(
-                  controller: _controller,
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: [
-                      // 首页**没有推荐内容**时不显示「默认推荐」标签：那个标签点进去
-                      // 只有空态（实测 126 站点里 40 个如此），留在条上只会误导用户。
-                      if (hasHomeList)
-                        _BrowseTab(
-                          key: const ValueKey('browse-tab-default'),
-                          label: '默认推荐',
-                          selected: selected == null,
-                          onTap: loading ? null : state.selectDefaultListing,
-                        ),
-                      for (final item in classes)
-                        _BrowseTab(
-                          key: ValueKey('browse-tab-${item.typeId}'),
-                          label: item.typeName,
-                          selected: selected == item.typeId,
-                          onTap: loading
-                              ? null
-                              : () => state.loadCategory(item.typeId),
-                        ),
-                    ],
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          height: 46,
+          padding: const EdgeInsets.only(left: 8, right: 4),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: Theme.of(context).dividerColor),
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                // 桌面端的竖滚轮在 Flutter 里不驱动横向滚动，需要显式转一次，
+                // 否则分类多到溢出时滚轮推不动这条（§17.4 鼠标可用）。
+                // 鼠标左右拖由 `HorizontalMouseDrag` 打开（同样 §17.4）。
+                child: HorizontalMouseDrag(
+                  child: _WheelScroll(
+                    controller: _controller,
+                    child: SingleChildScrollView(
+                      controller: _controller,
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          // 首页**没有推荐内容**时不显示「默认推荐」标签：那个标签点进去
+                          // 只有空态（实测 126 站点里 40 个如此），留在条上只会误导用户。
+                          if (hasHomeList)
+                            _BrowseTab(
+                              key: const ValueKey('browse-tab-default'),
+                              label: '默认推荐',
+                              selected: selected == null,
+                              onTap: loading ? null : state.selectDefaultListing,
+                            ),
+                          for (final item in classes)
+                            _BrowseTab(
+                              key: ValueKey('browse-tab-${item.typeId}'),
+                              label: item.typeName,
+                              selected: selected == item.typeId,
+                              onTap: loading
+                                  ? null
+                                  : () => state.loadCategory(item.typeId),
+                            ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
+              // 筛选入口：**只有真的有筛选维度时才出现**。
+              //
+              // 「没有筛选的分组就不应该有筛选按钮」（用户反馈 2026-10-13）——
+              // 一个点了什么也没有的按钮比没有按钮更糟。
+              if (filters.isNotEmpty)
+                _FilterToggleButton(
+                  state: state,
+                  open: open,
+                  onToggle: () => setState(() => _filtersOpen = !_filtersOpen),
+                ),
+              IconButton(
+                key: const ValueKey('browse-refresh'),
+                tooltip: selected == null ? '刷新首页' : '刷新当前分类',
+                onPressed: loading
+                    ? null
+                    : () => selected == null
+                          ? state.loadHome(widget.site)
+                          : state.loadCategory(selected),
+                icon: const Icon(Icons.refresh, size: 18),
+              ),
+            ],
           ),
-          // 筛选入口：**只有真的有筛选维度时才出现**。
-          //
-          // 「没有筛选的分组就不应该有筛选按钮」（用户反馈 2026-10-13）——
-          // 一个点了什么也没有的按钮比没有按钮更糟。
-          if (filters.isNotEmpty)
-            _FilterMenuButton(state: state, groups: filters),
-          IconButton(
-            key: const ValueKey('browse-refresh'),
-            tooltip: selected == null ? '刷新首页' : '刷新当前分类',
-            onPressed: loading
-                ? null
-                : () => selected == null
-                      ? state.loadHome(widget.site)
-                      : state.loadCategory(selected),
-            icon: const Icon(Icons.refresh, size: 18),
-          ),
-        ],
-      ),
+        ),
+        // 面板是**页面内联区**：展开时把下面的海报网格推下去，不遮住它。
+        // 收起时子节点换成 `SizedBox.shrink()` —— 面板内容真的离开 widget 树
+        // （不是 opacity 0），所以收起态 `find.text('重置筛选')` 必须是空。
+        AnimatedSize(
+          duration: AppMotion.base,
+          curve: AppMotion.ease,
+          alignment: Alignment.topCenter,
+          child: open
+              ? _FilterPanel(state: state, groups: filters)
+              : const SizedBox.shrink(),
+        ),
+      ],
     );
   }
 }
@@ -277,19 +308,101 @@ class _WheelScroll extends StatelessWidget {
   }
 }
 
-/// 分类条上的**筛选入口按钮**：点击后悬浮显示筛选面板。
+/// 分类条上的**筛选开关按钮**：点一下展开、再点一下收起正下方的内联筛选面板。
 ///
 /// 设计取舍（用户反馈 2026-10-13：「筛选区域不再默认展示，加一个按钮点击后
-/// 悬浮显示」）：
+/// 展开」；2026-11 追加：「筛选层显示不好看，横向铺满？」）：
 /// - **按需出现**：`groups` 为空时调用点根本不渲染这个按钮——没有筛选的分组
 ///   不该有一个点了没反应的按钮；
-/// - **悬浮而不是常驻**：面板不占布局、不推挤海报网格。原来常驻时多维度要吃掉
-///   内容区顶部 150~200px；
-/// - **必须显示"已生效"**：面板藏起来之后，用户看不到自己选过什么。所以有生效
+/// - **内联展开而不是悬浮小窗**：面板是分类条下方的页面内联区，宽度吃满内容区、
+///   把海报网格往下推。原来 520px 的悬浮弹层排「年份 15 项 + 字母 27 项」这类
+///   大维度要 5~6 行，右侧贴边、左侧大片留空，还压在海报墙上，观感零碎；
+/// - **必须显示"已生效"**：面板收起之后，用户看不到自己选过什么。所以有生效
 ///   筛选时按钮**染成星等琥珀 + 数字角标**，一眼知道"现在筛着 2 个维度"；
 /// - **「重置筛选」放进面板**：它属于筛选状态，和筛选控件在一起才不会找不到。
-class _FilterMenuButton extends StatelessWidget {
-  const _FilterMenuButton({required this.state, required this.groups});
+class _FilterToggleButton extends StatelessWidget {
+  const _FilterToggleButton({
+    required this.state,
+    required this.open,
+    required this.onToggle,
+  });
+
+  final AppState state;
+
+  /// 面板当前是否展开。展开态图标翻转并给一层主色淡底，说明"这块归我管"。
+  final bool open;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final semantic = context.semanticColors;
+    final activeCount = state.categoryFilters.length;
+
+    return Padding(
+      padding: const EdgeInsets.only(right: AppSpace.xs),
+      child: TextButton.icon(
+        key: const ValueKey('category-filter-menu'),
+        onPressed: onToggle,
+        icon: Icon(
+          open ? Icons.expand_less : Icons.tune,
+          size: 18,
+          color: activeCount > 0 ? semantic.magnitude : null,
+        ),
+        label: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('筛选'),
+            if (activeCount > 0) ...[
+              const SizedBox(width: AppSpace.xs),
+              // 数字角标：面板收起后，这是"筛了几项"的唯一提示。
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 5,
+                  vertical: 1,
+                ),
+                decoration: BoxDecoration(
+                  color: semantic.magnitude,
+                  borderRadius: AppRadius.pillAll,
+                ),
+                child: Text(
+                  '$activeCount',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    // 琥珀底上用夜空墨色：琥珀是亮色，白字对比度不足。
+                    color: AppPalette.nightGround,
+                    fontWeight: AppWeight.title,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        style: TextButton.styleFrom(
+          backgroundColor: open
+              ? theme.colorScheme.primary.withValues(alpha: 0.10)
+              : null,
+          foregroundColor: activeCount > 0
+              ? semantic.magnitude
+              : theme.colorScheme.onSurfaceVariant,
+        ),
+      ),
+    );
+  }
+}
+
+/// 分类条正下方的**内联筛选面板**容器：贴齐内容区左右内边距、横铺满整个宽度。
+///
+/// 视觉目标是「媒体库的筛选工作台」而不是一个弹窗：
+/// - 底色 `surfaceContainerLow`（比页面底色亮/暗一档，两套主题都由 ColorScheme
+///   给出），下沿一条发丝线收边，**不投影片阴影**——它是页面的一块区域，不是浮在
+///   页面之上的东西；
+/// - 维度多时面板自身纵向滚动，最大高度 = `max(窗口高 × 0.45, 340px)`：宽屏下
+///   「年份 + 字母」这类大维度排成 1~3 行就够，不需要吃掉半屏；窗口最小尺寸
+///   （1024×640，见 `app.dart` 的 `minimumSize`）下这也只占 340px，网格仍有余量；
+/// - 上下内边距 `AppSpace.md`、左右 `AppSpace.lg`（= 海报网格的 16px 内边距，
+///   面板里的第一枚 chip 与第一列海报左边缘对齐）。
+class _FilterPanel extends StatelessWidget {
+  const _FilterPanel({required this.state, required this.groups});
 
   final AppState state;
   final List<VodFilterGroup> groups;
@@ -297,91 +410,142 @@ class _FilterMenuButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final semantic = context.semanticColors;
+    final maxHeight = math.max(
+      MediaQuery.sizeOf(context).height * 0.45,
+      340.0,
+    );
     final active = state.categoryFilters;
-    final activeCount = active.length;
-
-    return MenuAnchor(
-      // 点外部自动关闭；面板内点 chip 不会关（`MenuAnchor` 只在选中 menu item
-      // 或点外部时关，这里的 chip 是普通控件）。
-      style: MenuStyle(
-        backgroundColor: WidgetStatePropertyAll(
-          theme.colorScheme.surfaceContainerHigh,
-        ),
-        padding: const WidgetStatePropertyAll(
-          EdgeInsets.symmetric(vertical: AppSpace.sm),
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        border: Border(
+          // 只有下沿这条线：上沿的分隔线由分类条自己的 bottom border 担任，
+          // 两条贴在一起会变成 2px 的粗线。
+          bottom: BorderSide(color: theme.dividerColor),
         ),
       ),
-      menuChildren: [
-        SizedBox(
-          width: 520,
-          child: ConstrainedBox(
-            // 维度多时面板自身滚动，不撑破窗口。
-            constraints: const BoxConstraints(maxHeight: 420),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(horizontal: AppSpace.md),
-              child: _FilterPanelBody(state: state, groups: groups),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxHeight),
+        // 只有 chip 区滚动，"已生效 + 重置"这一条钉在面板底部：维度多到要滚动时
+        // 重置按钮不能跟着滚出视野（那是用户筛不出结果时的唯一退路）。
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(
+                  AppSpace.lg,
+                  AppSpace.md,
+                  AppSpace.lg,
+                  AppSpace.md,
+                ),
+                child: _FilterPanelBody(state: state, groups: groups),
+              ),
             ),
-          ),
+            if (active.isNotEmpty) _FilterResetBar(state: state, groups: groups),
+          ],
         ),
-      ],
-      builder: (context, controller, child) {
-        final open = controller.isOpen;
-        return Padding(
-          padding: const EdgeInsets.only(right: AppSpace.xs),
-          child: TextButton.icon(
-            key: const ValueKey('category-filter-menu'),
-            onPressed: () =>
-                open ? controller.close() : controller.open(),
-            icon: Icon(
-              Icons.tune,
-              size: 18,
-              color: activeCount > 0 ? semantic.magnitude : null,
-            ),
-            label: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text('筛选'),
-                if (activeCount > 0) ...[
-                  const SizedBox(width: AppSpace.xs),
-                  // 数字角标：面板藏起来后，这是"筛了几项"的唯一提示。
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 5,
-                      vertical: 1,
-                    ),
-                    decoration: BoxDecoration(
-                      color: semantic.magnitude,
-                      borderRadius: AppRadius.pillAll,
-                    ),
-                    child: Text(
-                      '$activeCount',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        // 琥珀底上用夜空墨色：琥珀是亮色，白字对比度不足。
-                        color: AppPalette.nightGround,
-                        fontWeight: AppWeight.title,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            style: TextButton.styleFrom(
-              foregroundColor: activeCount > 0
-                  ? semantic.magnitude
-                  : theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-        );
-      },
+      ),
     );
   }
 }
 
-/// 悬浮面板的内容：每个维度一行「等宽标签 + 横向 chip」+ 底部重置。
+/// 面板底部那条**只在有生效筛选时出现**的汇总行。
 ///
-/// 布局对齐主流桌面媒体库：行首是该维度的标签列（各行**等宽**，所以 chip 左边缘
-/// 对齐），右侧 chip 自适应换行。选中态是主色淡底 + 主色文字，未选中是弱化纯文字。
+/// 左边回答"我现在筛着什么"（面板收起后这个问题只能靠按钮上的数字角标回答），
+/// 右边是「重置筛选」。没有生效筛选时整条不渲染——留一条空的分隔线加一个点不动
+/// 的按钮，只会让面板底部多出一块没有信息量的死区。
+class _FilterResetBar extends StatelessWidget {
+  const _FilterResetBar({required this.state, required this.groups});
+
+  final AppState state;
+  final List<VodFilterGroup> groups;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpace.lg,
+        AppSpace.xs,
+        AppSpace.md,
+        AppSpace.xs,
+      ),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: theme.dividerColor)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              _activeFilterSummary(groups, state.categoryFilters),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(width: AppSpace.md),
+          TextButton.icon(
+            key: const ValueKey('category-filter-clear'),
+            onPressed: state.clearCategoryFilters,
+            icon: const Icon(Icons.filter_alt_off_outlined, size: 18),
+            label: const Text('重置筛选'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 「已生效 2 项：剧情 喜剧 · 地区 中国大陆」。
+///
+/// 维度名取站点给的 `group.name`、值取选项自己的 `name`（不是 key 里的原值：
+/// 「中国大陆」这类显示名和 `cn` 这种值不是一回事）。生效值里若有当前分组列表
+/// 里已经找不到的（切站、换分类后残留），直接把它原样带出来，不静默丢掉——
+/// 用户看到的必须等于实际正在生效的。
+String _activeFilterSummary(
+  List<VodFilterGroup> groups,
+  Map<String, String> active,
+) {
+  final parts = <String>[];
+  final usedKeys = <String>{};
+  for (final group in groups) {
+    final value = active[group.key] ?? '';
+    if (value.isEmpty) continue;
+    usedKeys.add(group.key);
+    var label = value;
+    for (final option in group.options) {
+      if (option.value == value) {
+        label = option.name;
+        break;
+      }
+    }
+    parts.add('${group.name} $label');
+  }
+  for (final entry in active.entries) {
+    if (entry.value.isEmpty || usedKeys.contains(entry.key)) continue;
+    parts.add('${entry.key} ${entry.value}');
+  }
+  if (parts.isEmpty) return '';
+  return '已生效 ${parts.length} 项：${parts.join(' · ')}';
+}
+
+/// 内联筛选面板的内容：每个维度一行「等宽标签 + 横向 chip」，维度再按可用宽
+/// 排成 1~3 列。
+///
+/// 底部的「已生效 + 重置」不在这里，而在 `_FilterResetBar`：它必须钉在面板
+/// 底部不随 chip 区滚动，所以由 `_FilterPanel` 的 Column 分层拼。
+///
+/// 布局对齐主流桌面媒体库：行首是该维度的标签列（**列内**各行等宽，所以同一个
+/// 列里的 chip 左边缘对齐），右侧 chip 自适应换行。选中态是主色淡底 + 主色文字，
+/// 未选中是弱化纯文字。
+///
+/// 为什么不是单列竖排：面板是通栏的（从 NavigationRail 右侧一直铺到窗口右缘），
+/// 单列时三个维度只占左边约 1/3，右边是一大片同色空底，整条读起来像空条幅。
+/// 多列是让「横向铺满」落到内容上而不是只落到容器上。
 ///
 /// 为什么不用「每条一行 + 勾选框」：勾选框 + 实底高亮是设置表单的视觉语言，
 /// 不像媒体库的筛选条；横向 chip 换行后「剧情」这类 17 项的维度只占 3 行。
@@ -396,9 +560,15 @@ class _FilterPanelBody extends StatelessWidget {
   static const double _minLabelWidth = 40;
   static const double _maxLabelWidth = 88;
 
+  /// 一列可用宽的下限。
+  ///
+  /// 420 ≈ 标签列上限 88 + 约 330 的 chip 区：这刚好能让「中国大陆」这类 4 字
+  /// chip 并排 3 枚。再窄下去 chip 会碎成一列一枚，多列反而比单列更长，所以
+  /// 面板每收窄一档 420，列数就少一列。
+  static const double _columnMinWidth = 420;
+
   @override
   Widget build(BuildContext context) {
-    final labelWidth = _measureLabelWidth(context);
     // 筛选 chip **始终可点**。
     //
     // 原来这里在 `contentPhase == loading` 时把整条筛选栏禁用，理由写的是
@@ -411,43 +581,92 @@ class _FilterPanelBody extends StatelessWidget {
     // 即时生效的控件不应该在每次生效的过程中把自己关掉。
     const enabled = true;
     final active = state.categoryFilters;
+    if (groups.isEmpty) return const SizedBox.shrink();
+    // 列数由**面板实际可用宽**决定，而不是窗口宽：面板两侧各有 `AppSpace.lg`
+    // 内边距、外面还挡着 NavigationRail。按窗口宽算会在小窗口下多切出一列。
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columnCount = math
+            .min((constraints.maxWidth / _columnMinWidth).floor(), 3)
+            .clamp(1, groups.length);
+        final columns = _splitBalanced(groups, columnCount);
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (var index = 0; index < columns.length; index++) ...[
+              if (index > 0) const SizedBox(width: AppSpace.xxl),
+              Expanded(
+                child: _buildColumn(context, columns[index], active, enabled),
+              ),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  /// 一列竖向排列若干维度，列内组与组之间补 `AppSpace.sm`。
+  Widget _buildColumn(
+    BuildContext context,
+    List<VodFilterGroup> columnGroups,
+    Map<String, String> active,
+    bool enabled,
+  ) {
+    // 标签宽度**按列各算各的**：三列共享一个宽度时，最长那个维度名会替另外两列
+    // 撑出一片没有内容的空白，横向铺满就白铺了。列内对齐已经足够读。
+    final labelWidth = _measureLabelWidth(context, columnGroups);
+    final rows = <Widget>[];
+    for (final group in columnGroups) {
+      if (rows.isNotEmpty) rows.add(const SizedBox(height: AppSpace.sm));
+      rows.add(
+        _FilterRow(
+          group: group,
+          labelWidth: labelWidth,
+          selectedValue: active[group.key] ?? '',
+          enabled: enabled,
+          onSelect: (value) => state.setCategoryFilter(group.key, value),
+        ),
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
-      children: [
-        for (final group in groups)
-          _FilterRow(
-            group: group,
-            labelWidth: labelWidth,
-            selectedValue: active[group.key] ?? '',
-            enabled: enabled,
-            onSelect: (value) => state.setCategoryFilter(group.key, value),
-          ),
-        if (active.isNotEmpty) ...[
-          const Divider(height: AppSpace.lg),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              key: const ValueKey('category-filter-clear'),
-              onPressed: state.clearCategoryFilters,
-              icon: const Icon(Icons.filter_alt_off_outlined, size: 18),
-              label: const Text('重置筛选'),
-            ),
-          ),
-        ],
-      ],
+      children: rows,
     );
+  }
+
+  /// 把维度按**连续均衡**切成 [columnCount] 段：段长差 ≤ 1，且保持原顺序。
+  ///
+  /// 连续切而不是 round-robin：维度顺序（剧情 → 地区 → 时间）本身是用户可读的
+  /// 语义，轮转会把它打散成「第 1、4 组在前，第 2、5 组在后」。
+  List<List<VodFilterGroup>> _splitBalanced(
+    List<VodFilterGroup> source,
+    int columnCount,
+  ) {
+    final base = source.length ~/ columnCount;
+    final extra = source.length % columnCount;
+    final columns = <List<VodFilterGroup>>[];
+    var start = 0;
+    for (var index = 0; index < columnCount; index++) {
+      final take = base + (index < extra ? 1 : 0);
+      columns.add(source.sublist(start, start + take));
+      start += take;
+    }
+    return columns;
   }
 
   /// 标签列宽度 = 所有维度名里最宽者 + 间距，夹在 [min, max] 之间。
   ///
   /// 用固定宽度会让「资源类型」被截断或「地区」后留一片空白；各行宽度不一致又会让
   /// chip 左边缘参差。按实际文本量一次即可两全。
-  double _measureLabelWidth(BuildContext context) {
+  double _measureLabelWidth(
+    BuildContext context,
+    List<VodFilterGroup> columnGroups,
+  ) {
     final style = _filterLabelStyle(context);
     final direction = Directionality.of(context);
     var widest = 0.0;
-    for (final group in groups) {
+    for (final group in columnGroups) {
       final painter = TextPainter(
         text: TextSpan(text: group.name, style: style),
         maxLines: 1,
@@ -501,8 +720,11 @@ class _FilterRow extends StatelessWidget {
       if (seenValues.add(option.value)) options.add(option);
     }
     final hasAll = options.any((option) => option.value.isEmpty);
+    // 竖向节奏：行内 chip 之间 4px（`_FilterChip` 各 2px），维度之间 8px。
+    // 维度间比维度内宽一档，读者才看得出「这一行是一个维度」而不是 chip 的
+    // 连续换行。
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(vertical: AppSpace.xs),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
