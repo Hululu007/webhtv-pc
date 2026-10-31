@@ -1255,6 +1255,24 @@ class _DetailPageState extends State<DetailPage> {
   /// 上一次渲染时的季度序号，用于检测切季（`design/03` §5.1）。
   int _lastSeasonEpoch = -1;
 
+  /// **渲染归属门**：保留的 TMDB 数据是否属于本页影片。
+  ///
+  /// 为什么需要：`AppState.clearDetail()` 不再清 TMDB（否则第二次进同一部剧必然先
+  /// 渲染一帧站源「原始模式」，再等 TMDB 重新请求回来才换成 TMDB 版本——用户反馈的
+  /// 就是这句），于是内存里可能还留着**上一部剧**的作品维度数据。渲染侧必须先确认
+  /// 归属，不属于本页的一律按「无 TMDB」降级，否则上一部剧的海报/标题/演职人员/
+  /// 季集数字会串到本页（这正是当初 `clear()` 要解决的问题，不能为了秒开换回来）。
+  ///
+  /// `vodId` 为空（还没绑定过任何作品）时按「属于本页」处理：没有别人的数据可泄漏，
+  /// 而状态条/设置入口需要照常显示。
+  bool get _tmdbOwnsThisPage {
+    final tmdb = widget.state.tmdb;
+    return tmdb.vodId.isEmpty || tmdb.belongsTo(widget.vod.vodId);
+  }
+
+  /// 属于本页影片的 TMDB 状态；`null` 表示按「无 TMDB」渲染。
+  TmdbState? get _ownedTmdb => _tmdbOwnsThisPage ? widget.state.tmdb : null;
+
   @override
   void initState() {
     super.initState();
@@ -1296,7 +1314,7 @@ class _DetailPageState extends State<DetailPage> {
     final item = await showDialog<TmdbItem>(
       context: context,
       builder: (_) => TmdbMatchDialog(
-        initialQuery: state.tmdb.item?.title ?? vod?.vodName ?? '',
+        initialQuery: _ownedTmdb?.item?.title ?? vod?.vodName ?? '',
         search: state.searchTmdb,
         resolveProviderId: state.resolveTmdbProviderId,
       ),
@@ -1307,8 +1325,10 @@ class _DetailPageState extends State<DetailPage> {
 
   Future<void> _openSeasonDialog() async {
     final state = widget.state;
-    final tmdb = state.tmdb;
-    final counts = tmdb.seasonEpisodeCounts;
+    // 归属门：不属于本页影片的 TMDB 数据不能拿来手动绑定季度（会把上一部剧的
+    // 季集数绑到本页线路上）。
+    final tmdb = _ownedTmdb;
+    final counts = tmdb?.seasonEpisodeCounts ?? const <int, int>{};
     final seasons = counts.keys.toList()..sort();
     if (seasons.isEmpty) {
       ScaffoldMessenger.of(
@@ -1316,7 +1336,7 @@ class _DetailPageState extends State<DetailPage> {
       ).showSnackBar(const SnackBar(content: Text('TMDB 未返回季度信息，暂时无法手动绑定季度')));
       return;
     }
-    final line = tmdb.sourceLine;
+    final line = tmdb?.sourceLine;
     // 【必须用**无类型**路由 + `decodeSeasonChoice`，不能 `showDialog<TmdbSeasonChoice>`】
     //
     // 弹窗 pop 的是 `_SeasonChoice`（私有枚举）或 `int`（季号），两者都不是
@@ -1333,8 +1353,10 @@ class _DetailPageState extends State<DetailPage> {
         tmdbSeasons: seasons,
         seasonCounts: counts,
         sourceEpisodeCount: line?.episodeCount ?? 0,
-        currentSeason: tmdb.selectedSeason >= 0 ? tmdb.selectedSeason : null,
-        canAutoSlice: tmdb.canAutoSlice,
+        currentSeason: tmdb != null && tmdb.selectedSeason >= 0
+            ? tmdb.selectedSeason
+            : null,
+        canAutoSlice: tmdb?.canAutoSlice ?? false,
         aiReady: state.aiReady,
       ),
     );
@@ -1365,9 +1387,10 @@ class _DetailPageState extends State<DetailPage> {
   /// 跑一次 AI 集季分析并走预览确认（`docs/phase6/design/04` §7.2–§7.5）。
   Future<void> _runAiSeasonAnalysis() async {
     final state = widget.state;
-    final tmdb = state.tmdb;
+    // 归属门：不属于本页影片的季集数不能参与 AI 切分（会按上一部剧的季集数切本页）。
+    final tmdb = _ownedTmdb;
     final vod = _currentVod;
-    final tmdbLine = tmdb.sourceLine;
+    final tmdbLine = tmdb?.sourceLine;
     if (vod == null || tmdbLine == null || tmdbLine.episodeCount == 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('当前线路没有可分析的剧集')),
@@ -1423,7 +1446,7 @@ class _DetailPageState extends State<DetailPage> {
       title: vod.vodName,
       flagName: tmdbLine.sourceFlag,
       episodes: episodes,
-      seasonCounts: tmdb.seasonEpisodeCounts,
+      seasonCounts: tmdb?.seasonEpisodeCounts ?? const <int, int>{},
     );
     service.dispose();
 
@@ -1538,7 +1561,7 @@ class _DetailPageState extends State<DetailPage> {
     if (confirmed != true || previewOnly || !mounted) return;
 
     // 快照校验（`04` §7.5）。
-    final current = widget.state.tmdb.sourceLine;
+    final current = _ownedTmdb?.sourceLine;
     if (current == null ||
         current.flagKey != snapshotFlagKey ||
         current.episodeCount != snapshotCount) {
@@ -1557,7 +1580,7 @@ class _DetailPageState extends State<DetailPage> {
         await widget.state.bindTmdbSeason(const TmdbSeasonKeepOriginal());
       case AiSeasonMode.flatByCounts:
         // 应用前**再校验一次**（`04` §7.4）：AI 说可以，本地校验不过就拒绝。
-        if (!widget.state.tmdb.canAutoSlice) {
+        if (!(_ownedTmdb?.canAutoSlice ?? false)) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -1820,12 +1843,13 @@ class _DetailPageState extends State<DetailPage> {
       // `siteKey` 查本机历史。此时改用原记录的进度做迁移，见 [_resumeStartFor]。
       final resume = _resumeStartFor(vod, state.playLinesOf(vod), line, episodeIndex);
       // TMDB 季度身份（`04` §8.1）：已确证季度时透传；未确证时只传 URL/集名。
-      final tmdb = state.tmdb;
+      // 归属门：不属于本页影片的 TMDB 数据不得带进播放器身份（会把进度写到错的季集上）。
+      final tmdb = _ownedTmdb;
       final identity = TmdbPlaybackIdentity.of(
-        identity: tmdb.identity,
+        identity: tmdb?.identity,
         episode: episode,
-        flagKey: tmdb.sourceLine?.flagKey ?? line.flag,
-        seasonNumber: tmdb.hasMatch && tmdb.selectedSeason >= 0
+        flagKey: tmdb?.sourceLine?.flagKey ?? line.flag,
+        seasonNumber: tmdb != null && tmdb.hasMatch && tmdb.selectedSeason >= 0
             ? tmdb.selectedSeason
             : -1,
         episodeNumber: _tmdbEpisodeNumberOf(episode),
@@ -1926,16 +1950,19 @@ class _DetailPageState extends State<DetailPage> {
     }
     final loading = state.detailPhase == LoadPhase.loading;
     final tmdb = state.tmdb;
+    // 归属门：保留的 TMDB 数据不属于本页影片时，整块 TMDB 渲染按「无 TMDB」降级
+    // （上一部剧的海报/标题/演职人员绝不能出现在本页，哪怕只有一帧）。
+    final owned = _tmdbOwnsThisPage;
     // 头部补位（`04` §3.2）：**仅补位不覆盖**来源已有字段。
-    final display = tmdb.hasMatch ? tmdb.enrich(vod).vod : vod;
+    final display = owned && tmdb.hasMatch ? tmdb.enrich(vod).vod : vod;
     // TMDB 展示模型（海报/背景/类型/时长/季集数/演职人员…）。
-    final tmdbData = tmdb.detailData;
+    final tmdbData = owned ? tmdb.detailData : null;
     // 头部数据：未匹配 TMDB 时回退到来源海报，保证头部不空白。
     //
     // 提成局部变量是因为**页面级背景**要用同一份。两处各算一次的话，
     // 回退分支可能得出不同结果（背景与头部的图不一致）。
     final headerData =
-        tmdb.detailData ??
+        tmdbData ??
         TmdbDetailData(
           title: display.vodName,
           overview: display.vodContent,
@@ -2100,34 +2127,36 @@ class _DetailPageState extends State<DetailPage> {
                     children: [
                       // TMDB 状态条原在 hero 之上（会被悬浮 app bar 遮住），
                       // 改到 hero 下方：既不与图标重叠，也更靠近正文。
-                      TmdbStatusBar(
-                        state: tmdb,
-                        onConfigure: () => Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => TmdbSettingsPage(state: state),
+                      if (owned)
+                        TmdbStatusBar(
+                          state: tmdb,
+                          onConfigure: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => TmdbSettingsPage(state: state),
+                            ),
                           ),
+                          onMatch: _openMatchDialog,
+                          onRematch: _openMatchDialog,
+                          onSelectSeason: _openSeasonDialog,
+                          onRetry: () => state.reloadTmdb(),
                         ),
-                        onMatch: _openMatchDialog,
-                        onRematch: _openMatchDialog,
-                        onSelectSeason: _openSeasonDialog,
-                        onRetry: () => state.reloadTmdb(),
-                      ),
                       // 信息表已退场（2026-10-22 用户反馈）：`备注` 去掉，
                       // `语言` 已进 hero 标签行，两行都不剩，空表不再渲染。
                       const SizedBox(height: 12),
                       // 季度选择器（`04` §4.1）：仅 tv 且已匹配时渲染。
-                      TmdbSeasonSelector(
-                        state: tmdb,
-                        onChanged: (season) {
-                          tmdb.selectSeason(season);
-                          unawaited(
-                            tmdb.loadEpisodes(generation: tmdb.generation),
-                          );
-                        },
-                        onSelectManual: _openSeasonDialog,
-                      ),
+                      if (owned)
+                        TmdbSeasonSelector(
+                          state: tmdb,
+                          onChanged: (season) {
+                            tmdb.selectSeason(season);
+                            unawaited(
+                              tmdb.loadEpisodes(generation: tmdb.generation),
+                            );
+                          },
+                          onSelectManual: _openSeasonDialog,
+                        ),
                       // 纯 TMDB 详情页入口（`04` §6.1）。
-                      if (tmdb.hasMatch && tmdb.identity != null)
+                      if (owned && tmdb.hasMatch && tmdb.identity != null)
                         Align(
                           alignment: Alignment.centerLeft,
                           child: TextButton.icon(
@@ -2193,6 +2222,8 @@ class _DetailPageState extends State<DetailPage> {
   /// - 相关推荐 → 该作品的 TMDB 详情页；
   /// - 相关视频 → 浏览器打开 / 复制链接。
   List<Widget> _buildTmdbBlocks(BuildContext context, TmdbState tmdb) {
+    // 归属门：不属于本页影片时整块（简介/演职人员/推荐/视频）都不渲染。
+    if (!_tmdbOwnsThisPage) return const [];
     final data = tmdb.detailData;
     if (data == null) return const [];
     return [
@@ -2267,10 +2298,12 @@ class _DetailPageState extends State<DetailPage> {
   /// 默认季（S1），线路二在 S1 下一集都没有 → 剧集区空白。
   void _selectLine(VodPlayLine line, List<VodPlayLine> lines) {
     if (line.flag == _activeLine(lines).flag) return;
-    final tmdb = widget.state.tmdb;
-    final preferred = tmdb.selectedSeason;
+    // 归属门：不属于本页影片的 TMDB 数据不参与切线路（否则会把上一部剧的季号
+    // 当成「当前季度意图」带进新线路解析）。
+    final tmdb = _ownedTmdb;
+    final preferred = tmdb?.selectedSeason ?? -1;
     setState(() => _selectedLineFlag = line.flag);
-    tmdb.selectLine(line.flag, preferredSeason: preferred);
+    tmdb?.selectLine(line.flag, preferredSeason: preferred);
     unawaited(widget.state.reloadTmdb());
   }
 
@@ -2301,7 +2334,9 @@ class _DetailPageState extends State<DetailPage> {
     VodPlayLine rawLine, {
     required bool active,
   }) {
-    final tmdb = widget.state.tmdb;
+    // 归属门：不属于本页影片的 TMDB 数据一律不参与渲染，直接直通原集列表。
+    final tmdb = _ownedTmdb;
+    if (tmdb == null) return rawLine.episodes;
     if (!active) {
       final selected = tmdb.selectedSeason;
       if (selected < 0) return rawLine.episodes;
@@ -2327,19 +2362,33 @@ class _DetailPageState extends State<DetailPage> {
     Vod vod,
     List<VodPlayLine> lines,
   ) {
-    final state = widget.state;
-    final tmdb = state.tmdb;
+    // 归属门：TMDB 数据不属于本页影片时只按来源集名出卡片（不带任何 TMDB 元数据，
+    // 否则会拿到上一部剧的剧照/集标题）。
+    final tmdb = _ownedTmdb;
     final rawLine = _activeLine(lines);
-    final line = tmdb.applyEpisodesToLine(rawLine).line;
+    final line = tmdb?.applyEpisodesToLine(rawLine).line ?? rawLine;
     final episodes = _renderEpisodes(rawLine, active: true);
     final ordered = _episodesReversed ? episodes.reversed.toList() : episodes;
+    final cards = tmdb == null
+        ? TmdbEpisodeCards.build(
+            sourceNames: ordered.map((episode) => episode.name).toList(),
+            metadataByNumber: const <int, TmdbEpisode>{},
+          )
+        : tmdb.episodeCardsForEpisodes(
+            ordered,
+            seasonNumber: tmdb.selectedSeason >= 0
+                ? tmdb.selectedSeason
+                : null,
+            includeMetadata: true,
+          );
 
     // 切季 → 区间回到该季第一集所在区间（`docs/phase6/design/03` §5.1）。
     //
     // 用季度序号检测而不是回调链：`build` 会被多次通知触发，回调容易
     // 在时序上漏掉或多触发。
-    if (_lastSeasonEpoch != tmdb.seasonEpoch) {
-      _lastSeasonEpoch = tmdb.seasonEpoch;
+    final seasonEpoch = tmdb?.seasonEpoch ?? -1;
+    if (_lastSeasonEpoch != seasonEpoch) {
+      _lastSeasonEpoch = seasonEpoch;
       _rangeIndex = 0;
       _manualRange = false;
     }
@@ -2381,11 +2430,7 @@ class _DetailPageState extends State<DetailPage> {
         // 保证「每集都有画面」。
         TmdbEpisodeStrip(
           key: ValueKey('tmdb-episode-strip-${rawLine.flag}'),
-          cards: tmdb.episodeCardsForEpisodes(
-            ordered,
-            seasonNumber: tmdb.selectedSeason >= 0 ? tmdb.selectedSeason : null,
-            includeMetadata: true,
-          ),
+          cards: cards,
           keyPrefix: 'tmdb-episode-card-${rawLine.flag}',
           actionLabel: '播放',
           cardWidth: _episodeCardWidth(context, episodes.length),

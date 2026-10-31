@@ -115,6 +115,17 @@ class TmdbState extends ChangeNotifier {
   /// 当前线路的季度解析输入（供手动绑定使用）。
   TmdbSourceLine? get sourceLine => _activeLine;
 
+  /// 当前 TMDB 数据归属的作品 id（详情页的**渲染归属门**）。
+  ///
+  /// 为什么需要它：`AppState.clearDetail` 不再清 TMDB（否则第二次进同一部剧必然
+  /// 先渲染一帧站源「原始模式」再等 TMDB 回来重渲染），于是内存里可能还留着
+  /// **上一部剧**的作品维度数据。详情页必须先问一句「这份数据是不是本页影片的」，
+  /// 不是就整块按「无 TMDB」降级，否则上一部剧的海报/演职人员/季集数字会串过来。
+  String get vodId => _vodId;
+
+  /// 保留的 TMDB 数据是否属于 [vodId] 这部作品（归属门的判据）。
+  bool belongsTo(String vodId) => _vodId == vodId;
+
   /// 详情页全部线路（详情页切换线路时用）。
   List<VodPlayLine> _playLines = const [];
   List<VodPlayLine> get playLines => _playLines;
@@ -388,6 +399,11 @@ class TmdbState extends ChangeNotifier {
     // 只重置**线路维度**的数据（剧集元数据与季度解析结果）。
     // 上游 `TmdbUIAdapter` 同样只在作品维度加载一次，换线路不重发请求。
     if (!keepTitleData) {
+      // 匹配结论与季度解析结果同样是**作品维度**的：只清详情不清它们，换作品后
+      // `hasMatch` 仍为真（旧作品的命中），详情页会把旧匹配的标题/海报/季度渲染
+      // 到新作品上（串剧）。
+      _matchResult = null;
+      _resolution = null;
       _detail = null;
       _cast = const [];
       _creators = const [];

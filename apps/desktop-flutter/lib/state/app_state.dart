@@ -93,6 +93,7 @@ import '../services/ai_config_store.dart';
 import '../services/storage.dart';
 import '../services/sync_client.dart';
 import '../services/sync_server.dart';
+import '../services/tmdb_cache.dart';
 import '../services/tmdb_config_store.dart';
 import '../services/ui_preferences_store.dart';
 import '../services/tmdb_enrichment_service.dart';
@@ -265,7 +266,16 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     syncState.addListener(notifyListeners);
     _catBundle = CatBundle(rootDir: p.join(this.paths.dataDir, 'catbundle'));
     // TMDB 服务：配置引用是函数（设置页保存后无需重建服务）。
-    _tmdbService = TmdbService(config: () => _tmdbConfigStore.config);
+    //
+    // **必须显式传 `cache`**：`TmdbService` 里 `cache == null` 时 `_request` 的
+    // `readFirstFresh/readFirstAny/write` 分支全部恒不生效，磁盘缓存等于不存在
+    // （用户反馈：「进入详情页貌似没有 TMDB 缓冲，感觉每次都重新查询了」）。
+    // 存储根与 EPG 一致，都是 [AppPaths.cacheDir]。
+    _tmdbCache = TmdbCache(cacheDir: cacheDir);
+    _tmdbService = TmdbService(
+      config: () => _tmdbConfigStore.config,
+      cache: _tmdbCache,
+    );
     final node = SidecarRuntimeResolver.resolve('node');
     if (node != null) {
       _catRuntime = CatNodeRuntime(nodeCommand: node, log: this.log);
@@ -541,6 +551,17 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// 记住站点只是**锦上添花**，它不可用时应安静降级，而不是把选站点弄崩。
   UiPreferencesStore? _uiPreferences;
   late final TmdbService _tmdbService;
+
+  /// TMDB 磁盘缓存（文件落在 `TmdbCache.directory` = `<cache>/tmdb`）。
+  ///
+  /// 为什么在这里留一份引用：`TmdbService` 不暴露它手里的缓存实例，而「缓存到底
+  /// 接没接上」正是这次修复的核心——历史上就是构造服务时漏了 `cache` 参数，
+  /// 整个磁盘缓存静默失效而没人发现。测试只能从这里断言接线真的发生了。
+  late final TmdbCache _tmdbCache;
+
+  /// 仅供测试：断言 TMDB 服务确实拿到了磁盘缓存（目录指向 [paths] 的缓存根）。
+  @visibleForTesting
+  TmdbCache get tmdbCacheForTest => _tmdbCache;
   TmdbIdentityService? _tmdbIdentityService;
   TmdbSeasonService? _tmdbSeasonService;
   TmdbEnrichmentService? _tmdbEnrichmentService;
@@ -2046,6 +2067,13 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// 当前 TMDB 加载归属的详情运行号（`loadDetail` 每次自增）。
   int _tmdbRunId = 0;
 
+  /// 与站源详情**并行**启动的那一轮 TMDB 加载（在 [loadDetail] 里创建）。
+  ///
+  /// 为什么留句柄而不是 `unawaited` 丢掉：站源详情回来后要先等它收尾，再用权威
+  /// 线路补一次映射；丢掉句柄就只能重复发起请求或干脆不等。它的契约是不抛异常，
+  /// 但状态层一旦抛异常会吃掉已经成功的站源详情，所以那里仍用 try/catch 兜底。
+  Future<void>? _pendingTmdbLoad;
+
   /// 清除鉴权熔断（仅供测试：注入 401 后需要先清掉上一次的熔断窗口）。
   void clearAuthBlocksForTest() => _tmdbService.clearAuthBlocks();
 
@@ -2987,8 +3015,17 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   void clearDetail() {
     _detailRunId++;
     _tmdbRunId = _detailRunId;
-    // TMDB 状态是页面级临时状态：不清会让下一次进入详情页先渲染上一部剧的元数据。
-    _tmdbState?.clear();
+    // TMDB **故意不清**（以前这里 `_tmdbState?.clear()`）。
+    //
+    // 为什么改：作品维度的 TMDB 数据（匹配/详情/演职人员/推荐/视频/季集映射）被清掉
+    // 后，第二次进同一部剧必然先渲染一帧站源「原始模式」，等 TMDB 重新匹配、重发请求
+    // 回来才换成 TMDB 版本——用户反馈「点第二次还是会先显示原始模式后再等于会渲染成
+    // tmdb 版本」就是这个。留着，重进同一部剧首帧就能直出。
+    // 为什么这样安全（换了作品也不会串剧）：
+    // 1) `_tmdbRunId = _detailRunId` 照旧作废在途 TMDB 请求，旧响应不会写回状态；
+    // 2) 详情页渲染前先过归属门 `TmdbState.belongsTo`，保留的数据不属于本页影片时
+    //    所有 TMDB 渲染点按「无 TMDB」降级（browse_pages.dart 的 _tmdbOwnsThisPage）；
+    // 3) `loadDetail` 发现保留数据属于别的作品时也会先 `clear()`。
     _detailPhase = LoadPhase.idle;
     _detailResult = null;
     _detailError = null;
@@ -3712,6 +3749,25 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     _detailResult = null;
     _detailError = null;
     _detailPhase = LoadPhase.loading;
+    // TMDB 与站源详情**并行**启动：整条 TMDB 链（匹配→详情→季度→剧集→视频）以前排在
+    // 站源详情之后（本机实测站源详情 3.9~7.1s），首屏必然是站源「原始模式」，用户要等
+    // 两段时间相加才见到 TMDB 版本。元数据不依赖站源详情的结果，先跑起来。
+    // 这里只能用列表条目自带的线路（folder 还没展开）；站源详情回来后会再用 effective
+    // 的权威线路补一次映射，见下面的串行等待。
+    final tmdb = this.tmdb;
+    if (!tmdb.belongsTo(vod.vodId)) {
+      // 保留的数据属于别的作品：先清掉。归属门是渲染侧的防线，这里清状态本身，
+      // 保证新作品页连一帧旧标题/旧海报的机会都没有。
+      tmdb.clear();
+    }
+    _tmdbRunId = runId;
+    _pendingTmdbLoad = tmdb.loadForVod(
+      vod,
+      siteKey: site.key,
+      siteName: site.name,
+      configId: tmdbConfigId,
+      lines: playLinesOf(vod),
+    );
     notifyListeners();
     try {
       // folder 先取 t=<vod_id> 的资源，再逐个取 ids=<分享链> 的分集。
@@ -3755,7 +3811,33 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       }
       final effective = outcome.value.list.firstOrNull ?? vod;
       _selectedVod = effective;
+      // 站源详情已经可用：先推一次通知，让线路/选集立刻渲染出来。后面的 TMDB 收尾
+      // 即使要等，也不能把列表压在「加载中」里（那就等于把并行的收益又交回去了）。
+      notifyListeners();
+      // 等并行启动的那一轮 TMDB 收尾，再用权威线路补一次映射。为什么要等而不是
+      // 直接发第二次：同一作品换线路会清掉季度解析，两次调用叠在一起会互相覆盖。
+      // 只在「句柄仍属于本次 run」时取走并等待：这段时间里用户可能已经进了另一部剧，
+      // 那时字段里放的是**新 run** 的句柄，抢过来会既 wait 错对象又把它的收尾顺序
+      // 打乱（新 run 会读不到句柄而跳过等待）。
+      final pendingTmdbLoad = runId == _detailRunId ? _pendingTmdbLoad : null;
+      if (runId == _detailRunId) _pendingTmdbLoad = null;
+      if (pendingTmdbLoad != null) {
+        try {
+          await pendingTmdbLoad;
+        } catch (error) {
+          // 契约上它不抛（内部自行降级），但这里绝不能把已经成功的站源详情拖进
+          // 失败分支：元数据只是锦上添花。
+          log.debug(
+            '并行 TMDB 加载异常（已忽略）vod=${vod.vodId} error=$error',
+            scope: 'tmdb',
+          );
+        }
+      }
+      // 等待期间用户可能已经离开详情页或换了作品：runId 被取代就不再写回状态。
+      if (runId != _detailRunId) return;
       // TMDB 与标准站点共用完整线路；元数据失败不阻塞选集和播放。
+      // 这一次用 effective（folder 展开后的条目）的权威线路：季/集映射依赖它。它命中
+      // 同一作品 → 保留内存数据复用，详情/视频不会再打一次网络。
       _tmdbRunId = runId;
       unawaited(
         tmdb.loadForVod(
