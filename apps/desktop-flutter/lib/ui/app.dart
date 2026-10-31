@@ -18,7 +18,9 @@ import '../core/protocol.dart';
 import '../core/session_recovery.dart';
 import '../core/site_group.dart';
 import '../core/site_group_rules.dart';
+import '../core/source_key.dart';
 import '../services/app_paths.dart';
+import '../services/last_config_store.dart';
 import '../services/log_service.dart';
 import '../services/session_recovery_store.dart';
 import '../services/startup_trace.dart';
@@ -399,15 +401,27 @@ class _AppShellState extends State<AppShell> {
   bool? _boundaryAccepted;
   String? _handledAutoMedia;
 
+  /// 桥接源恢复失败的横幅状态（`null` = 不显示）。
+  BridgeRestoreFailure? _bridgeBanner;
+
+  /// 横幅对应的那条记忆。
+  ///
+  /// 没有 last-config.json 时横幅来自兜底推断的记忆，而 lastConfigRecord 是
+  /// null——「重试」必须沿用它，否则按钮点了没反应。
+  LastConfigRecord? _bannerMemory;
+
+  /// 「重试」进行中：按钮置忙，避免连点触发重复探测。
+  bool _restoringBridge = false;
+
   @override
   void initState() {
     super.initState();
     _state.addListener(_onStateChanged);
     _checkBoundary();
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoPlayMedia());
-    // 启动时尝试自动接入最近使用的桥接线路（用户需求 2026-10-09）。
+    // 启动时恢复「上一次使用的配置」（Phase 10）。
     // 放到 post-frame 之后：不能在首帧前做网络请求，否则会把启动变慢。
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoConnect());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _restoreLastConfig());
   }
 
   AppState get _state => widget.state;
@@ -443,61 +457,236 @@ class _AppShellState extends State<AppShell> {
     _state.log.info('用户已确认使用边界提示', scope: 'compliance');
   }
 
-  /// 启动时自动接入最近使用的桥接线路（用户需求 2026-10-09）。
+  /// 启动时恢复「上一次使用的配置」（Phase 10）。
   ///
-  /// 只做一件事：**探测**历史里最近使用的地址。探不通就安静放弃——不扫描、
-  /// 不轮询、不弹错误（扫描是用户显式动作，`design/01` §4.4）。
+  /// 三条分支，与 `last-config.json` 的内容一一对应：
+  /// - **没有记忆且当前配置是本地源**：与升级前完全一致（加载当前站点首页，
+  ///   不探测任何设备）；
+  /// - **没有记忆但 is_active 是桥接源**（从旧版本升级上来的真实场景）：按它的
+  ///   设备 uuid 兜底推断一条等价记忆，照样探一次——遗漏这条分支时这类用户的
+  ///   站点 api 会一直停在旧网关地址上，而且连横幅都看不到；
+  /// - **本地源**：内容就在库里，直接恢复，不发起任何网络请求；
+  /// - **桥接源**：本机只有上次落库的副本，先探一次设备；探通则重新拉取
+  ///   **该源**并用 sourceKey 精确激活（同一台设备可能有多个源，按 origin
+  ///   挑只会命中最后导入的那条）；探不通则给出非阻塞横幅，把失败分类
+  ///   原样呈现，并提供「重试」「切换播放源」。
   ///
-  /// 探通后导入站点并切到该配置：用户上次用的就是这条线路，现在还能连上，
-  /// 直接给他可用状态而不需要重走一遍「选站点 → 接入 → 导入」。
-  ///
-  /// 两个必须的守卫：
-  /// - 命令行媒体冒烟路径不跑（那是无配置的截图/验证场景）；
-  /// - 不曾有历史时不跑。
-  Future<void> _maybeAutoConnect() async {
+  /// 全程只探测一次：不扫描、不轮询、不延时重试（扫描是用户显式动作，
+  /// `design/01` §4.4；重试由用户点击触发）。
+  Future<void> _restoreLastConfig() async {
     if (!mounted) return;
     if (widget.startup.media != null) return;
-    final sync = _state.syncState;
-    if (sync.deviceHistory.isEmpty) {
+    // 兜底推断（不写盘）：没有 last-config.json 不代表「没有上次使用的源」——
+    // 旧版本升级上来的用户本来就没有这份文件，而库里的 is_active 仍在指向一条
+    // 桥接记录。推断只用于这一次探测，记忆仍只由显式选择写入。
+    final remembered = _state.lastConfigRecord;
+    final memory = remembered ?? _inferBridgeMemoryFromActive();
+    if (memory == null) {
       // 没有接入历史（或自动接入不适用）时仍必须把当前站点的首页拉起来，
       // 否则启动后停在「没有内容」空态，要用户手动点分类或刷新才有数据
       // （用户反馈 2026-10-09：「刚启动时没有默认加载数据」）。
       await _loadInitialHome();
       return;
     }
-    final device = await sync.tryAutoConnect();
+    if (memory.isLocal) {
+      await _state.restoreLastConfig();
+      if (!mounted) return;
+      setState(() => _section = ShellSection.browse);
+      await _loadInitialHome();
+      return;
+    }
+    if (!memory.isBridge) {
+      await _loadInitialHome();
+      return;
+    }
+    // 记录已被用户删掉：静默回落默认配置并留一条日志，不弹窗。
+    if (!_state.lastConfigRecordAliveFor(memory)) {
+      _state.log.info(
+        '上次使用的桥接配置已不存在（${memory.sourceKey}），保持当前配置',
+        scope: 'config',
+      );
+      // 兜底推断出来的记忆从没落过盘，没有可清的东西。
+      if (remembered != null) _state.forgetLastConfig();
+      await _loadInitialHome();
+      return;
+    }
+    final address = _state.deviceAddressForUuid(memory.deviceUuid);
+    if (address.isEmpty) {
+      _state.log.warning(
+        '上次使用的桥接设备不在接入历史里（device=${memory.deviceUuid}），'
+        '无法自动重连',
+        scope: 'bridge',
+      );
+      // 连地址都没有就无从探测：直接给横幅，让用户手动切源或去接入页重接。
+      _showBridgeBanner(
+        memory,
+        address: '',
+        deviceName: _state.deviceNameForUuid(memory.deviceUuid),
+        error: AppError(
+          AppErrorKind.bridgeUnreachable,
+          '找不到上次使用的安卓设备地址（设备接入历史里没有这台设备）',
+          detail: memory.deviceUuid,
+        ),
+      );
+      await _loadInitialHome();
+      return;
+    }
+    await _tryRestoreBridge(address, memory);
+    await _loadInitialHome();
+  }
+
+  /// 没有记忆时按库里的 is_active 兜底推断一条等价记忆（不写盘）。
+  ///
+  /// 只因**桥接源**才推断：本地源的内容就在库里，零探测直接加载首页即可，
+  /// 推断它对用户没有任何收益，反而多出一个可能出错的环节。
+  LastConfigRecord? _inferBridgeMemoryFromActive() {
+    final record = _state.activeRecord;
+    if (record == null) return null;
+    final interfaceKey = record.bridgeInterfaceKey.trim();
+    if (interfaceKey.isEmpty) return null;
+    final sourceKey = AppState.sourceKeyOfRecord(record);
+    final deviceUuid = record.bridgeDevice.trim();
+    if (deviceUuid.isEmpty || sourceKey.isEmpty) return null;
+    return LastConfigRecord(
+      sourceKey: sourceKey,
+      recordId: record.id,
+      kind: sourceKeyKindBridge,
+      deviceUuid: deviceUuid,
+      interfaceKey: interfaceKey,
+      // 推断记录不入库也不落盘，时间戳只用来满足构造要求。
+      savedAt: DateTime.fromMillisecondsSinceEpoch(0),
+    );
+  }
+
+  /// 探测 + 重新导入 + 精确激活一条桥接源；失败时置横幅状态。
+  Future<void> _tryRestoreBridge(String address, LastConfigRecord memory) async {
+    final sync = _state.syncState;
+    final device = await sync.probeAutoConnectTarget(address);
     if (!mounted) return;
     if (device == null) {
-      // 最近那条线路连不上：不影响用户用当前配置，照常加载首页。
-      await _loadInitialHome();
+      _showBridgeBanner(
+        memory,
+        address: address,
+        deviceName: _state.lastConfigDevice?.name ??
+            _state.deviceNameForUuid(memory.deviceUuid),
+        error: sync.lastError ??
+            AppError(
+              AppErrorKind.bridgeUnreachable,
+              '设备探测失败：$address',
+              detail: address,
+            ),
+      );
       return;
     }
-    final ok = await sync.importSites(device.reachableBase);
+    _state.pinLastConfigDevice(device);
+    final ok = await sync.importSites(
+      device.reachableBase,
+      interfaceKey: memory.interfaceKey,
+    );
     if (!mounted) return;
     if (!ok) {
-      await _loadInitialHome();
+      // 探通了但源拉不下来（设备上该源被删/网关版本过旧）：仍然给横幅，
+      // 分类由 `importSites` 写进 `lastError`，不折叠成一句「连不上」。
+      _showBridgeBanner(
+        memory,
+        address: device.reachableBase,
+        deviceName: device.name,
+        error: sync.lastError ??
+            AppError(
+              AppErrorKind.bridgeUnreachable,
+              '该播放源导入失败',
+              detail: device.reachableBase,
+            ),
+      );
       return;
     }
-    // 导入产生的是**新配置记录**（`makeActive: false`，Q10 不覆盖当前配置）。
-    // 自动接入的目的是「开箱可用」，因此这里显式激活刚导入的那条记录。
-    ConfigRecord? record;
-    for (final item in _state.configs) {
-      if (item.origin == device.reachableBase) record = item;
-    }
-    if (record == null) {
-      await _loadInitialHome();
-      return;
-    }
-    await _state.activateConfigRecord(record.id);
+    // 按记忆自带的坐标激活：兜底推断出来的记忆不在 lastConfigRecord 里。
+    final activated = await _state.activateConfigBySourceKey(
+      memory.sourceKey,
+      recordId: memory.recordId,
+    );
     if (!mounted) return;
-    setState(() => _section = ShellSection.browse);
+    if (!activated) {
+      _showBridgeBanner(
+        memory,
+        address: device.reachableBase,
+        deviceName: device.name,
+        error: AppError(
+          AppErrorKind.configNotFound,
+          '上次使用的配置记录已不存在',
+          detail: memory.sourceKey,
+        ),
+      );
+      return;
+    }
+    setState(() {
+      _section = ShellSection.browse;
+      _bridgeBanner = null;
+      _bannerMemory = null;
+    });
     _state.log.info(
-      '已自动接入最近使用的桥接线路并切换配置 #${record.id}',
+      '已恢复上次使用的桥接配置（${memory.sourceKey}）',
       scope: 'bridge',
     );
-    // `activateConfigRecord` 只恢复配置不拉首页（它是给「配置管理页」用的），
-    // 因此这里仍需显式加载，否则切过去还是空页。
-    await _loadInitialHome();
+  }
+
+  void _showBridgeBanner(
+    LastConfigRecord memory, {
+    required String address,
+    required String deviceName,
+    required AppError error,
+  }) {
+    setState(() {
+      _bannerMemory = memory;
+      _bridgeBanner = BridgeRestoreFailure(
+        sourceKey: memory.sourceKey,
+        deviceName: deviceName,
+        address: address,
+        error: error,
+      );
+    });
+  }
+
+  /// 横幅「重试」：只在用户点击时重探一次（复用同一条恢复路径，带 busy 态）。
+  Future<void> _retryBridgeRestore() async {
+    final banner = _bridgeBanner;
+    // 没有记忆的兜底恢复：横幅自带那条推断出来的记忆。
+    final memory = _state.lastConfigRecord ?? _bannerMemory;
+    if (banner == null || memory == null || _restoringBridge) return;
+    setState(() => _restoringBridge = true);
+    try {
+      final address = banner.address.isNotEmpty
+          ? banner.address
+          : _state.deviceAddressForUuid(memory.deviceUuid);
+      if (address.isEmpty) {
+        setState(() {
+          _bridgeBanner = BridgeRestoreFailure(
+            sourceKey: banner.sourceKey,
+            deviceName: banner.deviceName,
+            address: '',
+            error: AppError(
+              AppErrorKind.bridgeUnreachable,
+              '找不到上次使用的安卓设备地址（设备接入历史里没有这台设备）',
+              detail: banner.deviceName,
+            ),
+          );
+        });
+        return;
+      }
+      await _tryRestoreBridge(address, memory);
+      await _loadInitialHome();
+    } finally {
+      if (mounted) setState(() => _restoringBridge = false);
+    }
+  }
+
+  /// 横幅「切换播放源」：复用现有站点选择器，不另造一个选择器。
+  Future<void> _openSitePickerFromBanner() async {
+    setState(() {
+      _bridgeBanner = null;
+      _bannerMemory = null;
+    });
+    await _openSitePicker();
   }
 
   /// 启动时把当前站点的首页拉起来（幂等：已有内容或正在加载就不重复）。
@@ -645,6 +834,15 @@ class _AppShellState extends State<AppShell> {
           ),
           if (_state.storageWarnings.isNotEmpty)
             _StorageWarningBanner(warnings: _state.storageWarnings),
+          if (_bridgeBanner != null)
+            BridgeRestoreBanner(
+              key: const ValueKey('bridge-restore-banner'),
+              failure: _bridgeBanner!,
+              busy: _restoringBridge,
+              onRetry: _retryBridgeRestore,
+              onSwitchSource: _openSitePickerFromBanner,
+              onDismiss: () => setState(() => _bridgeBanner = null),
+            ),
           if (_state.pendingRecovery != null)
             RecoveryBanner(
               marker: _state.pendingRecovery!,
@@ -701,6 +899,106 @@ class _AppShellState extends State<AppShell> {
       case ShellSection.logs:
         return LogsPage(state: _state);
     }
+  }
+}
+
+/// 桥接源恢复失败的描述（横幅只做展示，判定留在 `_AppShellState`）。
+class BridgeRestoreFailure {
+  const BridgeRestoreFailure({
+    required this.sourceKey,
+    required this.deviceName,
+    required this.address,
+    required this.error,
+  });
+
+  final String sourceKey;
+
+  /// 设备名（设备历史里没有这台时退化成 uuid）。
+  final String deviceName;
+
+  /// 当时探测的地址；空串表示连地址都没找到。
+  final String address;
+
+  /// 失败分类与文案，**原样**呈现给用户。
+  final AppError error;
+}
+
+/// 桥接源恢复失败横幅。
+///
+/// 为什么必须是**非阻塞**横幅而不是弹窗：启动恢复是应用自己的动作，用户没有
+/// 发起任何操作，不应该被一个对话框拦在首屏之前。横幅同时承担「解释原因」与
+/// 「给出下一个动作」——只解释不给出路，等于让用户自己去配置页翻。
+class BridgeRestoreBanner extends StatelessWidget {
+  const BridgeRestoreBanner({
+    super.key,
+    required this.failure,
+    required this.onRetry,
+    required this.onSwitchSource,
+    required this.onDismiss,
+    this.busy = false,
+  });
+
+  final BridgeRestoreFailure failure;
+  final bool busy;
+  final VoidCallback onRetry;
+  final VoidCallback onSwitchSource;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = scheme.onTertiaryContainer;
+    final address = failure.address;
+    // 分类必须原样出现（bridgeUnreachable / bridgeNoGateway / hostMismatch
+    // 是三种完全不同的处置），所以文案由分类决定，而不是笼统的「连不上」。
+    final reason =
+        '${failure.error.message.isEmpty ? describeErrorKind(failure.error.kind) : failure.error.message}'
+        '（${failure.error.kind.name}）';
+    return Container(
+      key: const ValueKey('bridge-restore-banner-body'),
+      width: double.infinity,
+      color: scheme.tertiaryContainer,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpace.xl,
+        vertical: AppSpace.sm,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Icon(Icons.link_off, size: 18, color: color),
+          const SizedBox(width: AppSpace.sm),
+          Expanded(
+            child: Text(
+              '上次使用的安卓播放源连不上：'
+              '${failure.deviceName.isEmpty ? '未知设备' : failure.deviceName}'
+              '${address.isEmpty ? '' : ' @ $address'}'
+              ' · $reason'
+              '${address.isEmpty ? '。请到「安卓设备接入」重新接入该设备' : ''}',
+              key: const ValueKey('bridge-restore-banner-text'),
+              style: TextStyle(color: color, fontSize: 12),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          TextButton(
+            key: const ValueKey('bridge-restore-retry'),
+            onPressed: busy ? null : onRetry,
+            child: Text(busy ? '重试中…' : '重试'),
+          ),
+          TextButton(
+            key: const ValueKey('bridge-restore-switch-source'),
+            onPressed: onSwitchSource,
+            child: const Text('切换播放源'),
+          ),
+          IconButton(
+            key: const ValueKey('bridge-restore-dismiss'),
+            tooltip: '关闭',
+            onPressed: onDismiss,
+            icon: Icon(Icons.close, size: 16, color: color),
+          ),
+        ],
+      ),
+    );
   }
 }
 

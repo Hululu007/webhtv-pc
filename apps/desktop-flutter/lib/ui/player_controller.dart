@@ -250,31 +250,59 @@ class PlayerController extends ChangeNotifier {
     return _tracks.audio.where((track) => track.id != 'auto' && track.id != 'no').firstOrNull;
   }
 
+  /// 引擎上报的原始音轨（标题未加工）。
+  ///
+  /// 与 [audioTrackOptions] 分开：菜单标签会拼上语言与序号，而轨道记忆要做
+  /// title 精确回落，只能拿引擎原文（拼过的标签下次一定对不上）。
+  List<PlayerTrackInfo> get audioTrackInfos => _tracks.audio
+      .map(
+        (track) => PlayerTrackInfo(
+          id: track.id,
+          title: track.title ?? '',
+          language: track.language ?? '',
+          isDefault: track.isDefault ?? false,
+        ),
+      )
+      .toList(growable: false);
+
+  /// 引擎上报的原始视频轨（见 [audioTrackInfos]）。
+  List<PlayerTrackInfo> get videoTrackInfos => _tracks.video
+      .map(
+        (track) => PlayerTrackInfo(
+          id: track.id,
+          title: track.title ?? '',
+          language: track.language ?? '',
+          isDefault: track.isDefault ?? false,
+        ),
+      )
+      .toList(growable: false);
+
+  /// 内嵌字幕轨，id 用菜单里的 `embedded:<trackId>` 形态。
+  ///
+  /// 用菜单 id 而不是裸 trackId：记忆写回时拿到的就是菜单项 id，
+  /// 两边同一套标识才不用来回剥前缀。
+  List<PlayerTrackInfo> get embeddedSubtitleTrackInfos => <PlayerTrackInfo>[
+    for (final track in _tracks.subtitle)
+      if (isRealSubtitleTrackId(track.id))
+        PlayerTrackInfo(
+          id: 'embedded:${track.id}',
+          title: track.title ?? '',
+          language: track.language ?? '',
+          isDefault: track.isDefault ?? false,
+        ),
+  ];
+
   /// 音轨菜单（Phase 9）。空表表示引擎尚未上报轨道。
   List<PlayerTrackOption> get audioTrackOptions => buildPlayerTrackOptions(
     kind: PlayerTrackKind.audio,
-    tracks: _tracks.audio.map(
-      (track) => PlayerTrackInfo(
-        id: track.id,
-        title: track.title ?? '',
-        language: track.language ?? '',
-        isDefault: track.isDefault ?? false,
-      ),
-    ),
+    tracks: audioTrackInfos,
     selectedId: _player.state.track.audio.id,
   );
 
   /// 视频轨菜单（Phase 9）。
   List<PlayerTrackOption> get videoTrackOptions => buildPlayerTrackOptions(
     kind: PlayerTrackKind.video,
-    tracks: _tracks.video.map(
-      (track) => PlayerTrackInfo(
-        id: track.id,
-        title: track.title ?? '',
-        language: track.language ?? '',
-        isDefault: track.isDefault ?? false,
-      ),
-    ),
+    tracks: videoTrackInfos,
     selectedId: _player.state.track.video.id,
   );
 

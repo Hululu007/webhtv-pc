@@ -18,6 +18,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart' show Row;
 
 import '../core/ad_rules.dart';
+import '../core/android_bridge.dart';
 import '../core/android_sync.dart';
 import '../core/ai_config.dart';
 import '../core/app_error.dart';
@@ -50,6 +51,7 @@ import '../core/player_buttons.dart';
 import '../core/outbound_proxy.dart';
 import '../core/parse_failover.dart';
 import '../core/player_options.dart';
+import '../core/player_tracks.dart';
 import '../core/protocol.dart';
 import '../core/proxy_policy.dart';
 import '../core/realtime_sync.dart';
@@ -75,6 +77,7 @@ import '../services/csp_jar_probe.dart';
 import '../services/direct_spider_registrar.dart';
 import '../services/epg_service.dart';
 import '../services/jar_intake.dart';
+import '../services/last_config_store.dart';
 import '../services/log_service.dart';
 import '../services/outbound_proxy.dart';
 import '../services/live_service.dart';
@@ -321,6 +324,18 @@ class AppState extends ChangeNotifier implements SyncStateHost {
 
   /// 会话恢复存储（Phase 9 P2-8）；bootstrap 时创建。
   SessionRecoveryStore? _sessionRecovery;
+
+  /// 「最后一次使用的配置」记忆；bootstrap 时创建。
+  LastConfigStore? _lastConfigStore;
+
+  /// bootstrap 读到的记忆（UI 首帧后才据此决定要不要探测桥接设备）。
+  LastConfigRecord? _lastConfigRecord;
+
+  /// 恢复桥接源时锁定的设备（横幅要展示设备名与地址）。
+  ///
+  /// 为什么不回读 deviceHistory：用户重试之前可能清理过历史，而横幅描述的
+  /// 是「刚才探测的那台设备」，两者可能是两回事。
+  AndroidDevice? _lastConfigPin;
 
   /// 上一次未正常退出留下的标记；用户处理前一直保留。
   SessionMarker? _pendingRecovery;
@@ -611,6 +626,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   AppDatabase? get database => _database;
   ConfigRecord? get activeRecord => _activeRecord;
   List<ConfigRecord> get configs => _configs;
+
+  /// bootstrap 读到的「最后一次使用的配置」记忆（没有记录时为 `null`）。
+  LastConfigRecord? get lastConfigRecord => _lastConfigRecord;
+
   Site? get selectedSite => _selectedSite;
   SiteResult? get homeResult => _homeResult;
   SiteResult? get categoryResult => _categoryResult;
@@ -677,6 +696,55 @@ class AppState extends ChangeNotifier implements SyncStateHost {
             mode: mode,
           ) ??
           Future<void>.value(),
+    );
+  }
+
+  /// 读取某部作品某线路某集记下的轨道选择；没有记录时返回 null。
+  ///
+  /// 键由 `trackChoiceKey` 统一拼装：线路（[flag]）与集都在键里，
+  /// 所以换线路、换集拿不到同一条记忆（用户明确要求的口径——不同线路的
+  /// 资源本身可能不同，跨线路沿用只会切成错误的轨）。
+  TrackChoice? playerTrackChoiceFor({
+    required PlayerTrackSlot slot,
+    required String siteKey,
+    required String vodId,
+    required String flag,
+    required String episodeId,
+    required String episodeName,
+  }) {
+    final key = trackChoiceKey(
+      siteKey: siteKey,
+      vodId: vodId,
+      flag: flag,
+      episodeId: episodeId,
+      episodeName: episodeName,
+      slot: slot,
+    );
+    return _uiPreferences?.trackChoice(key);
+  }
+
+  /// 持久化用户**显式**选中的轨道；写盘失败不影响当前播放。
+  ///
+  /// 只允许显式选择调用：自动回落的结果写进来，一次失配就会把用户的选择冲掉。
+  void rememberPlayerTrackChoice({
+    required PlayerTrackSlot slot,
+    required String siteKey,
+    required String vodId,
+    required String flag,
+    required String episodeId,
+    required String episodeName,
+    required TrackChoice choice,
+  }) {
+    final key = trackChoiceKey(
+      siteKey: siteKey,
+      vodId: vodId,
+      flag: flag,
+      episodeId: episodeId,
+      episodeName: episodeName,
+      slot: slot,
+    );
+    unawaited(
+      _uiPreferences?.rememberTrackChoice(key, choice) ?? Future<void>.value(),
     );
   }
 
@@ -1525,7 +1593,14 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// `local|<origin>`；没有生效配置时为空串。
   String get activeSourceKey {
     final record = _activeRecord;
-    if (record == null) return '';
+    return record == null ? '' : sourceKeyOfRecord(record);
+  }
+
+  /// 一条配置记录的播放源标识。
+  ///
+  /// 与 [activeSourceKey] 必须**同源**：启动恢复时按这个标识判断「记忆里那条
+  /// 是不是现在这条」，两处规则一旦漂移就会恢复错配置。
+  static String sourceKeyOfRecord(ConfigRecord record) {
     final interfaceKey = record.bridgeInterfaceKey.trim();
     if (interfaceKey.isNotEmpty) {
       final key = BridgeSourceKey.of(
@@ -1643,6 +1718,11 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     }
     recovery.beginSession(appVersion: appVersion);
 
+    // 「最后一次使用的配置」记忆（Phase 10）：必须早于设备历史读取之后的
+    // 任何决定，但**读取本身不探测**——探测等 UI 首帧之后再做（不能拖慢启动）。
+    _lastConfigStore = LastConfigStore(dataDir: paths.dataDir, log: log);
+    _lastConfigRecord = _lastConfigStore!.read();
+
     // 安卓接入与同步设置（Phase 5）：读取失败不阻塞启动，退回默认（全关）。
     await syncState.load();
 
@@ -1691,6 +1771,26 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       try {
         _configs = _database!.listConfigs();
         _activeRecord = _database!.activeConfig();
+        // 启动恢复以「最后一次使用的配置」为准：`is_active` 只由本机路径维护，
+        // 而交换/恢复数据目录时它可能指向一条并不是用户最后在用的记录。
+        // 只认**已存在的记录**：记忆指向已删除的记录时不改任何东西（静默回落）。
+        final memory = _lastConfigRecord;
+        if (memory != null) {
+          final remembered = _recordBySourceKey(memory.sourceKey, memory.recordId);
+          if (remembered != null && remembered.id != _activeRecord?.id) {
+            try {
+              _database!.activateConfig(remembered.id);
+              _configs = _database!.listConfigs();
+              _activeRecord = _database!.activeConfig();
+              log.info(
+                '按上次使用的配置恢复当前配置 #${remembered.id}',
+                scope: 'config',
+              );
+            } catch (error) {
+              log.warning('按上次使用的配置恢复失败：$error', scope: 'config');
+            }
+          }
+        }
         final record = _activeRecord;
         if (record != null && record.json.isNotEmpty) {
           // 猫源配置的站点 `api` 指向本机随机端口，重启后端口已变；必须按保存的
@@ -2564,6 +2664,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         _database!.saveConfigSites(recordId, config.sites);
         _configs = _database!.listConfigs();
         _activeRecord = _database!.activeConfig();
+        // 导入即切换（`makeActive: true`）也是「用户显式选了这个源」。不记的话，
+        // 下次启动会按旧记忆把用户刚导入的配置又换掉。
+        final active = _activeRecord;
+        if (active != null) _rememberLastConfig(active);
       }
 
       _notice = config.notice ?? '配置导入成功：${config.sites.length} 个站点';
@@ -2629,6 +2733,10 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       _configPhase = LoadPhase.ready;
       // 切换配置 → 重建 TMDB 服务，使 `config_id` 隔离生效（`02` §14 Q2）。
       _resetTmdbServices();
+      // 用户显式切换成功 = 「这次用的就是它」：只有这里（以及导入成功路径，
+      // 它最终也会走激活）才更新记忆，自动接入之类的后台动作不写，否则一次
+      // 探测失败就会把用户的真实选择覆盖成别的源。
+      _rememberLastConfig(record);
       log.info('切换配置：${record.name} cat=${reserved != null}', scope: 'config');
       notifyListeners();
       final site = _selectedSite;
@@ -2643,6 +2751,181 @@ class AppState extends ChangeNotifier implements SyncStateHost {
       notifyListeners();
       return false;
     }
+  }
+
+  /// 记住「最后一次使用的配置」（写 `<data>/last-config.json`）。
+  ///
+  /// 只记身份不记内容：内容已在 `configs` 表里，再存一份就是两份真相。
+  void _rememberLastConfig(ConfigRecord record) {
+    final store = _lastConfigStore;
+    if (store == null) return;
+    final sourceKey = sourceKeyOfRecord(record);
+    final written = store.remember(sourceKey: sourceKey, recordId: record.id);
+    _lastConfigRecord = written;
+    if (written == null) {
+      log.warning(
+        '无法记住上次使用的配置 #${record.id}（来源标识无效或写盘失败）',
+        scope: 'config',
+      );
+    }
+  }
+
+  /// 记忆里的桥接源要探测的地址：按 **deviceUuid** 在设备接入历史里找。
+  ///
+  /// 不用 `lastBridgeAddress`：那是「最近一次成功接入」的地址，用户中途接过
+  /// 别的设备时它指向的是**另一台**设备，与他上次在用的源无关。
+  String lastConfigDeviceAddress() {
+    final memory = _lastConfigRecord;
+    if (memory == null || !memory.isBridge) return '';
+    return deviceAddressForUuid(memory.deviceUuid);
+  }
+
+  /// 按设备 uuid 找接入地址。
+  ///
+  /// 单独开一个入口，是因为「没有记忆时按 is_active 兜底推断」那条路径手里
+  /// 只有设备 uuid（推断出来的记录不写盘，也不进 lastConfigRecord）。
+  String deviceAddressForUuid(String uuid) {
+    final key = uuid.trim();
+    if (key.isEmpty) return '';
+    for (final entry in syncState.deviceHistory) {
+      if (entry.uuid == key) return entry.address;
+    }
+    return '';
+  }
+
+  /// 记忆里那台设备的名字（横幅要在**探测失败时**也能说出是哪台设备）。
+  ///
+  /// 探测失败就拿不到 `AndroidDevice`，此时只能回读设备接入历史：
+  /// 「未知设备」对用户没有任何帮助，他还得自己去接入页猜。
+  String lastConfigDeviceName() {
+    final memory = _lastConfigRecord;
+    if (memory == null || !memory.isBridge) return '';
+    return deviceNameForUuid(memory.deviceUuid);
+  }
+
+  /// 按设备 uuid 找设备名；历史里没有这台设备时回退成 uuid 本身。
+  ///
+  /// 回退成 uuid 而不是「未知设备」：横幅要让用户认得出是哪台设备，哪怕只能
+  /// 给出机器标识，也比他回接入页一台台去猜强。
+  String deviceNameForUuid(String uuid) {
+    final key = uuid.trim();
+    if (key.isEmpty) return '';
+    for (final entry in syncState.deviceHistory) {
+      if (entry.uuid == key) return entry.name;
+    }
+    return key;
+  }
+
+  /// 恢复桥接源时锁定的设备（无则 `null`）。
+  AndroidDevice? get lastConfigDevice => _lastConfigPin;
+
+  void pinLastConfigDevice(AndroidDevice? device) {
+    _lastConfigPin = device;
+    notifyListeners();
+  }
+
+  /// 恢复「最后一次使用的配置」（Phase 10）。
+  ///
+  /// 三条语义，缺一不可：
+  /// - **本地源**：内容在库里，直接切过去即可，不发任何网络请求；
+  /// - **桥接源**：本机只有上次落库的内容，设备上的源可能改名/改地址，所以
+  ///   必须由调用方先探测，这里只认 [activateLastConfig]；
+  /// - **记录已不存在**：静默回落默认配置并写一条日志——这是「用户删过配置」，
+  ///   不是故障，不该弹窗（用户明确要求）。
+  ///
+  /// 返回是否真的切换成功。调用方负责首页加载。
+  Future<bool> restoreLastConfig() async {
+    final store = _lastConfigStore;
+    final memory = _lastConfigRecord;
+    if (store == null || memory == null) return false;
+    final record = _recordBySourceKey(memory.sourceKey, memory.recordId);
+    if (record == null) {
+      log.info(
+        '上次使用的配置已不存在（sourceKey=${memory.sourceKey} '
+        '#${memory.recordId}），保持当前配置',
+        scope: 'config',
+      );
+      store.clear();
+      _lastConfigRecord = null;
+      return false;
+    }
+    // 已经是它：bootstrap 按 `is_active` 恢复出来的就是这条，不必再切一遍
+    // （再切一次会重建猫源、重发首页请求，纯属放大启动开销）。
+    if (_activeRecord?.id == record.id) return true;
+    return activateConfigRecord(record.id);
+  }
+
+  /// 激活记忆里那条**指定来源**的配置（桥接源探测成功后调用）。
+  ///
+  /// 为什么必须按 sourceKey 而不是按 origin：同一台安卓设备上的多个源 origin
+  /// 全是同一个网关地址，按 origin 挑只会命中「最后导入的那条」，而用户上次
+  /// 用的是哪条只有 sourceKey 记得住。
+  Future<bool> activateLastConfig() async {
+    final memory = _lastConfigRecord;
+    if (memory == null) return false;
+    return activateConfigBySourceKey(
+      memory.sourceKey,
+      recordId: memory.recordId,
+    );
+  }
+
+  /// 按来源标识精确激活一条记录。
+  ///
+  /// 与 [activateLastConfig] 的差别只在**坐标从哪来**：这里由调用方给。兜底
+  /// 推断（没有 last-config.json、但 is_active 仍是桥接源）手里是一条临时构造
+  /// 的记忆，它不住在 lastConfigRecord 里，走不了那个按记忆取坐标的入口。
+  Future<bool> activateConfigBySourceKey(
+    String sourceKey, {
+    int recordId = 0,
+  }) async {
+    final record = _recordBySourceKey(sourceKey, recordId);
+    if (record == null) {
+      log.info(
+        '上次使用的配置已不存在（sourceKey=$sourceKey '
+        '#$recordId），保持当前配置',
+        scope: 'config',
+      );
+      return false;
+    }
+    if (_activeRecord?.id == record.id) return true;
+    return activateConfigRecord(record.id);
+  }
+
+  /// 记忆里的记录是否还活着（桥接源探测成功后、导入之前先查一次）。
+  bool get lastConfigRecordAlive {
+    final memory = _lastConfigRecord;
+    if (memory == null) return false;
+    return lastConfigRecordAliveFor(memory);
+  }
+
+  /// 指定的这条记忆指向的记录是否还活着。
+  ///
+  /// 单独开一个入口的理由同 [activateConfigBySourceKey]：兜底推断的临时记忆
+  /// 不在 lastConfigRecord 里。
+  bool lastConfigRecordAliveFor(LastConfigRecord memory) =>
+      _recordBySourceKey(memory.sourceKey, memory.recordId) != null;
+
+  /// 删除失效的记忆（记录已被用户删掉时调用，避免下次启动再查一遍）。
+  void forgetLastConfig() {
+    _lastConfigStore?.clear();
+    _lastConfigRecord = null;
+  }
+
+  ConfigRecord? _recordBySourceKey(String sourceKey, int fallbackId) {
+    final database = _database;
+    if (database != null) {
+      final bySource = database.configBySourceKey(sourceKey);
+      if (bySource != null) return bySource;
+      for (final item in database.listConfigs()) {
+        if (item.id == fallbackId) return item;
+      }
+      return null;
+    }
+    for (final item in _configs) {
+      if (item.id == fallbackId) return item;
+      if (sourceKeyOfRecord(item) == sourceKey) return item;
+    }
+    return null;
   }
 
   Future<void> deleteConfigRecord(int id) async {

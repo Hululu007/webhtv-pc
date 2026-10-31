@@ -1168,20 +1168,12 @@ class SyncState extends ChangeNotifier {
       scope: 'bridge',
     );
     // 自动接入**不弹错误**：探不通只是「上次那台设备不在」，不应该在启动时
-    // 给用户一个红色错误横幅。因此这里不走 probe（它会写 _lastError）。
+    // 给用户一个红色错误横幅。因此这里不写 _lastError。
     _busy = true;
     _stage = BridgeStage.probingDevice;
     notifyListeners();
     try {
-      final device = await _bridge.probeDevice(target);
-      if (!_devices.any((item) => item.uuid == device.uuid)) {
-        _devices = [..._devices, device];
-      }
-      await _rememberDevice(
-        uuid: device.uuid,
-        name: device.name,
-        address: device.reachableBase,
-      );
+      final device = await _probeAndRemember(target);
       log.info(
         '自动接入成功 name=${device.name} address=${redactUrl(device.reachableBase)}',
         scope: 'bridge',
@@ -1195,6 +1187,77 @@ class SyncState extends ChangeNotifier {
       _stage = null;
       notifyListeners();
     }
+  }
+
+  /// 探测一个**点名**的历史地址（上次使用的桥接源所属设备）。
+  ///
+  /// 与 [tryAutoConnect] 的区别只有一个关键的：目标不是「历史里最近那条」，
+  /// 而是上次真正在用的那台设备。用户可能中途接过别的设备，按「最近」接入会
+  /// 把他带到他并不想用的那一台上。
+  ///
+  /// 失败时把**分类**写进 [lastError] 并返回 `null`：这条路径的调用方要用分类
+  /// 给出一条可解释的非阻塞横幅，而不是猜「大概是连不上」。
+  Future<AndroidDevice?> probeAutoConnectTarget(String address) async {
+    final target = normalizeBase(address);
+    if (target.isEmpty) {
+      _lastError = AppError(
+        AppErrorKind.bridgeUnreachable,
+        '找不到上次使用的安卓设备地址（设备接入历史里没有这台设备）',
+        detail: address,
+      );
+      log.warning('自动接入无法定位设备地址：deviceHistory 里没有该设备',
+          scope: 'bridge');
+      notifyListeners();
+      return null;
+    }
+    if (_busy) return null;
+    log.info(
+      '尝试恢复上次使用的桥接源 address=${redactUrl(target)}',
+      scope: 'bridge',
+    );
+    _busy = true;
+    _stage = BridgeStage.probingDevice;
+    _lastError = null;
+    notifyListeners();
+    try {
+      final device = await _probeAndRemember(target);
+      log.info(
+        '恢复桥接源成功 name=${device.name} '
+        'address=${redactUrl(device.reachableBase)}',
+        scope: 'bridge',
+      );
+      return device;
+    } on AppError catch (error) {
+      _lastError = error;
+      log.warning('恢复桥接源失败：${error.logLine}', scope: 'bridge');
+      return null;
+    } catch (error) {
+      _lastError = AppError(
+        AppErrorKind.bridgeUnreachable,
+        '设备探测失败：$error',
+        cause: error,
+      );
+      log.warning('恢复桥接源失败：$error', scope: 'bridge');
+      return null;
+    } finally {
+      _busy = false;
+      _stage = null;
+      notifyListeners();
+    }
+  }
+
+  /// 探测并记住设备（[tryAutoConnect] 与 [probeAutoConnectTarget] 共用）。
+  Future<AndroidDevice> _probeAndRemember(String target) async {
+    final device = await _bridge.probeDevice(target);
+    if (!_devices.any((item) => item.uuid == device.uuid)) {
+      _devices = [..._devices, device];
+    }
+    await _rememberDevice(
+      uuid: device.uuid,
+      name: device.name,
+      address: device.reachableBase,
+    );
+    return device;
   }
 
   /// 扫描局域网（仅用户显式触发，`design/01` §4.4）。

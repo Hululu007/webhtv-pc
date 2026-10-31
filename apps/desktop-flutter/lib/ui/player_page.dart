@@ -386,6 +386,23 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
 
   /// 当前画面显示模式，不改变原始媒体流。
   PlayerVideoFitMode _videoFitMode = PlayerVideoFitMode.contain;
+
+  /// 本集（含线路）记住的轨道选择；每次 [_load] 重读。
+  final Map<PlayerTrackSlot, TrackChoice> _rememberedTrackChoices = {};
+
+  /// 已经应用过记忆的槽：引擎在一次加载里会多次上报轨道表（先空表、
+  /// 再补齐，中途切轨还会再报），每次都重新 set 会把用户的手动切换顶回去。
+  ///
+  /// **只有真正命中并调用了 setTrack 才加进来**：表非空不代表能匹配上
+  /// （首帧只有 `auto` 这类伪轨时三级回落必然返回 null），提前标记会让该槽
+  /// 在本集内永久失去重试机会。
+  final Set<PlayerTrackSlot> _appliedTrackChoices = {};
+
+  /// 各槽上一次尝试恢复时看到的轨道 id 列表（按引擎上报顺序）。
+  ///
+  /// 未命中时不标记已应用，但也不能任由每次 notifyListeners 都重算+写日志：
+  /// 只有轨道集合真的变了（引擎补齐了真实轨）才值得再试一次。
+  final Map<PlayerTrackSlot, List<String>> _lastTriedTrackIds = {};
   PlayerSubtitleStyle _subtitleStyle = const PlayerSubtitleStyle();
   double? _gestureRateBeforeLongPress;
 
@@ -451,6 +468,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     // 也会立即跳下一集。
     _maybeAutoSkip();
     _maybeAdvanceOnGenuineEnd();
+    _applyRememberedTrackChoices();
   }
 
   /// 自动跳过片头/片尾（`docs/phase9/design/01` §3）。
@@ -714,6 +732,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     // 若加载失败而不回滚，续播上下文（原集 + 原进度）就已丢失，
     // 用户看到的是「上一集失败 → 已经切到下一集」。
     final intent = _request;
+    // 轨道记忆的键里含线路与集，换集/换线路后必须重读，上一集的记忆绝不能带过来。
+    _loadRememberedTrackChoices();
     _skipArmed = false;
     _introSkipped = false;
     _outroSkipped = false;
@@ -914,6 +934,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   /// 顺序：先登记播放结果里的 `subs`，再自动启用默认/强制外挂字幕。
   /// 任何失败都只记日志/提示，绝不影响视频播放（§10.4）。
   Future<void> _configureSubtitles() async {
+    // 本集用户显式选过内嵌字幕轨，且那条轨真的在当前容器里：不再自动挂外挂字幕。
+    // 两条路径都调 setSubtitleTrack，后到的会顶掉先到的，用户的选择不能赌时序。
+    if (_hasResolvableRememberedSubtitle()) {
+      widget.state.log.info('本集记过内嵌字幕，跳过自动挂载外挂字幕', scope: 'subtitle');
+      return;
+    }
     final subtitles = _request.subtitles;
     if (subtitles.isEmpty) {
       await _autoMatchSubtitle();
@@ -945,6 +971,20 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         scope: 'subtitle',
       );
     }
+  }
+
+  /// 本集记住的内嵌字幕轨是否仍能在当前容器的轨道表里匹配到。
+  ///
+  /// 只判「可命中」而不是「有记录」：记录还在但这条轨已不存在时，外挂默认字幕
+  /// 仍是用户唯一能得到的字幕，不该被跳掉。
+  bool _hasResolvableRememberedSubtitle() {
+    final choice = _rememberedTrackChoices[PlayerTrackSlot.subtitle];
+    if (choice == null) return false;
+    return matchTrackChoice(
+          tracks: _controller.embeddedSubtitleTrackInfos,
+          choice: choice,
+        ) !=
+        null;
   }
 
   /// 构造字幕查询（标题优先用片名，季集优先用 TMDB 身份）。
@@ -1772,6 +1812,167 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   /// 字幕菜单：外挂 / 内嵌 / 关闭（§13.3「字幕可开启和关闭」）。
   // --------------------------------------------------- Phase 9 播放面板
 
+  /// 重读本集（含线路）记住的轨道选择。
+  ///
+  /// 线路用 [PlaybackRequest.playbackFlag]：那才是用户此刻在看的线路，
+  /// 与历史记录写入的口径是同一个值。
+  void _loadRememberedTrackChoices() {
+    _rememberedTrackChoices.clear();
+    _appliedTrackChoices.clear();
+    _lastTriedTrackIds.clear();
+    for (final slot in PlayerTrackSlot.values) {
+      final choice = widget.state.playerTrackChoiceFor(
+        slot: slot,
+        siteKey: _request.siteKey,
+        vodId: _request.vodId,
+        flag: _request.playbackFlag,
+        episodeId: _request.episodeTarget,
+        episodeName: _request.episodeName,
+      );
+      if (choice != null) _rememberedTrackChoices[slot] = choice;
+    }
+  }
+
+  /// 轨道表就绪后应用记住的选择，每个槽真正命中一次就停。
+  ///
+  /// 挂在控制器通知里而不是 `_load()` 之后：轨道表由引擎在 `open()` 内部
+  /// 上报，直播/慢源会晚于 `_load()` 返回。
+  ///
+  /// 「标记已应用」必须等 [applyTrackChoice] 真的命中并调用了 setTrack：
+  /// 首帧只有 `auto` 这类伪轨时表非空但匹配必落空，提前标记会让该槽永久
+  /// 失去重试机会。未命中时靠 [shouldAttemptTrackChoice] 去重，同样的轨道
+  /// 集合只尝试一次（不重复 set、也不刷日志）。
+  void _applyRememberedTrackChoices() {
+    _scheduleTrackChoice(
+      slot: PlayerTrackSlot.audio,
+      tracks: _controller.audioTrackInfos,
+      setTrack: _controller.selectAudioTrack,
+    );
+    _scheduleTrackChoice(
+      slot: PlayerTrackSlot.video,
+      tracks: _controller.videoTrackInfos,
+      setTrack: _controller.selectVideoTrack,
+    );
+    _scheduleTrackChoice(
+      slot: PlayerTrackSlot.subtitle,
+      tracks: _controller.embeddedSubtitleTrackInfos,
+      setTrack: (id) async {
+        final option = _embeddedSubtitleOption(id);
+        if (option == null) return false;
+        return _controller.selectSubtitle(
+          option,
+          headers: _request.subtitleHeaders,
+        );
+      },
+    );
+  }
+
+  /// 单个槽的「值得尝试吗 → 尝试 → 命中才标记」。
+  void _scheduleTrackChoice({
+    required PlayerTrackSlot slot,
+    required List<PlayerTrackInfo> tracks,
+    required Future<bool> Function(String id) setTrack,
+  }) {
+    final choice = _pendingTrackChoice(slot);
+    if (choice == null) return;
+    final ids = <String>[for (final track in tracks) track.id];
+    if (!shouldAttemptTrackChoice(
+      currentIds: ids,
+      lastTriedIds: _lastTriedTrackIds[slot],
+    )) {
+      return;
+    }
+    _lastTriedTrackIds[slot] = ids;
+    unawaited(
+      _applyRememberedTrackChoice(
+        slot: slot,
+        tracks: tracks,
+        choice: choice,
+        setTrack: setTrack,
+      ).then((hit) {
+        if (!hit || !mounted) return;
+        _appliedTrackChoices.add(slot);
+        _lastTriedTrackIds.remove(slot);
+      }),
+    );
+  }
+
+  /// 还没应用过的记忆；已应用过或本来没有记忆都返回 null。
+  TrackChoice? _pendingTrackChoice(PlayerTrackSlot slot) {
+    if (_appliedTrackChoices.contains(slot)) return null;
+    return _rememberedTrackChoices[slot];
+  }
+
+  SubtitleOption? _embeddedSubtitleOption(String id) {
+    for (final option in _controller.embeddedOptions) {
+      if (option.id == id) return option;
+    }
+    return null;
+  }
+
+  /// 应用一条记忆并留一条日志，返回是否真正命中并调用了 setTrack。
+  ///
+  /// 全程静默：未命中就保持引擎默认，不弹窗、不打断播放（用户明确要求）。
+  /// 返回值就是 [applyTrackChoice] 的语义，调用方只在该值为 true 时把槽标记
+  /// 为「已应用」——未命中必须留着重试的机会。
+  Future<bool> _applyRememberedTrackChoice({
+    required PlayerTrackSlot slot,
+    required List<PlayerTrackInfo> tracks,
+    required TrackChoice choice,
+    required Future<bool> Function(String id) setTrack,
+  }) async {
+    final hit = await applyTrackChoice(
+      tracks: tracks,
+      choice: choice,
+      setTrack: (id) {
+        widget.state.log.info('恢复记住的${slot.label} id=$id', scope: 'player');
+        return setTrack(id);
+      },
+    );
+    if (hit) return true;
+    widget.state.log.info(
+      '记住的${slot.label}未命中（id=${choice.engineId} '
+      'language=${choice.language} title=${choice.title}），保持引擎默认',
+      scope: 'player',
+    );
+    return false;
+  }
+
+  /// 用户**显式**选择后写回记忆。自动回落的结果绝不走这里。
+  void _rememberTrackChoice(PlayerTrackSlot slot, String id) {
+    final infos = switch (slot) {
+      PlayerTrackSlot.audio => _controller.audioTrackInfos,
+      PlayerTrackSlot.video => _controller.videoTrackInfos,
+      PlayerTrackSlot.subtitle => _controller.embeddedSubtitleTrackInfos,
+    };
+    // 菜单 id 与引擎原文分开：label 拼过语言/序号，只有原文能做 title 回落。
+    var choice = TrackChoice(engineId: id);
+    for (final info in infos) {
+      if (info.id != id) continue;
+      choice = TrackChoice(
+        engineId: id,
+        language: info.language,
+        title: info.title,
+      );
+      break;
+    }
+    widget.state.rememberPlayerTrackChoice(
+      slot: slot,
+      siteKey: _request.siteKey,
+      vodId: _request.vodId,
+      flag: _request.playbackFlag,
+      episodeId: _request.episodeTarget,
+      episodeName: _request.episodeName,
+      choice: choice,
+    );
+    // 记在同一页里，避免同一集内重开（换线路再换回来）时读到旧内存。
+    _rememberedTrackChoices[slot] = choice;
+    // 用户刚选过，本集不必再应用记忆；顺手清掉该槽的试错记录，
+    // 免得残留的「上次试过哪些 id」让后续判断读到过期状态。
+    _appliedTrackChoices.add(slot);
+    _lastTriedTrackIds.remove(slot);
+  }
+
   /// 音轨/视频轨选择。单轨时只提示，不弹一个点不出东西的菜单。
   Future<void> _showTrackMenu(PlayerTrackKind kind) async {
     final options = kind == PlayerTrackKind.audio
@@ -1819,6 +2020,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       return;
     }
     widget.state.log.info('切换${kind.label} id=$selected', scope: 'player');
+    _rememberTrackChoice(
+      kind == PlayerTrackKind.audio
+          ? PlayerTrackSlot.audio
+          : PlayerTrackSlot.video,
+      selected,
+    );
     setState(() {});
   }
 
@@ -2079,6 +2286,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         '字幕已切换 sub=${selected.label} kind=${selected.kind.name}',
         scope: 'subtitle',
       );
+      // 只记内嵌轨：外挂/本地/网络字幕随集变化，由 `SubtitleMatchRecord` 另管。
+      if (!selected.isExternal && selected.id != SubtitleOption.offId) {
+        _rememberTrackChoice(PlayerTrackSlot.subtitle, selected.id);
+      }
       return;
     }
     widget.state.log.warning(

@@ -7,6 +7,9 @@
 /// 当前保存：
 /// - `lastSiteKey`：**最近一次使用的站点**；
 /// - `videoFitModes`：按 `siteKey + vodId` 记住播放器画面模式；
+/// - `trackChoices`：按 `站点 + 影片 + 线路 + 集 + 槽` 记住用户选过的
+///   音轨/视频轨/内嵌字幕轨（键由 `core/player_tracks.dart` 的
+///   `trackChoiceKey` 统一拼装，上限 500 条）；
 /// - `themeMode`：**主题模式**（`dark` / `light` / `system`）；
 /// - `searchKeywords`：**搜索历史**（去重、最新在前，上限 10；
 ///   对齐上游安卓「默影视」`Setting.getKeyword/putKeyword` + `RecordAdapter`
@@ -48,6 +51,7 @@ import '../core/live_settings.dart';
 import '../core/subtitle_settings.dart';
 import '../core/osd_config.dart';
 import '../core/player_buttons.dart';
+import '../core/player_tracks.dart';
 import '../core/outbound_proxy.dart';
 import '../core/parse_failover.dart';
 import '../core/player_options.dart';
@@ -88,6 +92,9 @@ class UiPreferencesStore {
 
   String _lastSiteKey = '';
   final Map<String, String> _videoFitModes = {};
+
+  /// 记住的轨道选择，键由 `trackChoiceKey` 拼装（本层不认识站点/线路语义）。
+  final Map<String, TrackChoice> _trackChoices = {};
 
   /// 用户**显式选过**的主题模式；`null` = 从未选过。
   ///
@@ -177,6 +184,10 @@ class UiPreferencesStore {
 
   /// 搜索历史上限（上游安卓 `RecordAdapter.checkToAdd` 同为 10）。
   static const int _maxSearchKeywords = 10;
+
+  /// 轨道记忆上限。按剧集维度记（每集每槽一条），电影+长剧很快就会过百，
+  /// 500 条足够覆盖真实使用，又不至于让 settings.json 无界膨胀。
+  static const int _maxTrackChoices = 500;
 
   /// 相似度默认值：与上游 `Setting.getSearchSimilarity()` 默认 30 一致。
   static const int _defaultSimilarity = 30;
@@ -333,6 +344,9 @@ class UiPreferencesStore {
   String videoFitMode({required String siteKey, required String vodId}) =>
       _videoFitModes[_videoFitKey(siteKey, vodId)] ?? '';
 
+  /// 读取某个记忆键下的轨道选择；没有记录返回 null。
+  TrackChoice? trackChoice(String key) => _trackChoices[key];
+
   /// 从磁盘读取。文件不存在或解析失败时保持默认值并记日志（不阻塞启动）。
   Future<void> load() async {
     try {
@@ -365,6 +379,17 @@ class UiPreferencesStore {
                 _videoFitModes[entry.key as String] = entry.value as String;
               }
             }
+          }
+          // 轨道记忆：只接受有 id 的记录，手改文件写坏的条目直接丢弃。
+          final choices = ui['trackChoices'];
+          if (choices is Map) {
+            for (final entry in choices.entries) {
+              if (entry.key is! String) continue;
+              final choice = TrackChoice.fromJson(entry.value);
+              if (choice != null) _trackChoices[entry.key as String] = choice;
+            }
+            // 手改文件可能塞进超量条目，恢复时同样按上限裁剪。
+            _trimTrackChoices();
           }
           final keywords = ui['searchKeywords'];
           if (keywords is List) {
@@ -522,6 +547,23 @@ class UiPreferencesStore {
     if (_videoFitModes.length > 200) {
       _videoFitModes.remove(_videoFitModes.keys.first);
     }
+    return _persist();
+  }
+
+  /// 记住一次显式轨道选择。
+  ///
+  /// 只允许用户显式选择调用：自动回落的结果写进来，一次失配就会把用户的
+  /// 选择永久冲掉。与 `rememberVideoFitMode` 一样，写盘失败**不影响**当前
+  /// 会话（内存里已生效），只记日志。
+  Future<bool> rememberTrackChoice(String key, TrackChoice choice) {
+    final normalized = key.trim();
+    if (normalized.isEmpty || choice.isEmpty) return Future.value(true);
+    if (_trackChoices[normalized] == choice) return Future.value(true);
+    // 先删再插：Map 的迭代顺序就是插入顺序，重选要把这条挪到队尾，
+    // 否则它会被当成"最旧的"在下一次裁剪时丢掉。
+    _trackChoices.remove(normalized);
+    _trackChoices[normalized] = choice;
+    _trimTrackChoices();
     return _persist();
   }
 
@@ -802,6 +844,13 @@ class UiPreferencesStore {
   String _videoFitKey(String siteKey, String vodId) =>
       '${siteKey.trim()}\\n${vodId.trim()}';
 
+  /// 偏好是缓存，不允许无限增长：超出上限按插入顺序丢最旧的。
+  void _trimTrackChoices() {
+    while (_trackChoices.length > _maxTrackChoices) {
+      _trackChoices.remove(_trackChoices.keys.first);
+    }
+  }
+
   /// 写盘队列尾：串行化所有 `_persist` 调用。
   ///
   /// 为什么必须串行：`_persist` 是「写 tmp → 删旧 → 改名」三步，并发时两个
@@ -836,6 +885,12 @@ class UiPreferencesStore {
       mutate: (root) {
         final ui = <String, Object?>{'lastSiteKey': _lastSiteKey};
         if (_videoFitModes.isNotEmpty) ui['videoFitModes'] = _videoFitModes;
+        if (_trackChoices.isNotEmpty) {
+          ui['trackChoices'] = <String, Object?>{
+            for (final entry in _trackChoices.entries)
+              entry.key: entry.value.toJson(),
+          };
+        }
         // 只有用户显式选过才写：缺席 = 默认，避免把默认值固化进文件。
         final mode = _themeMode;
         if (mode != null) ui['themeMode'] = mode;
