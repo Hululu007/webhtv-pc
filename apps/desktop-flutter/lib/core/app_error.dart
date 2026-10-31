@@ -22,6 +22,12 @@ enum AppErrorKind {
   configRepository,
   configNotFound,
 
+  /// 猫源 JS bundle 需要本机 Node 运行时，但当前进程没解析到 node。
+  ///
+  /// **只用于猫源分支**：普通 JSON / T4 配置不依赖 Node，不得用本类拒绝导入
+  /// （2026-10-31 用户截图的缺陷就是把这个缺失提前套在全部导入上）。
+  configCatRuntimeMissing,
+
   // 站点与协议
   siteUnsupported,
   siteNetwork,
@@ -160,6 +166,8 @@ String describeErrorKind(AppErrorKind kind) {
       return '配置仓库展开失败';
     case AppErrorKind.configNotFound:
       return '配置文件不存在或无法读取';
+    case AppErrorKind.configCatRuntimeMissing:
+      return '猫源配置需要 Node.js 运行时：普通 JSON / T4 配置无需 Node';
     case AppErrorKind.siteUnsupported:
       return '站点运行时未安装或未支持';
     case AppErrorKind.siteNetwork:

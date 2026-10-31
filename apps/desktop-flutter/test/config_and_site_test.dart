@@ -81,6 +81,33 @@ void main() {
       await temp.delete(recursive: true);
     });
 
+    test('猫源 bundle 缺 Node 运行时只挡猫源，普通配置照常导入', () async {
+      // 用户实测 2026-10-31：没有解析到 node 时，连 T4 的 http JSON 配置都被
+      // 「未检测到 Node 运行时，无法导入配置」挡住。门禁现在只留在猫源分支。
+      expect(
+        importService.catResolver,
+        isNull,
+        reason: '本用例刻意不注入 catResolver，模拟未安装 Node 的机器',
+      );
+
+      final bundle = await _capture(
+        () => importService.import(
+          ConfigSource.parse('${server.baseUrl}/cat/index.js.md5'),
+        ),
+      );
+      expect(bundle.kind, AppErrorKind.configCatRuntimeMissing);
+      expect(
+        describeErrorKind(AppErrorKind.configCatRuntimeMissing),
+        contains('Node'),
+      );
+
+      // 同一台机器上，普通 http JSON 配置必须照常导入。
+      final plain = await importService.import(
+        ConfigSource.parse(configFor('/api/type1/')),
+      );
+      expect(plain.config!.sites, isNotEmpty);
+    });
+
     test('gzip 传输编码与 UTF-8 BOM 都能导入', () async {
       final gz = await importService.import(
         ConfigSource.parse('${server.baseUrl}/api/gzip'),

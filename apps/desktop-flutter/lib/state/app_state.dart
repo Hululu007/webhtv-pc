@@ -274,8 +274,12 @@ class AppState extends ChangeNotifier implements SyncStateHost {
         runtime: _catRuntime!,
         log: this.log,
       );
-      _importService = ConfigImportService(catResolver: _catPipeline!.resolve);
     }
+    // 导入门面**始终**创建：Node 只服务猫源 bundle 那一条分支（见
+    // `ConfigImportService.import`），普通 JSON / T4 配置完全不依赖 Node。
+    // 曾经这里跟着 `node != null` 一起创建，于是没有 Node 的机器连普通配置都
+    // 被「未检测到 Node 运行时」挡在解析之前（2026-10-31 用户实测）。
+    _importService = ConfigImportService(catResolver: _catPipeline?.resolve);
     _router = SpiderRouter(
       client: _httpClient,
       globalHeaders: const [],
@@ -299,15 +303,12 @@ class AppState extends ChangeNotifier implements SyncStateHost {
   /// 猫源 Node 运行时；未安装 Node 时为 null（UI 如实报错，不静默跳过）。
   CatNodeRuntime? _catRuntime;
 
-  /// 猫源导入门面；未安装 Node 时为 null。
+  /// 猫源导入门面；未安装 Node 时为 null（导入门面据此退化为「无猫源分支」）。
   CatImportPipeline? _catPipeline;
 
-  /// 配置导入门面；未安装 Node 时为 null。
-  ///
-  /// 为什么可空而不是 `late final`：`late final` 在「从未初始化」时读一次就抛
-  /// `LateInitializationError`，而 `dispose()` 会无条件读它——没有 Node 的机器
-  /// 或单元测试环境里，退出应用会因此崩掉（先前测试只捕获了「读到才崩」）。
-  ConfigImportService? _importService;
+  /// 配置导入门面。构造时**无条件**创建——只有猫源 bundle 需要 Node，
+  /// 普通 JSON / T4 配置直接走 HTTP 抓取或本地文件读取。
+  late final ConfigImportService _importService;
   late HttpApiClient _httpClient = HttpApiClient();
 
   /// 构造时注入的原始 HTTP 客户端（测试/诊断）。见 `_applyOutboundProxy`。
@@ -2589,14 +2590,9 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     notifyListeners();
 
     try {
+      // 这里**不再**做 Node 运行时门禁：缺 Node 只影响猫源 bundle，由
+      // `ConfigImportService.import` 在猫源分支上单独报 configCatRuntimeMissing。
       final importService = _importService;
-      if (importService == null) {
-        throw AppError(
-          AppErrorKind.configInvalid,
-          '未检测到 Node 运行时，无法导入配置',
-          detail: '请安装 Node.js 后重启应用',
-        );
-      }
       final source = ConfigSource.parse(input);
       var imported = await importService.import(source);
       var repositoryIndex = 0;
@@ -4919,7 +4915,7 @@ class AppState extends ChangeNotifier implements SyncStateHost {
     _followingKickTimer?.cancel();
     _followingService = null;
     _router.dispose();
-    _importService?.close();
+    _importService.close();
     _liveService?.close();
     _epgService?.close();
     _tmdbService.close();

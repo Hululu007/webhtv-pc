@@ -406,8 +406,9 @@ class ConfigImportService {
 
   final ConfigLoader _loader;
 
-  /// 猫源解析钩子（§9 猫源 bundle）。未注入时猫源地址走常规抓取，会因 32 字节
-  /// md5 不是 JSON 而明确报错，而不是静默失败。
+  /// 猫源解析钩子（§9 猫源 bundle）。未注入（本机没有 Node）时猫源地址在
+  /// 解析前就报 [AppErrorKind.configCatRuntimeMissing]，而不是把 32 字节 md5
+  /// 当配置去解析、再把「不是有效 JSON」摆在用户面前。
   final CatConfigResolver? catResolver;
 
   void close() => _loader.close();
@@ -417,23 +418,39 @@ class ConfigImportService {
   /// 返回的 [ImportedConfig] 若 `isRepository` 为真，调用方应让用户选择条目，
   /// 或直接使用 [ImportedConfig.repositoryEntries] 的第一项作为默认（§7.4.2）。
   ///
-  /// 猫源 bundle 地址（`.../index.js.md5`、`.../index.js`）先经 [_catResolver] 在本机
+  /// 猫源 bundle 地址（`.../index.js.md5`、`.../index.js`）先经 [catResolver] 在本机
   /// 跑起 bundle 并读 `/config`，再进同一套解析路径；`origin` 保留**原始猫源地址**，
-  /// 以便重启后按同一地址重新拉起 bundle。
+  /// 以便重启后按同一地址重新拉起 bundle。非猫源地址不碰 Node。
   Future<ImportedConfig> import(ConfigSource source) async {
-    final resolver = catResolver;
-    if (resolver != null && CatSource.isBundle(source.value)) {
-      final resolved = await resolver(source.value);
-      if (resolved != null) {
-        final document = parseConfigDocument(resolved.configJson);
-        return ImportedConfig(
-          origin: source.value,
-          document: document,
-          fetchedAt: DateTime.now(),
-          contentType: 'application/json',
-          catRuntimeOrigin: resolved.origin,
+    if (CatSource.isBundle(source.value)) {
+      // 猫源分支是唯一需要 Node 的路径：只有这里才拦「没有运行时」。
+      final resolver = catResolver;
+      if (resolver == null) {
+        throw AppError(
+          AppErrorKind.configCatRuntimeMissing,
+          '未检测到 Node 运行时，无法导入猫源',
+          detail: '该地址是猫源 JS bundle（index.js / index.js.md5）；'
+              '普通 JSON / T4 配置无需 Node，猫源请安装 Node.js 后重启应用',
         );
       }
+      final resolved = await resolver(source.value);
+      if (resolved == null) {
+        // 运行时在，但没拿到配置：这是猫源自身的问题，不是「缺 Node」。
+        throw AppError(
+          AppErrorKind.configInvalid,
+          '猫源 bundle 未返回配置',
+          detail: redactUrl(source.value),
+          retryable: true,
+        );
+      }
+      final document = parseConfigDocument(resolved.configJson);
+      return ImportedConfig(
+        origin: source.value,
+        document: document,
+        fetchedAt: DateTime.now(),
+        contentType: 'application/json',
+        catRuntimeOrigin: resolved.origin,
+      );
     }
     final fetched = await _loader.fetch(source);
     final document = parseConfigDocument(fetched.text);
