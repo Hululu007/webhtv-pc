@@ -1997,6 +1997,10 @@ fixture 只能证明解析逻辑正确，不能证明现实站点可用。必须
 - 主程序。
 - 选定播放器引擎及所需 native 库。
 - 按需下载或内置的 JS/Python/JVM sidecar。
+- Windows 发行包**自带 Node 运行时**：`<exe 同级>/runtime/node/node.exe`（官方 LTS v22.23.4，
+  打包时由 `scripts/package_windows.ps1` 下载并按官方 `SHASUMS256.txt` 校验 SHA-256，
+  缓存于开发机 `.local/nodejs/<version>/node.exe`），用户无需自行安装 Node。
+  Python/JVM 仅随包宿主入口脚本，对应站源仍需本机安装 Python 3 / JDK 17+。
 - 默认不打包站点源。
 - 默认不打包用户配置。
 - 许可证、第三方 NOTICE 和动态库版本清单。

@@ -17,6 +17,7 @@ import 'package:path/path.dart' as p;
 import '../core/ipc_protocol.dart';
 import 'jar_intake.dart';
 import 'log_service.dart';
+import 'node_runtime.dart';
 import 'spider_process.dart';
 
 /// 一个已发现的本地 Spider。
@@ -635,19 +636,12 @@ class LocalSpiderCommand {
     return first;
   }
 
-  /// 查找本机 Node。返回 null 表示未安装，UI 必须提示而不是静默跳过。
-  static SidecarCommand? _nodeCommand() {
-    final names = Platform.isWindows ? ['node.exe', 'node'] : ['node'];
-    for (final name in names) {
-      for (final dir in platformSearchDirs()) {
-        final candidate = p.join(dir, name);
-        if (File(candidate).existsSync()) {
-          return SidecarCommand(executable: candidate, arguments: const []);
-        }
-      }
-    }
-    return null;
-  }
+  /// 查找 Node 运行时（内置优先、PATH 兜底）。
+  ///
+  /// 候选顺序由 [NodeRuntimeResolver] 独占：发行包随包内置 `runtime/node/node.exe`，
+  /// 这里若再写一份 PATH 查找，内置运行时就会被绕过。返回 null 表示确实找不到，
+  /// UI 必须提示而不是静默跳过。
+  static SidecarCommand? _nodeCommand() => NodeRuntimeResolver.resolve();
 
   /// 查找本机 Python。返回 null 表示未安装（或候选全部启动失败），
   /// UI 必须提示而不是静默跳过。

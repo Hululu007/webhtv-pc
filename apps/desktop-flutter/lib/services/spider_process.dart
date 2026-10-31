@@ -25,6 +25,7 @@ import '../core/http_api.dart';
 import '../core/ipc_protocol.dart';
 import '../core/protocol.dart';
 import 'log_service.dart';
+import 'node_runtime.dart';
 import 'windows_job.dart';
 
 /// 启动参数。
@@ -1058,16 +1059,9 @@ class SidecarRuntimeResolver {
       return _resolvePython();
     }
     if (normalized.startsWith('node')) {
-      // Windows 上可执行文件是 `node.exe`；只找 `node` 会永远落空（§9.8）。
-      final node = _resolveFromPath(
-        Platform.isWindows ? 'node.exe' : 'node',
-      );      if (node != null) {
-        return SidecarCommand(executable: node, arguments: const []);
-      }
-      final fallback = _resolveFromPath('node');
-      return fallback == null
-          ? null
-          : SidecarCommand(executable: fallback, arguments: const []);
+      // 内置优先、PATH 兜底：候选顺序只由 [NodeRuntimeResolver] 决定，这里不再
+      // 自己遍历 PATH（否则两份实现分叉时「内置 node 已随包发」会被悄悄绕过）。
+      return NodeRuntimeResolver.resolve();
     }
     // 允许直接给出可执行文件路径（测试与本地调试）。
     if (runtime.contains(Platform.pathSeparator) ||

@@ -428,9 +428,11 @@ class ConfigImportService {
       if (resolver == null) {
         throw AppError(
           AppErrorKind.configCatRuntimeMissing,
-          '未检测到 Node 运行时，无法导入猫源',
-          detail: '该地址是猫源 JS bundle（index.js / index.js.md5）；'
-              '普通 JSON / T4 配置无需 Node，猫源请安装 Node.js 后重启应用',
+          '未检测到随包 Node 运行时，无法导入猫源',
+          detail: '该地址是猫源 JS bundle（index.js / index.js.md5）；普通 JSON / T4 '
+              '配置无需 Node。发行包自带 Node，缺失说明安装不完整：请重新下载/重新'
+              '解压完整发行包（应含 runtime\\node\\node.exe），或用环境变量 '
+              'WEBHTV_NODE_RUNTIME 指定 node.exe 的绝对路径后重启应用',
         );
       }
       final resolved = await resolver(source.value);

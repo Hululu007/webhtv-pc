@@ -1335,7 +1335,8 @@ ui/app.dart:760  state.siteItems.isEmpty        ← build 里同步求值
 Win-box 走的是**相反**的方向：它把嵌入式 CPython 3.11.6 与
 `requests 2.31.0 / lxml 4.9.2 / pycryptodome 3.19.1` **随包分发**
 （`resources/python/`），用户机器上是什么解释器与它无关。
-本项目不随包分发解释器（`windows-release.yml` 明确不捆绑 Python/Node/JDK 运行时），
+本项目不随包分发 **Python** 解释器（`windows-release.yml` 明确不捆绑 Python / JDK 运行时；
+Node 运行时随包内置在 `runtime/node/node.exe`，但本节的 Python 供给与它无关），
 所以只能走「选本机已带依赖的解释器 → 否则自己建 venv」这条路——
 这是**同一问题的两种解法**：Win-box 用体积换确定性，本项目用首启一次性的
 venv 创建换包体积。可借鉴的仍是它的**参数自适应**思想

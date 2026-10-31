@@ -67,7 +67,7 @@ WebHTV-PC-<version>[-beta]-windows-x64/
 
 说明：
 
-- 只带 sidecar **宿主脚本**，不捆绑 Python / Node / JDK；对应站源需要本机安装运行时，缺失时应用按现有逻辑提示「运行时未安装」。
+- 只带 sidecar **宿主脚本**；**Node 运行时随包内置**（`runtime/node/node.exe`）；Python / JDK 不随包，对应站源需要本机安装，缺失时应用按现有逻辑提示「运行时未安装」。
 - 不带站点源、用户配置、日志、测试 fixture；`sidecars/*/manifests`、`sidecars/*/spiders` 是测试 fixture，不入包。
 - `THIRD_PARTY.txt` 列出主程序/动态库/sidecar 宿主的 SHA-256 与可获得的 FileVersion；第三方许可见 `data/flutter_assets/NOTICES.Z`。
 - 用户数据仍在 `%APPDATA%\webhtv-pc` 与 `%LOCALAPPDATA%\webhtv-pc`，替换解压目录即完成升级。
@@ -148,5 +148,5 @@ Get-FileHash (Get-ChildItem dist/*.zip | Select-Object -First 1).FullName -Algor
 - **无自动更新**：`docs/phase9/README.md` P2-7 明确更新需要签名通道与 ADR，本轮不生成更新清单。
 - **仅 Windows**：仓库只有 `apps/desktop-flutter/windows/` 平台工程；Linux/macOS 需要先补平台工程与 native 依赖验证。
 - **不跑集成测试**：需要真实窗口、播放器与 fixture 媒体，仍由 `tools/phase*` 的本地验收脚本覆盖。
-- **不捆绑运行时**：Python / Node / JDK 由用户自备，缺失时如实提示。
+- **Node 随包、Python/JDK 需本机**：Node 运行时内置在 `runtime/node/node.exe`，无需用户安装；Python / JDK 由用户自备，缺失时如实提示。
 - **CI 成本**：单测约 13 分钟；默认只在 `main`/PR/手动触发。需要覆盖 `dev*` 推送时，在 `windows-ci.yml` 的 `on.push.branches` 加一项即可。

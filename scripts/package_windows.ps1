@@ -45,7 +45,13 @@ param(
 
     [string]$NotesFile = '',
 
-    [string]$RepoRoot = ''
+    [string]$RepoRoot = '',
+
+    # 发行包内置的 Node 运行时（Windows x64 node.exe）。官方 LTS：v22.23.4（Jod）。
+    [string]$NodeVersion = 'v22.23.4',
+
+    # 离线/CI 旁路：直接指定已存在的 node.exe 所在目录，跳过下载与校验。
+    [string]$NodeRuntimeDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +60,89 @@ $ProgressPreference = 'SilentlyContinue'
 
 function Fail([string]$Message) {
     throw "打包失败：$Message"
+}
+
+# 解析随包 node.exe：优先 -NodeRuntimeDir，其次校验通过的 .local 缓存，最后从 nodejs.org
+# 下载并按官方 SHASUMS256.txt 校验 SHA-256（并回写 .sha256 旁路文件）。命中缓存也校验，
+# 任何一步拿不到可信文件都 Fail，绝不产出降级包。
+function Resolve-NodeRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$CachePath,
+        [string]$RuntimeDir = ''
+    )
+
+    $nodeFileName = 'node.exe'
+
+    if (-not [string]::IsNullOrWhiteSpace($RuntimeDir)) {
+        $explicit = Join-Path $RuntimeDir $nodeFileName
+        if (-not (Test-Path -LiteralPath $explicit -PathType Leaf)) {
+            Fail "NodeRuntimeDir 下找不到 $nodeFileName：$explicit"
+        }
+        Write-Host "使用指定的 Node 运行时：$explicit"
+        return (Resolve-Path -LiteralPath $explicit).Path
+    }
+
+    $cacheSumPath = "$CachePath.sha256"
+
+    # 命中缓存也必须校验：缓存里的 node.exe 是 83 MiB 外部二进制，可能被中断的下载、杀毒
+    # 软件或磁盘错误损坏。只有与随缓存保存的官方 sha256 一致才复用，否则按坏文件丢弃，
+    # 回落到下面的下载 + 官方 SHASUMS256.txt 校验流程（这是唯一的联网点）。
+    if (Test-Path -LiteralPath $CachePath -PathType Leaf) {
+        $cachedActual = (Get-FileHash -LiteralPath $CachePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $cachedExpected = ''
+        if (Test-Path -LiteralPath $cacheSumPath -PathType Leaf) {
+            $cachedExpected = ((Get-Content -LiteralPath $cacheSumPath -First 1) -replace '\s', '').ToLowerInvariant()
+        }
+        if ($cachedExpected -ne '' -and $cachedExpected -eq $cachedActual) {
+            Write-Host "复用已缓存的 Node 运行时：$CachePath（sha256 校验通过：$cachedActual）"
+            return $CachePath
+        }
+        $shownExpected = if ($cachedExpected -eq '') { '<缺失>' } else { $cachedExpected }
+        Write-Host "缓存 sha256 不匹配（期望 $shownExpected，实际 $cachedActual），已丢弃缓存并重新下载"
+        Remove-Item -LiteralPath $CachePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $cacheSumPath -Force -ErrorAction SilentlyContinue
+    }
+
+    $distBase = "https://nodejs.org/dist/$Version"
+    $sumsUrl = "$distBase/SHASUMS256.txt"
+    $nodeUrl = "$distBase/win-x64/$nodeFileName"
+
+    Write-Host "下载 Node 运行时清单：$sumsUrl"
+    $sums = (Invoke-WebRequest -Uri $sumsUrl -UseBasicParsing).Content
+    $expected = $null
+    foreach ($line in ($sums -split "`n")) {
+        $parts = ($line.Trim() -split '\s+')
+        if ($parts.Count -ge 2 -and $parts[1] -eq "win-x64/$nodeFileName") {
+            $expected = $parts[0]
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($expected)) {
+        Fail "官方 SHASUMS256.txt 中没有 win-x64/$nodeFileName 条目：$sumsUrl"
+    }
+    $expected = $expected.ToLowerInvariant()
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $CachePath) | Out-Null
+    $partial = "$CachePath.part"
+    if (Test-Path -LiteralPath $partial) {
+        Remove-Item -LiteralPath $partial -Force
+    }
+
+    Write-Host "下载 Node $Version：$nodeUrl"
+    Invoke-WebRequest -Uri $nodeUrl -OutFile $partial -UseBasicParsing
+
+    $actual = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+        Fail "Node 运行时 SHA-256 校验失败（期望 $expected，实际 $actual）：$nodeUrl。已删除下载的坏文件，请重试。"
+    }
+
+    Move-Item -LiteralPath $partial -Destination $CachePath -Force
+    # 与缓存并列保存官方 sha256（一行小写 hex），供下次命中缓存时离线校验。
+    Set-Content -LiteralPath $cacheSumPath -Value $actual -NoNewline -Encoding ascii
+    Write-Host "Node 运行时校验通过：sha256=$actual"
+    return $CachePath
 }
 
 if (-not $IsWindows) {
@@ -118,6 +207,14 @@ foreach ($relative in $sidecarFiles) {
     }
 }
 
+# Node 运行时：Windows 发行包随包内置 node.exe（用户无需自备 Node）。
+if ($NodeVersion -notmatch '^v\d+\.\d+\.\d+$') {
+    Fail "非法 Node 版本号 '$NodeVersion'，期望 vX.Y.Z（如 v22.23.4）。"
+}
+$nodeCachePath = Join-Path (Join-Path (Join-Path $RepoRoot '.local\nodejs') $NodeVersion) 'node.exe'
+$nodeExeSource = Resolve-NodeRuntime -Version $NodeVersion -CachePath $nodeCachePath -RuntimeDir $NodeRuntimeDir
+$nodeRelativePath = 'runtime/node/node.exe'
+
 $suffix = switch ($Channel) {
     'beta' { '-beta' }
     'dev' { '-dev' }
@@ -164,7 +261,17 @@ try {
         Copy-Item -LiteralPath (Join-Path $RepoRoot $relative) -Destination $destination -Force
     }
 
-    # 3. 签名状态以 Authenticode 实测为准，不靠发布脚本开关猜。
+    # 3. 内置 Node 运行时（spider_registry.dart 在 exe 同级 runtime/node/ 下查找 node.exe）
+    $nodeDestination = Join-Path $staging $nodeRelativePath
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $nodeDestination) | Out-Null
+    Copy-Item -LiteralPath $nodeExeSource -Destination $nodeDestination -Force
+    if (-not (Test-Path -LiteralPath $nodeDestination -PathType Leaf)) {
+        Fail "随包 Node 运行时拷贝失败：$nodeRelativePath"
+    }
+    $nodeFile = Get-Item -LiteralPath $nodeDestination
+    $nodeVersionText = $nodeFile.VersionInfo.FileVersion
+
+    # 4. 签名状态以 Authenticode 实测为准，不靠发布脚本开关猜。
     $signature = Get-AuthenticodeSignature -LiteralPath (Join-Path $staging $exeName)
     $statusText = if ($signature) { $signature.Status.ToString() } else { 'UnknownError' }
     $signatureStatus = if ($statusText -eq 'Valid') {
@@ -184,7 +291,7 @@ try {
         default { "签名无效（$statusText）" }
     }
 
-    # 4. 构建信息（UTF-8 无 BOM，中文可读）
+    # 5. 构建信息（UTF-8 无 BOM，中文可读）
     $buildInfo = @"
 WebHTV PC 构建信息
 ==================
@@ -198,15 +305,17 @@ Flutter：$FlutterVersion
 程序：$exeName
 
 Sidecar 宿主（随包）：Python / Node / JVM
-- 仅包含宿主入口脚本，不捆绑解释器/运行时。
-- 对应站源需要本机安装 Python 3、Node 或 JDK 17+；缺失时应用会明确提示「运行时未安装」。
+- Node 运行时（随包内置）：$nodeRelativePath（约 $([Math]::Round($nodeFile.Length / 1MB, 1)) MiB）
+  - 打包用版本：$NodeVersion；node.exe FileVersion：$(if ([string]::IsNullOrWhiteSpace($nodeVersionText)) { '未知' } else { $nodeVersionText })
+  - 用户机器无需自行安装 Node。
+- Python 与 JVM 宿主仍只带入口脚本，不含解释器：对应站源需要本机安装 Python 3 或 JDK 17+，缺失时应用会明确提示「运行时未安装」。
 - 第三方许可见 data/flutter_assets/NOTICES.Z。
 "@
     [IO.File]::WriteAllText((Join-Path $staging 'BUILD_INFO.txt'), $buildInfo + "`n", $utf8)
 
-    # 5. 随包文件清单（动态库版本 + SHA-256；不逐项列 flutter_assets）
+    # 6. 随包文件清单（动态库版本 + SHA-256；不逐项列 flutter_assets）
     $inventory = [System.Collections.Generic.List[string]]::new()
-    $inventory.Add('随包文件清单（主程序 / 动态库 / Sidecar 宿主）')
+    $inventory.Add('随包文件清单（主程序 / 动态库 / Sidecar 宿主 / 内置 Node 运行时）')
     $inventory.Add('flutter_assets 内的资源与第三方许可不逐项列出；许可见 data/flutter_assets/NOTICES.Z。')
     $inventory.Add('')
 
@@ -223,6 +332,7 @@ Sidecar 宿主（随包）：Python / Node / JVM
     foreach ($relative in $sidecarFiles) {
         $targets.Add((Get-Item -LiteralPath (Join-Path $staging $relative)))
     }
+    $targets.Add((Get-Item -LiteralPath (Join-Path $staging $nodeRelativePath)))
 
     $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($file in ($targets | Sort-Object -Property FullName)) {
@@ -239,7 +349,7 @@ Sidecar 宿主（随包）：Python / Node / JVM
         $utf8
     )
 
-    # 6. zip（含顶层目录，解压即得可运行目录）
+    # 7. zip（含顶层目录，解压即得可运行目录）
     $zipPath = Join-Path $OutputDir $zipName
     Compress-Archive -LiteralPath $staging -DestinationPath $zipPath -CompressionLevel Optimal
     if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
@@ -247,14 +357,14 @@ Sidecar 宿主（随包）：Python / Node / JVM
     }
     $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
-    # 7. 校验文件（LF 行尾，sha256sum -c 兼容）
+    # 8. 校验文件（LF 行尾，sha256sum -c 兼容）
     [IO.File]::WriteAllText(
         (Join-Path $OutputDir 'SHA256SUMS.txt'),
         "$zipHash  $zipName`n",
         $utf8
     )
 
-    # 8. 机器可读发布元数据（供未来 updater / 分发使用；当前应用不消费）
+    # 9. 机器可读发布元数据（供未来 updater / 分发使用；当前应用不消费）
     $notes = ''
     if (-not [string]::IsNullOrWhiteSpace($NotesFile) -and (Test-Path -LiteralPath $NotesFile -PathType Leaf)) {
         $notes = (Get-Content -LiteralPath $NotesFile -Raw -Encoding utf8)
@@ -284,8 +394,18 @@ Sidecar 宿主（随包）：Python / Node / JVM
             }
         )
         runtimes    = [ordered]@{
+            # 宿主入口脚本一律随包；解释器各自是否随包看下面两项。
             bundledHosts = @('python', 'node', 'jvm')
-            requiresLocal = @('Python 3', 'Node', 'JDK 17+')
+            bundled = @(
+                [ordered]@{
+                    id          = 'node'
+                    version     = $NodeVersion
+                    path        = $nodeRelativePath
+                    sha256      = (Get-FileHash -LiteralPath (Join-Path $staging $nodeRelativePath) -Algorithm SHA256).Hash.ToLowerInvariant()
+                    fileVersion = if ([string]::IsNullOrWhiteSpace($nodeVersionText)) { $null } else { $nodeVersionText }
+                }
+            )
+            requiresLocal = @('Python 3', 'JDK 17+')
         }
         notes       = $notes
     }

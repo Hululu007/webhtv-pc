@@ -167,7 +167,10 @@ String describeErrorKind(AppErrorKind kind) {
     case AppErrorKind.configNotFound:
       return '配置文件不存在或无法读取';
     case AppErrorKind.configCatRuntimeMissing:
-      return '猫源配置需要 Node.js 运行时：普通 JSON / T4 配置无需 Node';
+      // 产品策略：发行包随包内置 Node，用户无需自己安装；缺失即安装不完整。
+      return '猫源配置未找到随包 Node 运行时（发行包自带 Node，缺失说明安装不完整：'
+          '请重新下载/解压完整发行包，或设置 WEBHTV_NODE_RUNTIME 指向 node.exe）；'
+          '普通 JSON / T4 配置无需 Node';
     case AppErrorKind.siteUnsupported:
       return '站点运行时未安装或未支持';
     case AppErrorKind.siteNetwork:

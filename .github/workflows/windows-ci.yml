@@ -57,6 +57,7 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # 仅用于 JS sidecar 测试；发行包内置的 node.exe 由 scripts/package_windows.ps1 自行下载校验。
       - name: Set up Node.js 22 (JS sidecar tests)
         uses: actions/setup-node@v4
         with:
