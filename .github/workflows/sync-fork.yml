@@ -1,0 +1,33 @@
+# 本文件需放到你 fork 仓库的： .github/workflows/sync-fork.yml
+# 全程可在 GitHub 网页操作，无需本地 git。
+# 作用：把上游(Silent1566/webhtv-pc)的所有分支同步到你的 fork(Hululu007/webhtv-pc)
+#   - 新增上游有、fork 没有的分支
+#   - 覆盖 fork 中与上游分叉的分支（beta/dev1/main 等）
+#   - 不删除 fork 独有的分支
+# 触发：① Actions 页面手动点 Run workflow；② 每天 UTC 3:17 自动跑一次
+
+name: 同步上游分支到本 fork
+
+on:
+  workflow_dispatch:        # 手动一键触发
+  schedule:
+    - cron: '17 3 * * *'    # 每天自动同步（UTC 时间，不需要可删掉这段）
+
+permissions:
+  contents: write           # 允许推送到本 fork
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取本 fork 代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 同步上游所有分支
+        run: |
+          git remote add upstream https://github.com/Silent1566/webhtv-pc.git
+          git fetch upstream
+          # 新增 + 覆盖分叉分支；如需更保守可把 --force 换成 --force-with-lease
+          git push origin 'refs/remotes/upstream/*:refs/heads/*' --force
